@@ -1,8 +1,8 @@
 # AI × Security 情报后端 MVP 设计方案
 
-> 版本：v0.1  
-> 状态：实施基线  
-> 最后更新：2026-07-28  
+> 版本：v0.2  
+> 状态：实施基线（M0 骨架 + M1.1 规则分类 已完成）  
+> 最后更新：2026-07-29  
 > 相关文档：[完整目标蓝图](./system-design.md) · [信源注册表](./source-registry.md)
 
 ## 1. 已确认的产品与技术决策
@@ -157,14 +157,21 @@ Connector：负责请求、分页、限速、游标和响应
 Parser：负责把响应映射成 NormalizedDocument
 ```
 
-第一版只实现：
+第一版实现六类 Connector：
 
 1. `RSSConnector`
 2. `RestApiConnector`
 3. `GitHubConnector`
 4. `WebListConnector`
+5. `ArxivConnector`
+6. `SitemapConnector`（Sitemap → URL 模式过滤 → 并发抓取原文 → trafilatura 抽正文）
 
 `PlaywrightConnector` 保留接口和独立运行 Profile，但不作为首批来源的默认依赖。
+
+Connector 支持两种 poll 模式：
+
+- **同步 `poll()`**：RSS / REST / GitHub / Web / arXiv，在 `run_in_executor` 中调度。
+- **异步 `apoll()`**：Sitemap，使用 `asyncio.gather + Semaphore` 并发抓取文章页，性能远优于逐篇串行。
 
 ### 5.3 Source Policy
 
@@ -208,33 +215,28 @@ MVP Source Policy 至少包含：
 - checkpoint 类型
 - 连续失败阈值
 
-### 5.4 第一批 18 个 endpoint
+### 5.4 当前已接入 14 个 endpoint（13 个 source）
 
-#### 结构化优先
+> 原计划第一批 18 个 endpoint，实际调整为 14 个。4 个 GitHub Releases endpoint（langchain/dify/ollama/vllm）因内容噪音过大已删除。
 
-1. AI HOT API/RSS
-2. OpenAI News RSS
-3. arXiv API
-4. GitHub Global Security Advisories
-5. GitHub Releases：只跟踪 Watchlist 仓库
-6. OSV API
-7. NVD API/Feed
-8. CISA KEV
-9. FIRST EPSS
+| # | Endpoint | Connector | Parser | 增量机制 |
+|---|---|---|---|---|
+| 1 | openai-news-rss | RSS | rss-default-v1 | ETag/304 |
+| 2 | cisa-kev | REST | cisa-kev-v1 | ETag/304 |
+| 3 | nvd-recent | REST | nvd-v1 | **date_params + last_success_at** |
+| 4 | anthropic-news | **Sitemap** | sitemap-article-v1 | **lastmod 增量** |
+| 5 | huggingface-blog-rss | RSS + fulltext | rss-default-v1 | ETag/304 |
+| 6 | google-security-rss | RSS | rss-default-v1 | ETag/304 |
+| 7 | trailofbits-rss | RSS | rss-default-v1 | ETag/304 |
+| 8 | portswigger-research-rss | RSS + fulltext | rss-default-v1 | ETag/304 |
+| 9 | arxiv-ai-llm | arXiv | arxiv-v1 | 304（低效） |
+| 10 | arxiv-security-ai | arXiv | arxiv-v1 | 304（低效） |
+| 11 | hackernews-rss | RSS | rss-default-v1 | ETag/304 |
+| 12 | ithome-rss | RSS | rss-default-v1 | ETag/304 |
+| 13 | google-blog-ai-rss | RSS | rss-default-v1 | ETag/304 |
+| 14 | github-trending-rss | RSS | rss-default-v1 | ETag/304 |
 
-#### 官方网页适配器
-
-10. Anthropic Newsroom
-11. Anthropic Research
-12. Google DeepMind
-13. Hugging Face Blog
-14. Qwen Blog
-15. DeepSeek API Changelog
-16. AIVD
-17. CNVD AI
-18. Microsoft Security Response Center
-
-第一批的目标是验证四类 Connector、中文/英文处理和四条内容主线，不代表最终内容覆盖完整。MITRE ATLAS、OWASP、NIST 等在 MVP 中作为低频参考数据和映射词表，不按新闻源高频轮询。
+第一批的目标是验证六类 Connector、中文/英文处理和四条内容主线，不代表最终内容覆盖完整。
 
 ## 6. 采集与处理流程
 
@@ -247,10 +249,18 @@ MVP Source Policy 至少包含：
 - `cursor`
 - `last_published_at`
 - `last_fetched_at`
+- `last_success_at`（上次成功推进的时间，用于 NVD date_params 和 Sitemap lastmod 过滤）
 - `content_hash`
 - `consecutive_failures`
 - `next_run_at`
 - `lease_until`
+
+增量过滤优先级：
+
+1. **API 级增量**（最强）：NVD `date_params` 用 `pubStartDate=last_success_at`，只请求新 CVE。Sitemap 用 `lastmod > last_success_at`，只抓新增/修改页。
+2. **known_ids 集合过滤**（M1.2 待实现）：DB 已有 `native_id` 集合，连接器跳过已知条目。时间启发只做早停优化，不做主去重。
+3. **HTTP 级增量**：ETag/304，部分源有效（CISA），部分源几乎不返回 304（arXiv）。
+4. **DB 级幂等兜底**：`ON CONFLICT DO NOTHING` on `(endpoint_id, native_id)`，保证无论如何不重复写入。
 
 处理顺序：
 
@@ -575,30 +585,30 @@ src/
     ├── api/
     ├── cli/
     ├── config/
-    ├── connectors/
-    ├── parsers/
-    ├── pipelines/
-    ├── domain/
-    ├── repositories/
-    ├── jobs/
+    ├── connectors/        FetchContext (sync get + async aget) + 6 类连接器
+    ├── parsers/           各源 Parser + normalize
+    ├── classify/          RuleClassifier + taxonomy.yaml + Classification 溯源
+    ├── pipelines/         并发 fetch stage + normalize/fulltext/classify stage
+    ├── domain/            枚举 + RawItem/NormalizedDocument/Checkpoint(含 last_success_at)
+    ├── storage/           BlobStore + repositories（租约/幂等/阶段推进/导出）
+    ├── models/            SQLAlchemy 表 + 会话
+    ├── jobs/              无状态调度 tick + self_check
     ├── delivery/
     ├── llm/
-    ├── models/
     └── main.py
 
 sources/
-├── sources.yaml
+├── sources.yaml          14 个真实 endpoint 配置
+├── taxonomy.yaml         分类规则词表
 └── parsers/
 
 tests/
 ├── fixtures/
-├── connectors/
-├── parsers/
-├── pipelines/
-├── api/
-└── integration/
+├── test_unit.py          SSRF/规范化/连接器/分类器逻辑
+├── test_smoke.py         集成冒烟
+└── integration/          真实爬取（INTEL_RUN_LIVE=1）
 
-migrations/
+migrations/               Alembic（initial schema + M1.1 classification columns）
 compose.yaml
 Dockerfile
 pyproject.toml
@@ -710,31 +720,51 @@ MVP 使用 JSON 日志和 `/health`、`/v1/sources/health`。需要跨进程指�
 
 ## 17. 实施里程碑
 
-### M0：工程骨架
+### M0：工程骨架 ✅
 
 - 建立 Python 项目、Docker Compose 和 PostgreSQL。
 - 建立领域对象、数据库迁移和配置加载。
 - 实现 `api`、`worker`、健康检查和 CLI 骨架。
 - 建立测试、Lint、类型检查和 Linux CI。
+- FetchContext 统一出口层（SSRF 双检、限速、重试、超时）。
+- 阶段化 DB 状态机（fetch → normalize → fulltext → classify）。
+- 四类 Connector + Parser（RSS / REST / GitHub / Web）真实可跑。
+- BlobStore + 二次抓取全文（fulltext stage）。
+- 12 个真实源接入。
 
-完成标准：空系统可启动、迁移、调度、查询健康状态。
+完成标准已达到：空系统可启动、迁移、调度、查询健康状态；重启不漏采、不重复写入。
 
-### M1：结构化采集
+### M1：结构化采集 ✅（部分合并到 M0）
 
 - RSS、REST API、GitHub Connector。
-- 接入前 9 个结构化 endpoint。
+- 接入前 9 个结构化 endpoint + 网页适配器。
 - Raw Item、checkpoint、幂等和采集健康。
-- 使用 Fixture 完成 Connector 测试。
+- **新增 SitemapConnector**：专为 SPA 站点设计，替换 Anthropic Web 适配器。
+- **新增 ArxivConnector**：arXiv API 搜索。
+- **新增并发 fetch pipeline**：`asyncio.gather` 最多 5 个 endpoint 同时抓取。
+- **NVD 滚动时间窗 + 增量**：`date_params` + `last_success_at`。
+- 14 个 endpoint 真实可跑。
 
-完成标准：重启不漏采、不重复写入，可查看采集历史。
+### M1.1：规则分类 ✅
+
+- RuleClassifier + taxonomy.yaml。
+- 四条主线分类（ai / ai_for_security / ai_enabled_threats / security_for_ai）。
+- 事件类型优先级（source_id → connector → CVE/GHSA → 关键词 → 默认）。
+- Classification 溯源（method / rule_version / input_hash）。
+
+### M1.2：增量优化（进行中）
+
+- 所有连接器基于 DB `known_native_ids` 集合过滤已抓条目。
+- NVD + Sitemap 已实现 API 级增量；RSS/arXiv/CISA 待改造。
+- `Checkpoint.known_ids` 传递到连接器层。
 
 ### M2：事件情报
 
 - 标准化和硬去重。
 - 近重复和事件候选。
-- 四条主线分类。
+- 四条主线分类（已有规则分类；LLM 混合分类器在 M1.3）。
 - 评分、证据等级和结构化摘要。
-- 接入首批官方网页适配器。
+- 接入更多官方网页适配器。
 
 完成标准：能够通过 API 获得带证据的事件列表。
 

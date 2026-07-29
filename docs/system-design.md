@@ -1,10 +1,11 @@
 # AI × Security 情报系统整体框架设计
 
 > 状态：完整目标蓝图 / 后续演进参考  
-> 最后更新：2026-07-28  
+> 最后更新：2026-07-29  
 > 定位：完整目标蓝图；不是第一版的全部实施范围  
 > 当前实施基线：[后端 MVP 设计方案](./mvp-design.md)  
-> 配套文档：[信源注册表](./source-registry.md)
+> 配套文档：[信源注册表](./source-registry.md)  
+> 当前已完成：M0 骨架 + M1.1 规则分类（14 endpoint，6 类 Connector）
 
 第一版实现以《后端 MVP 设计方案》为准。本文保留网站、Agent、完整证据模型、团队版和长期扩展设计，用于约束后续演进方向。
 
@@ -106,7 +107,7 @@
 
 ```mermaid
 flowchart LR
-    S["信源层<br/>API / RSS / GitHub / Web"] --> C["采集层<br/>调度、限速、增量、快照"]
+    S["信源层<br/>API / RSS / GitHub / Web / arXiv / Sitemap"] --> C["采集层<br/>调度、限速、增量、并发、快照"]
     C --> R["原始证据库<br/>不可变元数据与内容快照"]
     R --> N["标准化与安全清洗<br/>正文抽取、语言、URL、时间"]
     N --> D["去重与事件聚类<br/>文章 → 事件"]
@@ -137,18 +138,30 @@ flowchart LR
 统一 Connector 接口：
 
 ```text
-poll(checkpoint) -> Batch<RawItem>
+poll(checkpoint) -> Batch<RawItem>       # 同步连接器
+apoll(checkpoint) -> Batch<RawItem>      # 异步连接器（Sitemap）
 normalize(raw_item) -> NormalizedDocument
 health() -> SourceHealth
 ```
 
-首批实现五类 Connector：
+已实现六类 Connector：
 
-1. `RSSConnector`
-2. `RestApiConnector`
-3. `GitHubConnector`
-4. `WebListConnector`
-5. `Sitemap/SearchDiscoveryConnector`（只做线索发现）
+1. `RSSConnector`（sync `poll`）
+2. `RestApiConnector`（sync `poll`，支持 `date_params` 动态注入 `last_success_at`）
+3. `GitHubConnector`（sync `poll`）
+4. `WebListConnector`（sync `poll`）
+5. `ArxivConnector`（sync `poll`）
+6. `SitemapConnector`（async `apoll`，sitemap.xml → URL 模式过滤 → lastmod 增量 → 并发抓取原文）
+
+`PlaywrightConnector` 保留接口和独立运行 Profile，但不作为首批来源的默认依赖。
+
+FetchContext 提供：
+- 同步 `get()`：传统连接器使用，内部 `_RateLimiter` 限速。
+- 异步 `aget()`：Sitemap 等并发连接器使用，共享同一个 `_RateLimiter`。
+
+并发 fetch pipeline：
+- `run_fetch_stage()` 使用 `asyncio.gather` + `Semaphore(5)` 并发处理多个 endpoint。
+- 同步连接器通过 `run_in_executor` 调度，异步连接器直接 `apoll()`。
 
 每个 endpoint 配置：
 
@@ -191,8 +204,16 @@ rate_limit:
 - cursor / page token
 - last successful published time
 - last successful fetched time
+- **last_success_at**（上次成功推进时间，用于 NVD date_params + Sitemap lastmod 增量过滤）
 - content hash
 - consecutive failure count
+
+增量过滤优先级：
+
+1. **API 级增量**（最强）：NVD `date_params` 用 `pubStartDate=last_success_at`；Sitemap 用 `lastmod > last_success_at`。
+2. **known_ids 集合过滤**（M1.2 待实现）：DB 已有 `native_id` 集合，连接器跳过已知条目。
+3. **HTTP 级增量**：ETag/304，部分源有效（CISA），部分源几乎不返回 304（arXiv）。
+4. **DB 级幂等兜底**：`ON CONFLICT DO NOTHING` on `(endpoint_id, native_id)`。
 
 幂等键优先级：
 

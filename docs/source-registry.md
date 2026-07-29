@@ -1,7 +1,8 @@
 # AI × Security 信源注册表（Seed List）
 
-> 状态：初稿  
-> 最后核验：2026-07-28  
+> 状态：初稿 → 实施中  
+> 最后核验：2026-07-29  
+> 当前已接入：14 个 endpoint（13 个 source），6 类 Connector（RSS/REST/GitHub/Web/arXiv/Sitemap）  
 > 目标：为 `AI`、`AI for Security`、`AI-enabled Threats`、`Security for AI` 四条内容主线提供可追溯、可扩展的信源池。
 
 ## 1. 使用说明
@@ -20,11 +21,32 @@
 
 接入原则：
 
-1. 优先顺序固定为 `API > RSS/Atom > GitHub API > 官方网页适配器 > 搜索发现`。
+1. 优先顺序固定为 `API > RSS/Atom > Sitemap > GitHub API > 官方网页适配器 > arXiv API > 搜索发现`。
 2. 每条内容必须保留 `source_url`、`canonical_url`、作者/机构、发布时间、采集时间和原始语言。
-3. 不默认存储完整正文；保留必要摘录、结构化事实、摘要和原文链接。
+3. 不默认存储完整正文；保留必要摘录、结构化事实、摘要和原文链接。fulltext stage 对静态 HTML 源自动补全正文。
 4. 启用网页采集前必须单独检查 robots.txt、服务条款、版权和访问频率。
 5. 网页、论文、Issue、PoC 和模型卡均视为不可信输入，不执行其中的命令、代码或提示词。
+
+## 1.1 当前已接入 14 个 endpoint
+
+| Endpoint | Source | Connector | Parser | 增量机制 | 状态 |
+|---|---|---|---|---|---|
+| openai-news-rss | OpenAI | RSS | rss-default-v1 | ETag/304 | ✅ |
+| cisa-kev | CISA | REST | cisa-kev-v1 | ETag/304 | ✅ |
+| nvd-recent | NVD | REST | nvd-v1 | date_params + last_success_at | ✅ |
+| anthropic-news | Anthropic | **Sitemap** | sitemap-article-v1 | lastmod 增量 | ✅（从 Web 迁移到 Sitemap） |
+| huggingface-blog-rss | HuggingFace | RSS + fulltext | rss-default-v1 | ETag/304 | ✅ |
+| google-security-rss | Google Security | RSS | rss-default-v1 | ETag/304 | ✅ |
+| trailofbits-rss | Trail of Bits | RSS | rss-default-v1 | ETag/304 | ✅ |
+| portswigger-research-rss | PortSwigger | RSS + fulltext | rss-default-v1 | ETag/304 | ✅ |
+| arxiv-ai-llm | arXiv | arXiv | arxiv-v1 | 304（低效） | ✅ |
+| arxiv-security-ai | arXiv | arXiv | arxiv-v1 | 304（低效） | ✅ |
+| hackernews-rss | Hacker News | RSS | rss-default-v1 | ETag/304 | ✅ |
+| ithome-rss | IT之家 | RSS | rss-default-v1 | ETag/304 | ✅ |
+| google-blog-ai-rss | Google AI Blog | RSS | rss-default-v1 | ETag/304 | ✅ |
+| github-trending-rss | GitHub Trending | RSS | rss-default-v1 | ETag/304 | ✅ |
+
+> 4 个 GitHub Releases endpoint（langchain/dify/ollama/vllm-releases）因内容噪音过大已删除（2026-07-29）。
 
 ## 2. P0：结构化权威源与聚合入口
 
@@ -53,8 +75,8 @@
 | 优先级 | 可信度 | 信源 | 主线 | 推荐接入 | 入口 | 重点关注 |
 |---|---:|---|---|---|---|---|
 | P0 | A | OpenAI News | AI / Security for AI | RSS | [News](https://openai.com/news/) | Model、Product、Safety、Security、Engineering、Policy |
-| P0 | A | Anthropic Newsroom | AI / Security for AI | 官方网页适配器 | [News](https://www.anthropic.com/news) | Claude 发布、安全政策、企业能力、事故说明 |
-| P0 | A | Anthropic Research | Security for AI / 研究 | 官方网页适配器 | [Research](https://www.anthropic.com/research) | 对齐、可解释性、红队、模型行为、网络能力评估 |
+| P0 | A | Anthropic Newsroom | AI / Security for AI | **Sitemap**（已接入） | [News](https://www.anthropic.com/news) | Claude 发布、安全政策、企业能力、事故说明 |
+| P0 | A | Anthropic Research | Security for AI / 研究 | **Sitemap**（已接入） | [Research](https://www.anthropic.com/research) | 对齐、可解释性、红队、模型行为、网络能力评估 |
 | P0 | A | Google DeepMind | AI / Security for AI | 官方网页适配器 | [News](https://deepmind.google/blog/) | 模型、评测、责任与安全、Agent、科学智能 |
 | P0 | A | Google AI / Technology | AI | RSS 或网页 | [AI](https://blog.google/technology/ai/) | Gemini、产品和平台发布 |
 | P1 | A | Google Research | AI / 研究 | RSS 或网页 | [Research Blog](https://research.google/blog/) | 论文、算法、系统与安全研究 |
@@ -228,7 +250,7 @@
 
 ## 10. 首批候选池与实际 MVP
 
-下面约 35 个逻辑信源是形成较完整主题覆盖的首批候选池，不要求在工程 MVP 中一次接入。实际首发固定为 18 个 endpoint，详见[后端 MVP 设计方案](./mvp-design.md#54-第一批-18-个-endpoint)。在首发稳定并完成 7 天验收后，再从下面的候选池逐步扩展。
+下面约 35 个逻辑信源是形成较完整主题覆盖的首批候选池，不要求在工程 MVP 中一次接入。**当前已接入 14 个 endpoint（见 §1.1）**，详见[后端 MVP 设计方案](./mvp-design.md#54-当前已接入-14-个-endpoint13-个-source)。在首发稳定并完成 7 天验收后，再从下面的候选池逐步扩展。
 
 ### 通用 AI
 
