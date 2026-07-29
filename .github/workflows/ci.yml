@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: intel
+          POSTGRES_PASSWORD: intel
+          POSTGRES_DB: intel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U intel -d intel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      INTEL_DATABASE_URL: postgresql+psycopg://intel:intel@localhost:5432/intel
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Sync deps
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run pyright
+
+      - name: Migrate
+        run: uv run alembic upgrade head
+
+      - name: Unit + smoke tests (offline)
+        run: uv run pytest tests/test_unit.py tests/test_smoke.py -v
+
+      # Live crawl is opt-in; runs on the CI DB but hits real sources.
+      - name: Live crawl e2e (real data)
+        env:
+          INTEL_RUN_LIVE: "1"
+        run: uv run pytest -m live -v

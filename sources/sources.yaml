@@ -1,0 +1,345 @@
+# Source registry — real endpoints across all connector kinds.
+# Covers RSS / REST / GitHub / Web, plus NVD (nested-JSON REST via options).
+# Expanded from the initial 4-source sample toward the source-registry seed list.
+#
+# Each endpoint carries an `egress` block (plan 修正 3): `route` selects the
+# network exit — direct / proxy_pool_cn / proxy_pool_global — consumed by
+# FetchContext. Proxy URLs live in env (INTEL_PROXY_POOL_*), never here.
+
+sources:
+  - id: openai
+    name: OpenAI News
+    trust_tier: A
+    language: en
+    org: OpenAI
+  - id: cisa
+    name: CISA Known Exploited Vulnerabilities
+    trust_tier: A
+    language: en
+    org: CISA
+  - id: nvd
+    name: NVD (National Vulnerability Database)
+    trust_tier: A
+    language: en
+    org: NIST
+  - id: anthropic
+    name: Anthropic Newsroom
+    trust_tier: A
+    language: en
+    org: Anthropic
+  - id: huggingface
+    name: Hugging Face Blog
+    trust_tier: A
+    language: en
+    org: Hugging Face
+  - id: google-security
+    name: Google Security Blog
+    trust_tier: A
+    language: en
+    org: Google
+  - id: trailofbits
+    name: Trail of Bits Blog
+    trust_tier: B
+    language: en
+    org: Trail of Bits
+  - id: portswigger
+    name: PortSwigger Research
+    trust_tier: B
+    language: en
+    org: PortSwigger
+  - id: arxiv
+    name: arXiv
+    trust_tier: A
+    language: en
+    org: arXiv
+  - id: hackernews
+    name: Hacker News
+    trust_tier: C
+    language: en
+    org: Y Combinator
+  - id: ithome
+    name: IT之家
+    trust_tier: C
+    language: zh
+    org: IT之家
+  - id: google-blog
+    name: Google Blog (AI)
+    trust_tier: A
+    language: en
+    org: Google
+  - id: github-trending
+    name: GitHub Trending
+    trust_tier: C
+    language: en
+    org: GitHub
+
+endpoints:
+  # --- RSS ---
+  - id: openai-news-rss
+    source_id: openai
+    connector: rss
+    parser: rss-default-v1
+    url: https://openai.com/news/rss.xml
+    enabled: true
+    trust_tier: A
+    priority: P0
+    language: en
+    # fulltext OFF: openai.com is a JS-rendered SPA (no static article body).
+    # We keep the RSS summary + link; users click through. Playwright not worth it.
+    egress:
+      route: proxy_pool_global   # from an CN VM this needs the global pool
+    schedule:
+      interval_minutes: 30
+      jitter_seconds: 120
+    fetch:
+      timeout_seconds: 20
+      max_response_bytes: 5242880
+      max_redirects: 3
+      requests_per_minute: 2
+    topics: [ai, security_for_ai]
+
+  # --- REST API (JSON vuln feed) ---
+  - id: cisa-kev
+    source_id: cisa
+    connector: rest
+    parser: cisa-kev-v1
+    url: https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+    enabled: true
+    trust_tier: A
+    priority: P0
+    language: en
+    egress:
+      route: proxy_pool_global
+    schedule:
+      interval_minutes: 30
+      jitter_seconds: 60
+    fetch:
+      timeout_seconds: 30
+      max_response_bytes: 20971520
+      max_redirects: 3
+      requests_per_minute: 4
+    topics: [ai_for_security, security_for_ai]
+
+  # --- Sitemap adapter: Anthropic Newsroom + Research ---
+  # Anthropic's site is a JS SPA (no static article body on the listing page),
+  # but their sitemap.xml exposes all /news/ and /research/ URLs with <lastmod>.
+  # SitemapConnector reads the sitemap, filters URLs, fetches each article page
+  # and extracts full text via trafilatura — no Playwright needed.
+  - id: anthropic-news
+    source_id: anthropic
+    connector: sitemap
+    parser: sitemap-article-v1
+    url: https://www.anthropic.com/sitemap.xml
+    enabled: true
+    trust_tier: A
+    priority: P0
+    language: en
+    egress:
+      route: proxy_pool_global
+    schedule:
+      interval_minutes: 120
+      jitter_seconds: 300
+    fetch:
+      timeout_seconds: 25
+      max_response_bytes: 10485760
+      max_redirects: 3
+      requests_per_minute: 5
+    options:
+      sitemap:
+        url_patterns:
+          - "/news/"
+          - "/research/"
+        strip_query: true
+        max_urls: 50
+    topics: [ai, security_for_ai]
+
+  # --- REST: NVD (nested JSON: vulnerabilities[].cve, id under .cve.id) ---
+  # Rolling 30-day time window: pubStartDate / pubEndDate are injected at
+  # fetch time so every poll gets the latest CVE.  ETag is skipped because
+  # the URL changes every tick; idempotency is on (endpoint_id, native_id).
+  - id: nvd-recent
+    source_id: nvd
+    connector: rest
+    parser: nvd-v1
+    url: https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=200
+    enabled: true
+    trust_tier: A
+    priority: P0
+    language: en
+    egress:
+      route: proxy_pool_global
+    schedule:
+      interval_minutes: 60
+      jitter_seconds: 120
+    fetch:
+      timeout_seconds: 40
+      max_response_bytes: 20971520
+      max_redirects: 3
+      requests_per_minute: 2
+    options:
+      rest:
+        list_key: vulnerabilities
+        nested_key: cve
+        id_field: id
+        date_params:
+          start:
+            param: pubStartDate
+            offset_days: 30
+          end:
+            param: pubEndDate
+            offset_days: 0
+          format: "%Y-%m-%dT%H:%M:%S.000"
+    topics: [ai_for_security, security_for_ai]
+
+  # --- RSS: Security for AI / research feeds ---
+  - id: huggingface-blog-rss
+    source_id: huggingface
+    connector: rss
+    parser: rss-default-v1
+    url: https://huggingface.co/blog/feed.xml
+    enabled: true
+    trust_tier: A
+    priority: P1
+    language: en
+    fulltext: true   # static blog pages → second-fetch full article text
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 120, jitter_seconds: 300 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai, security_for_ai]
+
+  - id: google-security-rss
+    source_id: google-security
+    connector: rss
+    parser: rss-default-v1
+    url: https://security.googleblog.com/feeds/posts/default
+    enabled: true
+    trust_tier: A
+    priority: P0
+    language: en
+    # fulltext OFF: blogspot article pages render via JS. Keep RSS summary + link.
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 120, jitter_seconds: 300 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai_for_security, security_for_ai]
+
+  - id: trailofbits-rss
+    source_id: trailofbits
+    connector: rss
+    parser: rss-default-v1
+    url: https://blog.trailofbits.com/feed/
+    enabled: true
+    trust_tier: B
+    priority: P1
+    language: en
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 180, jitter_seconds: 300 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai_for_security, security_for_ai]
+
+  - id: portswigger-research-rss
+    source_id: portswigger
+    connector: rss
+    parser: rss-default-v1
+    url: https://portswigger.net/research/rss
+    enabled: true
+    trust_tier: B
+    priority: P1
+    language: en
+    fulltext: true   # RSS gives only a summary; article page is static → second-fetch full text
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 180, jitter_seconds: 300 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai_for_security, security_for_ai]
+
+  # ===== 新增源（arXiv / HN / IT之家 / Google Blog / GitHub Trending）=====
+
+  # arXiv：AI / LLM 方向近期论文（cs.AI / cs.CL / cs.LG，按提交时间倒序）
+  - id: arxiv-ai-llm
+    source_id: arxiv
+    connector: arxiv
+    parser: arxiv-v1
+    url: https://export.arxiv.org/api/query?search_query=cat:cs.AI+OR+cat:cs.CL+OR+cat:cs.LG&sortBy=submittedDate&sortOrder=descending&max_results=50
+    enabled: true
+    trust_tier: A
+    priority: P1
+    language: en
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 360, jitter_seconds: 600 }
+    fetch: { timeout_seconds: 30, max_response_bytes: 10485760, max_redirects: 3, requests_per_minute: 1 }
+    topics: [ai]
+
+  # arXiv：AI 安全方向（cs.CR + LLM/prompt injection/jailbreak/agent 关键词）
+  # 同时覆盖 Security for AI（攻击模型）与 AI for Security（AI 用于防御）
+  - id: arxiv-security-ai
+    source_id: arxiv
+    connector: arxiv
+    parser: arxiv-v1
+    url: https://export.arxiv.org/api/query?search_query=cat:cs.CR+AND+%28abs:LLM+OR+abs:%22prompt+injection%22+OR+abs:jailbreak+OR+abs:agent+OR+abs:%22machine+learning%22%29&sortBy=submittedDate&sortOrder=descending&max_results=50
+    enabled: true
+    trust_tier: A
+    priority: P0
+    language: en
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 360, jitter_seconds: 600 }
+    fetch: { timeout_seconds: 30, max_response_bytes: 10485760, max_redirects: 3, requests_per_minute: 1 }
+    topics: [security_for_ai, ai_for_security]
+
+  # Hacker News（发现层，C 级，只做线索）
+  - id: hackernews-rss
+    source_id: hackernews
+    connector: rss
+    parser: rss-default-v1
+    url: https://news.ycombinator.com/rss
+    enabled: true
+    trust_tier: C
+    priority: P2
+    language: en
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 60, jitter_seconds: 180 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai, security_for_ai, ai_for_security]
+
+  # IT之家（中文科技资讯，C 级发现层）
+  - id: ithome-rss
+    source_id: ithome
+    connector: rss
+    parser: rss-default-v1
+    url: https://www.ithome.com/rss/
+    enabled: true
+    trust_tier: C
+    priority: P2
+    language: zh
+    egress: { route: proxy_pool_cn }
+    schedule: { interval_minutes: 60, jitter_seconds: 180 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai]
+
+  # Google Blog：AI 分类（一手厂商动态）
+  - id: google-blog-ai-rss
+    source_id: google-blog
+    connector: rss
+    parser: rss-default-v1
+    url: https://blog.google/technology/ai/rss/
+    enabled: true
+    trust_tier: A
+    priority: P1
+    language: en
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 120, jitter_seconds: 300 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai]
+
+  # GitHub Trending（无官方 API，用社区 RSS 镜像；发现层，供应链异常增长线索）
+  - id: github-trending-rss
+    source_id: github-trending
+    connector: rss
+    parser: rss-default-v1
+    url: https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml
+    enabled: true
+    trust_tier: C
+    priority: P2
+    language: en
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 720, jitter_seconds: 600 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai]

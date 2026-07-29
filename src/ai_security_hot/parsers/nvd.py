@@ -1,0 +1,68 @@
+"""NVD CVE 2.0 parser — one CVE record (the `.cve` object) → document."""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC
+
+from dateutil import parser as dateparser
+
+from ai_security_hot.connectors.base import Parser
+from ai_security_hot.domain.models import NormalizedDocument, RawItem
+from ai_security_hot.parsers.normalize import extract_identifiers, score_parse_quality
+
+
+class NvdParser(Parser):
+    version = "nvd-v1"
+
+    def parse(self, raw: RawItem) -> NormalizedDocument:
+        rec = json.loads(raw.raw_text or "{}")
+        cve = rec.get("id", raw.native_id)
+
+        # English description preferred
+        desc = ""
+        for d in rec.get("descriptions", []):
+            if d.get("lang") == "en":
+                desc = d.get("value", "")
+                break
+
+        pub = None
+        if rec.get("published"):
+            try:
+                pub = dateparser.parse(rec["published"])
+                if pub and pub.tzinfo is None:
+                    pub = pub.replace(tzinfo=UTC)
+            except (ValueError, OverflowError):
+                pub = None
+
+        # CWE ids live under weaknesses[].description[].value
+        cwe_text = " ".join(
+            wd.get("value", "")
+            for w in rec.get("weaknesses", [])
+            for wd in w.get("description", [])
+        )
+        ids = extract_identifiers(f"{cve} {cwe_text} {desc}")
+        if cve and cve not in ids["cve"]:
+            ids["cve"].append(cve)
+
+        title = f"{cve}: {desc[:80]}" if desc else cve
+        return NormalizedDocument(
+            raw_item_native_id=raw.native_id,
+            endpoint_id=raw.endpoint_id,
+            title_original=title,
+            body_text=desc or None,
+            canonical_url=f"https://nvd.nist.gov/vuln/detail/{cve}",
+            published_at=pub,
+            published_at_utc=pub,
+            language="en",
+            cve_ids=ids["cve"],
+            ghsa_ids=ids["ghsa"],
+            cnvd_ids=ids["cnvd"],
+            cwe_ids=ids["cwe"],
+            parse_quality=score_parse_quality(
+                title=title,
+                published_at_present=pub is not None,
+                body_text=desc,
+                min_body_len=20,
+            ),
+        )

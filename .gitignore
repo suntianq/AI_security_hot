@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+report.html
+report*.html
+exports/
+*.csv
+*.jsonl
+.claude/

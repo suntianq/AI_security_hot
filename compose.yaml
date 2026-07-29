@@ -1,0 +1,62 @@
+name: ai-security-hot
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: intel
+      POSTGRES_PASSWORD: intel
+      POSTGRES_DB: intel
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U intel -d intel"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    command: ["api"]
+    environment:
+      INTEL_DATABASE_URL: postgresql+psycopg://intel:intel@postgres:5432/intel
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["worker"]
+    environment:
+      INTEL_DATABASE_URL: postgresql+psycopg://intel:intel@postgres:5432/intel
+      RUN_MIGRATIONS: "1"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - blobdata:/app/data/blobs
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Dynamic-page fallback — profile-gated, not a default dependency (MVP 4.1)
+  playwright:
+    build: .
+    command: ["worker"]
+    profiles: ["playwright"]
+    environment:
+      INTEL_DATABASE_URL: postgresql+psycopg://intel:intel@postgres:5432/intel
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  blobdata:

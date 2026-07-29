@@ -1,0 +1,95 @@
+# Classification taxonomy — config-driven so adding a company / tuning a
+# keyword never touches code (like sources.yaml). Consumed by RuleClassifier.
+#
+# Matching is case-insensitive, word-boundary aware. Keep aliases specific
+# enough to avoid false hits (e.g. "GLM" alone is risky → require "智谱"/"ChatGLM").
+
+version: taxonomy-v1
+
+# --- Layer 1: 公司与模型 (multi-label) — borrowed from aihot ---
+# id -> list of aliases (matched in title + body)
+company_models:
+  openai: ["OpenAI", "ChatGPT", "GPT-4", "GPT-5", "GPT-4o", "o1", "o3", "Sora", "DALL-E"]
+  anthropic: ["Anthropic", "Claude", "Claude Code", "Claude Opus", "Claude Sonnet"]
+  google: ["Google DeepMind", "DeepMind", "Gemini", "Gemma", "Google AI", "Vertex AI"]
+  deepseek: ["DeepSeek", "DeepSeek-V3", "DeepSeek-R1", "深度求索"]
+  qwen: ["Qwen", "通义千问", "通义", "QwenLM", "Qwen2", "Qwen3"]
+  kimi: ["Kimi", "月之暗面", "Moonshot"]
+  minimax: ["MiniMax", "海螺"]
+  zhipu_glm: ["智谱", "ChatGLM", "GLM-4", "CodeGeeX", "BigModel"]
+  xai: ["xAI", "Grok"]
+  meta: ["Meta AI", "Llama", "LLaMA", "Meta Llama"]
+  microsoft: ["Microsoft Copilot", "Copilot", "Azure OpenAI", "Microsoft AI", "MSRC"]
+  nvidia: ["NVIDIA", "英伟达", "CUDA", "TensorRT", "Nemotron"]
+  huggingface: ["Hugging Face", "HuggingFace", "huggingface", "transformers", "safetensors"]
+  cursor: ["Cursor"]
+  openrouter: ["OpenRouter"]
+
+# --- Layer 2: 技术方向 (multi-label) — only the 3 the user cares about ---
+# A doc may hit 0..3. No hit => general AI (not force-tagged).
+tech_directions:
+  ai_for_security:
+    # AI used FOR defense / security work
+    keywords:
+      ["AI SOC", "threat detection", "malware detection", "malware analysis",
+       "vulnerability detection", "code audit", "intrusion detection",
+       "phishing detection", "deepfake detection", "threat intelligence",
+       "AI for security", "security copilot", "威胁检测", "恶意软件", "漏洞挖掘",
+       # category-1 additions (data-driven, low false-positive)
+       "fraud detection", "secure code", "security patch", "exploit generation",
+       "vulnerability management", "penetration test", "pentest"]
+  security_for_ai:
+    # Protecting AI / attacking models
+    keywords:
+      ["prompt injection", "indirect prompt injection", "jailbreak", "jailbreaking",
+       "model extraction", "model stealing", "data poisoning", "training data poisoning",
+       "adversarial attack", "adversarial example", "model supply chain", "safetensors",
+       "RAG poisoning", "memory poisoning", "unsafe output", "guardrail bypass",
+       "safety bypass", "red team", "red-teaming", "alignment", "model inversion",
+       "提示注入", "越狱", "投毒", "对抗攻击", "模型窃取", "安全对齐",
+       # category-1 additions
+       "guardrail", "watermark", "backdoor", "robustness", "instruction hierarchy",
+       "retrieval-augmented", "membership inference", "model poisoning", "LLM safety"]
+  agent:
+    keywords:
+      ["agent", "agentic", "AI agent", "multi-agent", "MCP", "Model Context Protocol",
+       "tool calling", "tool use", "function calling", "autonomous agent",
+       "LangChain", "LlamaIndex", "AutoGen", "CrewAI", "智能体", "工具调用",
+       # category-1 additions
+       "tool-using", "LLM agent", "agent workflow"]
+  system_security:
+    # Traditional system / software / infra security (user-requested new dir).
+    # Uses SPECIFIC system-security terms, NOT bare CVE/vulnerability/exploit
+    # (those flood on NVD/CISA one-liners — kept out per user decision).
+    keywords:
+      ["remote code execution", "RCE", "privilege escalation", "buffer overflow",
+       "memory corruption", "use-after-free", "use after free", "heap overflow",
+       "kernel exploit", "sandbox escape", "container escape", "authentication bypass",
+       "authorization bypass", "SQL injection", "cross-site scripting", "XSS",
+       "CSRF", "SSRF", "path traversal", "deserialization", "race condition",
+       "side-channel", "rootkit", "ransomware", "botnet", "lateral movement",
+       "hardware trojan", "firmware", "smart contract", "fuzzing", "reverse engineering",
+       "内核", "提权", "缓冲区溢出", "反序列化", "勒索软件", "供应链攻击"]
+
+# --- event_type (single value) — content form ---
+# Rules evaluated in priority order; first strong match wins, else default.
+event_type:
+  default: opinion
+  # source_id / connector -based strong signals (highest priority)
+  by_source:
+    arxiv: research          # any arxiv endpoint => research paper
+    nvd: vulnerability
+    cisa: vulnerability
+  by_connector:
+    github: release          # GitHub releases => release
+  # keyword signals (checked when source/connector didn't decide)
+  by_keyword:
+    vulnerability: ["CVE-", "GHSA-", "vulnerability", "exploit", "0-day", "zero-day", "漏洞", "RCE"]
+    release: ["release", "released", "releasing", "release notes", "launch", "launching",
+              "introducing", "announce", "announcing", "unveiling", "system card",
+              "v1.", "v2.", "发布", "上线", "推出"]
+    incident: ["breach", "leaked", "incident", "outage", "compromised", "泄露", "事故"]
+    policy: ["regulation", "policy", "compliance", "act", "guideline", "监管", "政策", "合规"]
+    funding: ["funding", "raised", "series a", "series b", "valuation", "融资", "估值"]
+    research: ["paper", "study", "benchmark", "evaluation", "研究", "论文", "评测"]
+    tool: ["open-source", "open source", "toolkit", "library", "framework", "开源", "工具"]
