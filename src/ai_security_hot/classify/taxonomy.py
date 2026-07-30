@@ -21,7 +21,7 @@ class TechDirection(BaseModel):
 
 
 class Taxonomy(BaseModel):
-    version: str = "taxonomy-v1"
+    version: str = "taxonomy-v2"
     company_models: dict[str, list[str]] = Field(default_factory=dict)
     tech_directions: dict[str, TechDirection] = Field(default_factory=dict)
     event_type: EventTypeRules = Field(default_factory=EventTypeRules)

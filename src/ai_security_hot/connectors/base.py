@@ -28,11 +28,25 @@ class Checkpoint:
         last_modified: str | None = None,
         cursor: str | None = None,
         last_success_at: datetime | None = None,
+        last_published_at: datetime | None = None,
+        known_content_hashes: dict[str, str] | None = None,
     ) -> None:
         self.etag = etag
         self.last_modified = last_modified
         self.cursor = cursor
         self.last_success_at = last_success_at
+        # Source-side high-water mark. It is intentionally separate from
+        # last_success_at: a fetch completion timestamp is not a safe content
+        # watermark when a feed/sitemap publishes coarse or delayed dates.
+        self.last_published_at = last_published_at
+        # Most recent content hash for each native id. Connectors use this to
+        # avoid emitting unchanged records while still emitting a new immutable
+        # RawItem version when an existing source record is revised.
+        self.known_content_hashes = known_content_hashes or {}
+
+    @property
+    def known_native_ids(self) -> set[str]:
+        return set(self.known_content_hashes)
 
 
 class PollResult:

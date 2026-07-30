@@ -50,7 +50,16 @@ class RuleClassifier(Classifier):
         companies = [
             cid for cid, pats in self._company.items() if any(p.search(text) for p in pats)
         ]
-        techs = [tid for tid, pats in self._tech.items() if any(p.search(text) for p in pats)]
+        if self._is_structured_cve(doc, source_id, connector):
+            # A structured CVE record is a vulnerability datum, not a news or
+            # research topic. Keep it out of the topical keyword buckets.
+            techs = ["cve"]
+        else:
+            techs = [
+                tid
+                for tid, pats in self._tech.items()
+                if tid != "cve" and any(p.search(text) for p in pats)
+            ]
         event_type = self._event_type(text, doc, source_id, connector)
 
         # confidence: rules are high-precision on what they DO match
@@ -66,6 +75,25 @@ class RuleClassifier(Classifier):
             rule_version=self.tax.version,
             input_hash=content_sha256(text),
         )
+
+    @staticmethod
+    def _is_structured_cve(
+        doc: NormalizedDocument,
+        source_id: str | None,
+        connector: str | None,
+    ) -> bool:
+        if not doc.cve_ids:
+            return False
+        if source_id and source_id.startswith(("nvd", "cisa")):
+            return True
+        if doc.endpoint_id in {"nvd-recent", "cisa-kev"}:
+            return True
+        if connector == "rest":
+            return True
+        # Direct classifier use has no source context; a CVE identifier is the
+        # strongest available signal. RSS/arXiv callers pass their context and
+        # therefore remain eligible for topical news/research labels.
+        return source_id is None and connector is None
 
     def _event_type(
         self,

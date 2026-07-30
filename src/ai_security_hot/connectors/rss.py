@@ -22,7 +22,7 @@ def _entry_published(entry) -> datetime | None:
 
 
 class RSSConnector(Connector):
-    version = "rss-1"
+    version = "rss-2"
 
     def poll(self, policy: EndpointPolicy, checkpoint: Checkpoint) -> PollResult:
         res = self.ctx.get(
@@ -44,6 +44,9 @@ class RSSConnector(Connector):
             title = entry.get("title", "")
             summary = entry.get("summary", "")
             raw_text = f"{title}\n\n{summary}"
+            item_hash = content_sha256(native_id, title, summary)
+            if checkpoint.known_content_hashes.get(native_id) == item_hash:
+                continue
             items.append(
                 RawItem(
                     endpoint_id=policy.id,
@@ -55,7 +58,7 @@ class RSSConnector(Connector):
                     published_at=_entry_published(entry),
                     fetched_at=res.fetched_at,
                     language=policy.language,
-                    content_hash=content_sha256(native_id, title, summary),
+                    content_hash=item_hash,
                     raw_text=raw_text,
                     canonical_url=link,
                     connector_kind=ConnectorKind.RSS,
@@ -67,5 +70,14 @@ class RSSConnector(Connector):
             etag=res.etag or checkpoint.etag,
             last_modified=res.last_modified or checkpoint.last_modified,
             cursor=checkpoint.cursor,
+            last_published_at=max(
+                [it.published_at for it in items if it.published_at]
+                + (
+                    [checkpoint.last_published_at]
+                    if checkpoint.last_published_at
+                    else []
+                ),
+                default=None,
+            ),
         )
         return PollResult(items, new_ck)

@@ -19,7 +19,8 @@ class Classification(BaseModel):
     """Result of classifying one document. Multi-label for both layers."""
 
     # Layer 2: 技术方向 — subset of
-    # {ai_for_security, security_for_ai, agent, system_security}
+    # Structured records: {cve}; news/research topics:
+    # {llm, ai_for_security, security_for_ai, agent, system_security}
     tech_directions: list[str] = Field(default_factory=list)
     # Layer 1: 公司与模型 — subset of the 15 configured ids
     company_models: list[str] = Field(default_factory=list)

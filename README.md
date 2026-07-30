@@ -2,16 +2,16 @@
 
 把 AI/安全情报的采集能力融为一个稳定、可扩展的后端。基于 `docs/` 三份设计文档
 （[MVP 设计](docs/mvp-design.md) · [整体蓝图](docs/system-design.md) ·
-[信源注册表](docs/source-registry.md)）实现的 **M0 工程骨架 + M1.1 规则分类 + 可运行的采集层**。
+[信源注册表](docs/source-registry.md)）实现的 **M0 工程骨架 + M1.1 规则分类 + M1.2 增量优化**。
 
 ## 已实现
 
 ### M0 工程骨架
 
 - **阶段化 DB 状态机**（fetch → normalize → fulltext → classify → …）：慢阶段不阻塞快阶段。
-- **FetchContext 统一出口层**：SSRF 双检、限速、重试、超时、响应大小上限、ETag/Last-Modified、代理选择；新增 **`aget()` 异步接口**供并发连接器使用。
+- **FetchContext 统一出口层**：SSRF 双检、严格请求启动限速、重试、超时、流式响应大小上限、ETag/Last-Modified、代理选择；`aget()` 在单轮 pipeline 内复用异步连接池。
 - **Egress/代理一等配置**：`sources.yaml` 的 `egress.route` + 环境变量代理池，同一份代码跑国内/海外 VM。
-- **并发 fetch pipeline**：多个 endpoint 通过 `asyncio.gather` 并发抓取（最多 5 个同时），14 个 endpoint 9 秒完成一轮。
+- **并发 fetch pipeline**：多个 endpoint 并发抓取；异步请求复用连接池并严格限制每个 endpoint 的请求启动速率。
 - **BlobStore**：网页 HTML 快照存本地卷，DB 只存哈希+引用（后期可换 S3/MinIO）。
 - **无状态调度 tick + self_check**：DB 是唯一真相；自检发现 stale/degraded/stuck。
 - **FastAPI 只读/运维 API** + **`intel` CLI**（含 `export` 导出 JSON/JSONL/CSV）。
@@ -20,38 +20,50 @@
 ### M1.1 规则分类
 
 - **RuleClassifier**：基于 `taxonomy.yaml` 的多标签分类器，输出 tech_directions / company_models / event_type，带完整溯源（method / rule_version / input_hash）。
-- **四条内容主线分类**：ai / ai_for_security / ai_enabled_threats / security_for_ai。
+- **当前规则标签**：结构化 NVD/CISA 漏洞记录单独标记为 `cve`；新闻与论文才参与 `llm / agent / ai_for_security / security_for_ai / system_security` 主题分类。未命中时保留为通用 AI，不强行打标。
 - **事件类型优先级**：source_id → connector → CVE/GHSA 硬信号 → 关键词 → 默认 opinion。
+
+### M1.2 增量优化
+
+- **Connector 级过滤**：Checkpoint 携带最近的 `native_id → content_hash`，未变化内容不会进入后续 pipeline。
+- **内容修订版本化**：RawItem 幂等键为 `(endpoint_id, native_id, content_hash)`；相同 ID 内容变化时保存新的不可变版本。
+- **NVD 完整性**：15 分钟重叠窗口 + `totalResults/startIndex` 分页，避免发布延迟和单页上限漏数。
+- **Anthropic 双通道**：Newsroom 快速发现 + 每日 Sitemap 72 小时重叠对账。
+- **调度可靠性**：应用 endpoint jitter，失败按指数退避，FetchRun 记录真实开始/结束时间。
 
 ### 六类 Connector + Parser
 
 | Connector | 版本 | Parser | 增量机制 |
 |---|---|---|---|
-| **RSS** | `rss-1` | `rss-default-v1` | ETag/304（feed 级） |
-| **REST** | `rest-1` | `cisa-kev-v1` / `nvd-v1` | ETag/304（CISA）；**date_params + last_success_at**（NVD，API 级增量） |
-| **GitHub** | `github-1` | `github-releases-v1` | ETag/304 |
+| **RSS** | `rss-2` | `rss-default-v1` | ETag/304 + native ID/content hash 过滤与修订检测 |
+| **REST** | `rest-2` | `cisa-kev-v1` / `nvd-v1` | CISA 内容修订检测；NVD 重叠时间窗 + 完整分页 |
+| **GitHub** | `github-2` | `github-releases-v1` | ETag/304 + native ID/content hash 过滤与修订检测 |
 | **Web** | `web-1` | `web-article-v1` | ETag/304 + content hash（双重去重） |
-| **arXiv** | `arxiv-1` | `arxiv-v1` | ETag/304（arXiv API 几乎不返回 304） |
-| **Sitemap** | `sitemap-1` | `sitemap-article-v1` | **lastmod > last_success_at** 增量过滤 + 并发抓取（asyncio.gather + Semaphore） |
+| **arXiv** | `arxiv-2` | `arxiv-v1` | native ID/content hash 过滤；ETag/304 作为辅助 |
+| **Sitemap** | `sitemap-2` | `sitemap-article-v1` | Newsroom 快速发现 + Sitemap 重叠对账 + 并发正文抓取 |
 
-### 已接入 14 个真实源（13 个 source，14 个 endpoint）
+### 已接入 18 个真实 endpoint（17 个 source）
 
 | Endpoint | Connector | 增量 |
 |---|---|---|
-| openai-news-rss | RSS | ETag/304 |
-| cisa-kev | REST | ETag/304 |
-| nvd-recent | REST | **date_params + last_success_at** |
-| anthropic-news | **Sitemap** | **lastmod 增量** |
-| huggingface-blog-rss | RSS + fulltext | ETag/304 |
-| google-security-rss | RSS | ETag/304 |
-| trailofbits-rss | RSS | ETag/304 |
-| portswigger-research-rss | RSS + fulltext | ETag/304 |
-| arxiv-ai-llm | arXiv | 304（低效） |
-| arxiv-security-ai | arXiv | 304（低效） |
-| hackernews-rss | RSS | ETag/304 |
-| ithome-rss | RSS | ETag/304 |
-| google-blog-ai-rss | RSS | ETag/304 |
-| github-trending-rss | RSS | ETag/304 |
+| openai-news-rss | RSS | ETag/304 + content hash |
+| aihot-selected-rss | RSS | ETag/304 + 最新 50 条精选窗口 + content hash |
+| cisa-kev | REST | ETag/304 + 同 CVE 内容修订检测 |
+| nvd-recent | REST | `last_success_at - 15min` 重叠窗口 + 完整分页 + content hash |
+| anthropic-news | **Newsroom + Sitemap** | 快速发现 + 每日 72h 重叠对账 |
+| huggingface-blog-rss | RSS + fulltext | ETag/304 + content hash |
+| google-security-rss | RSS | ETag/304 + content hash |
+| trailofbits-rss | RSS | ETag/304 + content hash |
+| portswigger-research-rss | RSS + fulltext | ETag/304 + content hash |
+| apple-ml-research-rss | RSS | ETag/Last-Modified/304 + content hash |
+| nvidia-blog-rss | RSS | ETag/Last-Modified/304 + content hash |
+| wiz-blog-rss | RSS | ETag/Last-Modified/304 + content hash |
+| arxiv-ai-llm | arXiv | native ID/content hash；304 辅助 |
+| arxiv-security-ai | arXiv | native ID/content hash；304 辅助 |
+| hackernews-rss | RSS | ETag/304 + content hash |
+| ithome-rss | RSS | ETag/304 + content hash |
+| google-blog-ai-rss | RSS | ETag/304 + content hash |
+| github-trending-rss | RSS | ETag/304 + content hash |
 
 ### 二次抓取全文（fulltext stage）
 
@@ -59,11 +71,21 @@
 
 ### 关键改进说明
 
-**SitemapConnector（新增）**：专为 SPA 站点设计的通用连接器。读 sitemap.xml → 按 URL 模式过滤（如 `/news/` `/research/`）→ 逐篇并发抓取原文 → trafilatura 抽正文。已替换 Anthropic 原来的 Web 适配器（原来只能抓列表页拿不到正文），以后任何有 sitemap 的 SPA 站都可复用。
+**Anthropic 双通道增量**：每次轮询只解析服务端渲染的 Newsroom 列表，并仅抓取未知 URL；每 24 小时再用 Sitemap 做一次 72 小时重叠对账，发现列表遗漏和旧文修订。正文仍由 trafilatura 抽取，不需要 Playwright。
 
-**NVD 滚动时间窗 + 增量**：`options.rest.date_params` 支持动态注入 `pubStartDate`/`pubEndDate`。首次 poll 用 `now - 30d` 兜底全量抓取；后续 poll 用 `last_success_at` 作为起点，只请求上次成功至今的新 CVE（从 200 条/次降到 0~5 条/次）。
+**NVD 滚动时间窗 + 分页**：首次 poll 回看 30 天，后续从 `last_success_at - 15min` 开始以小窗口重叠抓取；按 `totalResults/startIndex` 完整翻页，内容哈希幂等消除重叠数据。
 
-**并发 fetch pipeline**：`run_fetch_stage` 使用 `asyncio.gather` 并发处理多个 endpoint（最多 5 个同时），SitemapConnector 内部也并发抓取文章页（concurrency=5）。14 个 endpoint 一轮从 10+ 分钟降到 9 秒。
+**四个新增官方 RSS**：AI HOT 使用官方推荐的精选摘要 feed（30 分钟）；Apple ML Research（6 小时）、NVIDIA Blog（2 小时）和 Wiz Blog（2 小时）均直接复用 `rss-2`。它们统一使用 ETag/Last-Modified、304、native ID/content hash 和 DB 唯一约束，不需要新增 Connector/Parser 类。
+
+**连接复用与严格限速**：`run_fetch_stage` 最多并发处理 5 个 endpoint；Sitemap 文章页并发为 5，但请求启动时间服从配置 RPM。单轮内复用 HTTP 连接，正文抽取在线程池执行。
+
+### 当前增量边界
+
+- Connector 预过滤只加载每个 endpoint 最近 5,000 个 RawItem 版本；超过窗口的旧记录即使被再次产出，DB 全历史唯一约束仍会阻止完全相同的内容重复落库。
+- RSS、arXiv 和列表页只能处理上游当前返回的记录；停机时间超过上游保留窗口仍可能漏采。Anthropic 的每日 Sitemap 对账降低了该风险，但当前每次最多检查 50 个、回看 72 小时。
+- AI HOT 当前接入的是官方推荐的最新 50 条精选 RSS。30 分钟轮询足以覆盖正常更新且支持条目修订，但长时间停机并导致窗口滚过 50 条时仍可能漏采；若要完整镜像全部精选与撤选事件，需要后续实现其 `snapshot + changes` opaque cursor/409 重建协议及删除语义，不能直接套用当前通用 REST 模式。
+- NVD 当前使用 `pubStartDate/pubEndDate`，能覆盖首次 30 天、后续 15 分钟重叠窗口内的延迟发布与修订；窗口外旧 CVE 的后续修改尚需增加 `lastModStartDate/lastModEndDate` 对账任务。
+- “内容修订检测”只对本轮被上游重新返回或被对账命中的记录生效，不等同于对任意历史记录做全量变更扫描。
 
 ## 两种运行方式
 
@@ -107,11 +129,13 @@ INTEL_RUN_LIVE=1 uv run pytest -m live                  # 真实爬取端到端
 uv run ruff check . && uv run pyright                   # 质量门禁
 ```
 
+当前离线套件覆盖 29 个用例；`live` 测试默认跳过，只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
+
 ## 部署（Docker Compose）
 
 ```bash
 docker compose up -d --build
-docker compose ps                 # 三个容器应为 Up / healthy
+docker compose ps                 # api/worker 应为 Up，postgres 应为 healthy
 curl localhost:8000/health        # {"status":"ok"}
 ```
 
@@ -121,11 +145,11 @@ curl localhost:8000/health        # {"status":"ok"}
 - `worker` 随后 `intel sync` 载入 `sources.yaml`，并按调度持续抓取。
 - 数据持久化在 `pgdata` 卷，网页快照存 `blobdata` 卷。
 
-动态网页兜底（Playwright，默认不启用）：
+已有数据库升级到本版本时，必须先应用 `c3e1d7a4b902_raw_item_content_versions`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行该命令。迁移只替换 RawItem 唯一约束，不删除或回填已有数据。
 
-```bash
-docker compose --profile playwright up -d
-```
+> 当前 API 未实现认证，且包含 `/ops/tick` 运维写操作。部署时应只绑定可信内网或在前置网关完成认证与访问控制。
+
+动态网页兜底目前尚未实现。Compose 中的 `playwright` Profile 只是预留运行位，当前镜像不包含 Playwright 浏览器和 Connector，不应作为生产抓取能力启用。
 
 ### 代理 / 国内海外混合部署
 
@@ -152,7 +176,7 @@ docker compose up -d postgres
 export INTEL_DATABASE_URL=postgresql+psycopg://intel:intel@localhost:5432/intel
 
 uv run alembic upgrade head     # 迁移
-uv run intel sync               # 载入 sources.yaml（14 个 endpoint）
+uv run intel sync               # 载入 sources.yaml（18 个 endpoint）
 uv run intel run-once           # 真实抓取 + 标准化 + 分类一轮
 uv run intel stats              # 查看各阶段数量
 uv run intel serve              # 起 API（:8000）
@@ -163,7 +187,7 @@ uv run intel serve              # 起 API（:8000）
 ```
 src/ai_security_hot/
   config/       Settings + sources.yaml 加载器（含 egress 字段）
-  domain/       枚举 + 领域值对象（RawItem/NormalizedDocument/Checkpoint + known_ids + last_success_at）
+  domain/       枚举 + 领域值对象（RawItem/NormalizedDocument/Checkpoint + known content hashes + 独立内容水位）
   models/       SQLAlchemy 表 + 会话
   connectors/   FetchContext（sync get + async aget）+ SSRF + 6 类连接器（RSS/REST/GitHub/Web/arXiv/Sitemap）
   parsers/      各源 Parser（rss/cisa_kev/nvd/github_releases/web_article/arxiv/sitemap_article）+ normalize
@@ -173,16 +197,15 @@ src/ai_security_hot/
   jobs/         无状态调度 tick + self_check
   api/          FastAPI 只读/运维接口
   cli.py        intel CLI（sync/run-once/serve/worker/export/self-check/stats/classify/fetch/normalize/fulltext）
-sources/        sources.yaml（14 个真实 endpoint）+ taxonomy.yaml
-migrations/     Alembic（initial schema + M1.1 classification columns）
+sources/        sources.yaml（18 个真实 endpoint）+ taxonomy.yaml
+migrations/     Alembic（initial + classification + RawItem 内容版本）
 tests/          unit / smoke（离线）+ integration（真实爬取）
 ```
 
-## 后续（M1.2+）
+## 后续（M2+）
 
-- **增量更新（M1.2）**：所有连接器基于 DB `known_native_ids` 集合过滤已抓条目，只在 connector 层产出全新条目（当前已实现 NVD + Sitemap 的增量，RSS/arXiv/GitHub/CISA 待改造）。
 - **去重聚类**：近重复检测（RapidFuzz + SimHash）+ 事件聚类 + 强合并键（CVE/GHSA/模型+版本）。
 - **LLM 摘要/分类**：M1.3 混合分类器（规则 + LLM），中文摘要，事件影响分析。
 - **日报与投递**：日报冻结/生成/版本化 + 飞书/邮件投递幂等。
-- **更多信源**：接入首批 18~35 个 endpoint。
+- **更多信源**：在当前 18 个 endpoint 基础上扩展至约 35 个。
 - Parser 漂移检测、pgvector 可选增强。均由实际指标触发，不提前引入。

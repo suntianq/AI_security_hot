@@ -46,7 +46,10 @@ def list_sources() -> list[dict]:
 def list_documents(
     limit: int = Query(20, le=100),
     min_quality: float = Query(0.0, ge=0.0, le=1.0),
-    tech_direction: str | None = Query(None, description="ai_for_security|security_for_ai|agent"),
+    tech_direction: str | None = Query(
+        None,
+        description="cve|llm|agent|ai_for_security|security_for_ai|system_security",
+    ),
     company_model: str | None = Query(None, description="e.g. anthropic, openai"),
     event_type: str | None = Query(None),
 ) -> list[dict]:

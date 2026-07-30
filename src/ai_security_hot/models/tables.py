@@ -92,10 +92,17 @@ class FetchRun(Base):
 class RawItem(Base):
     __tablename__ = "raw_items"
     __table_args__ = (
-        # MVP §8 key unique constraints
-        UniqueConstraint("endpoint_id", "native_id", name="uq_raw_endpoint_native"),
+        # One immutable row per source-side content version. Revisions keep
+        # the same native id but carry a new content hash.
         UniqueConstraint(
-            "endpoint_id", "canonical_url", "published_at", name="uq_raw_endpoint_url_pub"
+            "endpoint_id",
+            "native_id",
+            "content_hash",
+            name="uq_raw_endpoint_native_content",
+        ),
+        UniqueConstraint(
+            "endpoint_id", "canonical_url", "published_at", "content_hash",
+            name="uq_raw_endpoint_url_pub_content",
         ),
     )
 
@@ -143,7 +150,7 @@ class Document(Base):
     # --- M1.1 classification (multi-label) + provenance ---
     tech_directions: Mapped[list] = mapped_column(
         JSONB, default=list, server_default="[]"
-    )  # subset of 3
+    )  # cve or a subset of the five news/research topic labels
     company_models: Mapped[list] = mapped_column(
         JSONB, default=list, server_default="[]"
     )  # subset of 15

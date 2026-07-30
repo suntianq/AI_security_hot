@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from secrets import randbelow
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -43,6 +44,10 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
                 policy=policy_json, next_run_at=datetime.now(UTC),
             ))
         else:
+            row.source_id = ep.source_id
+            row.priority = ep.priority.value
+            row.trust_tier = ep.trust_tier.value
+            row.language = ep.language
             row.connector = ep.connector.value
             row.parser = ep.parser
             row.url = ep.url
@@ -81,23 +86,43 @@ def claim_due_endpoints(session: Session, limit: int, lease_seconds: int = 300) 
     return ids
 
 
-def load_checkpoint(session: Session, endpoint_id: str) -> Checkpoint:
+def load_checkpoint(
+    session: Session,
+    endpoint_id: str,
+    *,
+    known_limit: int = 5000,
+) -> Checkpoint:
     row = session.get(SourceEndpoint, endpoint_id)
     if row is None:
         raise KeyError(f"unknown endpoint: {endpoint_id}")
+
+    # Descending order makes the first row for a native id its newest version.
+    known_rows = session.execute(
+        select(RawItem.native_id, RawItem.content_hash)
+        .where(RawItem.endpoint_id == endpoint_id)
+        .order_by(RawItem.id.desc())
+        .limit(known_limit)
+    ).all()
+    known_content_hashes: dict[str, str] = {}
+    for native_id, content_hash in known_rows:
+        known_content_hashes.setdefault(native_id, content_hash)
+
     return Checkpoint(
         etag=row.etag,
         last_modified=row.last_modified,
         cursor=row.cursor,
         last_success_at=row.last_success_at,
+        last_published_at=row.last_published_at,
+        known_content_hashes=known_content_hashes,
     )
 
 
 def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
     """Idempotent insert of raw items; returns count of newly inserted rows.
 
-    ON CONFLICT DO NOTHING on the (endpoint_id, native_id) unique key so a
-    re-poll of the same items is a no-op.
+    ON CONFLICT DO NOTHING on (endpoint_id, native_id, content_hash), so an
+    unchanged re-poll is a no-op while a source-side revision creates a new
+    immutable RawItem version.
     """
     new = 0
     for it in items:
@@ -111,7 +136,7 @@ def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
                 canonical_url=it.canonical_url, connector_version=it.connector_version,
                 stage=PipelineStage.FETCHED.value,
             )
-            .on_conflict_do_nothing(constraint="uq_raw_endpoint_native")
+            .on_conflict_do_nothing()
             .returning(RawItem.id)
         )
         if session.execute(stmt).first() is not None:
@@ -122,7 +147,11 @@ def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
 
 def advance_checkpoint(
     session: Session, endpoint_id: str, checkpoint: Checkpoint,
-    *, success: bool, error: str | None, interval_minutes: int,
+    *,
+    success: bool,
+    error: str | None,
+    interval_minutes: int,
+    jitter_seconds: int = 0,
 ) -> None:
     """Persist checkpoint + reschedule + clear the lease (after raw items saved)."""
     now = datetime.now(UTC)
@@ -132,16 +161,22 @@ def advance_checkpoint(
     row.etag = checkpoint.etag
     row.last_modified = checkpoint.last_modified
     row.cursor = checkpoint.cursor
+    if checkpoint.last_published_at is not None:
+        row.last_published_at = checkpoint.last_published_at
     row.last_fetched_at = now
     row.lease_until = None
-    row.next_run_at = now + timedelta(minutes=interval_minutes)
+    jitter = randbelow(jitter_seconds + 1) if jitter_seconds > 0 else 0
     if success:
         row.last_success_at = now
+        row.next_run_at = now + timedelta(minutes=interval_minutes, seconds=jitter)
         row.consecutive_failures = 0
         row.status = "active"
         row.last_error = None
     else:
         row.consecutive_failures += 1
+        # Retry quickly at first, then back off up to the normal source interval.
+        retry_minutes = min(interval_minutes, 2 ** min(row.consecutive_failures, 10))
+        row.next_run_at = now + timedelta(minutes=retry_minutes, seconds=jitter)
         row.last_error = error
         if row.consecutive_failures >= 5:
             row.status = "degraded"
@@ -151,9 +186,11 @@ def advance_checkpoint(
 def record_fetch_run(
     session: Session, endpoint_id: str, *, status: str,
     items_fetched: int, items_new: int, error: str | None,
+    started_at: datetime | None = None,
 ) -> None:
     session.add(FetchRun(
-        endpoint_id=endpoint_id, finished_at=datetime.now(UTC), status=status,
+        endpoint_id=endpoint_id, started_at=started_at or datetime.now(UTC),
+        finished_at=datetime.now(UTC), status=status,
         items_fetched=items_fetched, items_new=items_new, error=error,
     ))
     session.commit()
@@ -295,11 +332,25 @@ def iter_documents_for_export(
         }
 
 
-def claim_unclassified_documents(session: Session, limit: int) -> list[Document]:
-    """Fetch documents not yet classified (classified_at IS NULL)."""
+def claim_unclassified_documents(
+    session: Session,
+    limit: int,
+    *,
+    rule_version: str | None = None,
+) -> list[Document]:
+    """Fetch new documents and rule-classified documents on an older taxonomy."""
+    needs_classification = Document.classified_at.is_(None)
+    if rule_version:
+        needs_classification = needs_classification | (
+            (Document.classify_method == "rule")
+            & (
+                Document.classify_rule_version.is_(None)
+                | (Document.classify_rule_version != rule_version)
+            )
+        )
     stmt = (
         select(Document)
-        .where(Document.classified_at.is_(None))
+        .where(needs_classification)
         .order_by(Document.id)
         .limit(limit)
     )

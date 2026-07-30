@@ -1,8 +1,8 @@
 # AI × Security 情报后端 MVP 设计方案
 
 > 版本：v0.2  
-> 状态：实施基线（M0 骨架 + M1.1 规则分类 已完成）  
-> 最后更新：2026-07-29  
+> 状态：实施基线（M0 骨架 + M1.1 规则分类 + M1.2 增量优化 已完成）<br>
+> 最后更新：2026-07-30
 > 相关文档：[完整目标蓝图](./system-design.md) · [信源注册表](./source-registry.md)
 
 ## 1. 已确认的产品与技术决策
@@ -102,7 +102,7 @@ flowchart LR
 | `api` | 事件、日报、告警和健康查询 | 是，默认仅内网 |
 | `worker` | 调度、采集、解析、聚类、摘要和投递 | 否 |
 | `postgres` | 数据、状态、幂等和审计 | 否 |
-| `playwright` | 动态网页兜底，按 Compose Profile 启用 | 否 |
+| `playwright` | 仅预留 Compose Profile；Connector 与浏览器镜像尚未实现 | 否 |
 
 MVP 只有一个 `worker` 实例。即使如此，任务也必须使用数据库幂等键和租约，保证重启或误启动第二实例时不会重复处理。
 
@@ -164,14 +164,14 @@ Parser：负责把响应映射成 NormalizedDocument
 3. `GitHubConnector`
 4. `WebListConnector`
 5. `ArxivConnector`
-6. `SitemapConnector`（Sitemap → URL 模式过滤 → 并发抓取原文 → trafilatura 抽正文）
+6. `SitemapConnector`（列表页快速发现 + Sitemap 重叠对账 → 并发抓取原文 → trafilatura 抽正文）
 
-`PlaywrightConnector` 保留接口和独立运行 Profile，但不作为首批来源的默认依赖。
+`playwright` 仅保留枚举和 Compose Profile 运行位；当前没有 `PlaywrightConnector` 或浏览器镜像，不能作为实际抓取能力启用。
 
 Connector 支持两种 poll 模式：
 
 - **同步 `poll()`**：RSS / REST / GitHub / Web / arXiv，在 `run_in_executor` 中调度。
-- **异步 `apoll()`**：Sitemap，使用 `asyncio.gather + Semaphore` 并发抓取文章页，性能远优于逐篇串行。
+- **异步 `apoll()`**：Sitemap，列表页快速路径只抓未知 URL；对账路径使用 `asyncio.gather + Semaphore` 并发抓取候选文章。异步请求复用连接池，但请求启动仍严格服从 endpoint RPM。
 
 ### 5.3 Source Policy
 
@@ -215,26 +215,32 @@ MVP Source Policy 至少包含：
 - checkpoint 类型
 - 连续失败阈值
 
-### 5.4 当前已接入 14 个 endpoint（13 个 source）
+### 5.4 当前已接入 18 个 endpoint（17 个 source）
 
-> 原计划第一批 18 个 endpoint，实际调整为 14 个。4 个 GitHub Releases endpoint（langchain/dify/ollama/vllm）因内容噪音过大已删除。
+> 4 个 GitHub Releases endpoint（langchain/dify/ollama/vllm）因内容噪音过大已删除；2026-07-30 新增 AI HOT、Apple ML Research、NVIDIA Blog、Wiz Blog 四个官方 RSS，目前为 18 个 endpoint。
 
 | # | Endpoint | Connector | Parser | 增量机制 |
 |---|---|---|---|---|
-| 1 | openai-news-rss | RSS | rss-default-v1 | ETag/304 |
-| 2 | cisa-kev | REST | cisa-kev-v1 | ETag/304 |
-| 3 | nvd-recent | REST | nvd-v1 | **date_params + last_success_at** |
-| 4 | anthropic-news | **Sitemap** | sitemap-article-v1 | **lastmod 增量** |
-| 5 | huggingface-blog-rss | RSS + fulltext | rss-default-v1 | ETag/304 |
-| 6 | google-security-rss | RSS | rss-default-v1 | ETag/304 |
-| 7 | trailofbits-rss | RSS | rss-default-v1 | ETag/304 |
-| 8 | portswigger-research-rss | RSS + fulltext | rss-default-v1 | ETag/304 |
-| 9 | arxiv-ai-llm | arXiv | arxiv-v1 | 304（低效） |
-| 10 | arxiv-security-ai | arXiv | arxiv-v1 | 304（低效） |
-| 11 | hackernews-rss | RSS | rss-default-v1 | ETag/304 |
-| 12 | ithome-rss | RSS | rss-default-v1 | ETag/304 |
-| 13 | google-blog-ai-rss | RSS | rss-default-v1 | ETag/304 |
-| 14 | github-trending-rss | RSS | rss-default-v1 | ETag/304 |
+| 1 | openai-news-rss | RSS | rss-default-v1 | ETag/304 + native ID/content hash |
+| 2 | cisa-kev | REST | cisa-kev-v1 | ETag/304 + 同 CVE 内容修订检测 |
+| 3 | nvd-recent | REST | nvd-v1 | 15min 重叠时间窗 + 完整分页 + content hash |
+| 4 | anthropic-news | **Newsroom + Sitemap** | sitemap-article-v1 | 快速发现 + 每日 72h 重叠对账 |
+| 5 | huggingface-blog-rss | RSS + fulltext | rss-default-v1 | ETag/304 + content hash |
+| 6 | google-security-rss | RSS | rss-default-v1 | ETag/304 + content hash |
+| 7 | trailofbits-rss | RSS | rss-default-v1 | ETag/304 + content hash |
+| 8 | portswigger-research-rss | RSS + fulltext | rss-default-v1 | ETag/304 + content hash |
+| 9 | arxiv-ai-llm | arXiv | arxiv-v1 | native ID/content hash；304 辅助 |
+| 10 | arxiv-security-ai | arXiv | arxiv-v1 | native ID/content hash；304 辅助 |
+| 11 | hackernews-rss | RSS | rss-default-v1 | ETag/304 + content hash |
+| 12 | ithome-rss | RSS | rss-default-v1 | ETag/304 + content hash |
+| 13 | google-blog-ai-rss | RSS | rss-default-v1 | ETag/304 + content hash |
+| 14 | github-trending-rss | RSS | rss-default-v1 | ETag/304 + content hash |
+| 15 | aihot-selected-rss | RSS | rss-default-v1 | ETag/304 + 最新 50 条精选窗口 + content hash |
+| 16 | apple-ml-research-rss | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash |
+| 17 | nvidia-blog-rss | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash |
+| 18 | wiz-blog-rss | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash |
+
+四个新增站点都有官方 RSS，可直接复用 `rss-2` 与 `rss-default-v1`。AI HOT 的 RSS 是官方推荐的最新 50 条精选窗口；完整历史镜像还需要实现其 `snapshot + changes` opaque cursor、409 重建和撤选语义，当前通用 REST Connector 不能完整表达，因此本轮不新增一个名不副实的 REST endpoint。
 
 第一批的目标是验证六类 Connector、中文/英文处理和四条内容主线，不代表最终内容覆盖完整。
 
@@ -249,7 +255,7 @@ MVP Source Policy 至少包含：
 - `cursor`
 - `last_published_at`
 - `last_fetched_at`
-- `last_success_at`（上次成功推进的时间，用于 NVD date_params 和 Sitemap lastmod 过滤）
+- `last_success_at`（上次成功抓取时间，用于 NVD 重叠时间窗）
 - `content_hash`
 - `consecutive_failures`
 - `next_run_at`
@@ -257,10 +263,10 @@ MVP Source Policy 至少包含：
 
 增量过滤优先级：
 
-1. **API 级增量**（最强）：NVD `date_params` 用 `pubStartDate=last_success_at`，只请求新 CVE。Sitemap 用 `lastmod > last_success_at`，只抓新增/修改页。
-2. **known_ids 集合过滤**（M1.2 待实现）：DB 已有 `native_id` 集合，连接器跳过已知条目。时间启发只做早停优化，不做主去重。
+1. **API/水位增量**：NVD 从 `last_success_at - overlap` 开始并完整分页；Sitemap 使用独立内容水位和 72 小时重叠窗口，避免粗粒度 `lastmod` 漏数。
+2. **known content 过滤**：Checkpoint 携带最近的 `native_id → content_hash`；未变化内容在 Connector 层过滤，已有 ID 的内容变化会生成新 RawItem 版本。
 3. **HTTP 级增量**：ETag/304，部分源有效（CISA），部分源几乎不返回 304（arXiv）。
-4. **DB 级幂等兜底**：`ON CONFLICT DO NOTHING` on `(endpoint_id, native_id)`，保证无论如何不重复写入。
+4. **DB 级幂等兜底**：`ON CONFLICT DO NOTHING` 保护内容版本唯一键；完全相同的 `(endpoint_id, native_id, content_hash)` 不重复写入。
 
 处理顺序：
 
@@ -274,6 +280,13 @@ MVP Source Policy 至少包含：
 ```
 
 必须先保存 Raw Item，再推进 checkpoint，避免进程崩溃造成数据永久遗漏。
+
+当前实现边界：
+
+- Checkpoint 的 known-content 映射只读取每个 endpoint 最近 5,000 个 RawItem 版本；DB 唯一约束继续对全历史兜底。
+- RSS/arXiv 的覆盖范围受上游 feed/API 返回窗口限制，超过保留期的停机无法仅靠 content hash 补回。
+- NVD 当前按发布时间窗口同步；窗口内会完整分页并识别内容变化，但窗口外旧 CVE 的修改要等后续 modified-time 对账能力。
+- Anthropic 每 2 小时检查 Newsroom，每 24 小时执行一次最多 50 URL、72 小时重叠的 Sitemap 对账；单篇抓取失败会记录日志并在仍处于发现/对账窗口时重试。
 
 ### 6.2 原始证据
 
@@ -417,8 +430,8 @@ MVP 不建立独立图数据库。实体和框架映射先存规范字段与 JSO
 关键唯一约束：
 
 ```text
-raw_items(endpoint_id, native_id)
-raw_items(endpoint_id, canonical_url, published_at)
+raw_items(endpoint_id, native_id, content_hash)
+raw_items(endpoint_id, canonical_url, published_at, content_hash)
 delivery_runs(channel, target, payload_hash)
 event_documents(event_id, document_id)
 ```
@@ -546,7 +559,7 @@ class DeliveryAdapter:
 | 网络 | HTTPX AsyncClient |
 | RSS | feedparser |
 | HTML | lxml、Trafilatura |
-| 动态网页 | Playwright，按需启用 |
+| 动态网页 | Playwright（M2+ 候选，当前未包含） |
 | 重试 | Tenacity |
 | 相似度 | RapidFuzz、SimHash；向量暂不作为必需项 |
 | 模板 | Jinja2 |
@@ -562,7 +575,7 @@ class DeliveryAdapter:
 - [PostgreSQL 版本策略](https://www.postgresql.org/support/versioning/)为长期维护提供明确周期。
 - [APScheduler](https://apscheduler.readthedocs.io/en/master/userguide.html)支持持久化任务存储。
 - [Trafilatura](https://trafilatura.readthedocs.io/en/stable/)用于网页正文和元数据抽取。
-- [Playwright Python](https://playwright.dev/python/docs/intro)只作为动态页面兜底。
+- [Playwright Python](https://playwright.dev/python/docs/intro)是未来动态页面兜底候选，当前构建未包含。
 
 ### 12.1 明确不引入
 
@@ -589,7 +602,7 @@ src/
     ├── parsers/           各源 Parser + normalize
     ├── classify/          RuleClassifier + taxonomy.yaml + Classification 溯源
     ├── pipelines/         并发 fetch stage + normalize/fulltext/classify stage
-    ├── domain/            枚举 + RawItem/NormalizedDocument/Checkpoint(含 last_success_at)
+    ├── domain/            枚举 + RawItem/NormalizedDocument/Checkpoint（known content + 内容水位）
     ├── storage/           BlobStore + repositories（租约/幂等/阶段推进/导出）
     ├── models/            SQLAlchemy 表 + 会话
     ├── jobs/              无状态调度 tick + self_check
@@ -598,7 +611,7 @@ src/
     └── main.py
 
 sources/
-├── sources.yaml          14 个真实 endpoint 配置
+├── sources.yaml          18 个真实 endpoint 配置
 ├── taxonomy.yaml         分类规则词表
 └── parsers/
 
@@ -608,14 +621,14 @@ tests/
 ├── test_smoke.py         集成冒烟
 └── integration/          真实爬取（INTEL_RUN_LIVE=1）
 
-migrations/               Alembic（initial schema + M1.1 classification columns）
+migrations/               Alembic（initial + classification + RawItem 内容版本）
 compose.yaml
 Dockerfile
 pyproject.toml
 uv.lock
 ```
 
-Parser 的历史响应样本放在 `tests/fixtures/`，不得在测试时依赖真实网站。
+当前小型 RSS/JSON/XML/HTML 固定响应直接放在 `tests/test_smoke.py`；`tests/fixtures/` 预留给较大的脱敏历史样本。默认测试不得依赖真实网站，真实源检查只通过 `INTEL_RUN_LIVE=1` 显式启用。
 
 ## 14. Windows 开发与 Linux 部署
 
@@ -701,6 +714,8 @@ docker compose up
 - Worker 中断后重新启动。
 - SSRF、重定向、超大响应和恶意 HTML。
 
+当前离线套件有 29 个用例，已覆盖 NVD 重叠窗口/分页、同 ID 内容修订、Anthropic 列表快速发现/Sitemap 对账、严格限速和流式大小限制等 M1.2 路径；事件聚类、LLM 与投递相关条目属于后续里程碑。
+
 ### 16.2 最小指标
 
 - `fetch_success_total`
@@ -732,31 +747,33 @@ MVP 使用 JSON 日志和 `/health`、`/v1/sources/health`。需要跨进程指�
 - BlobStore + 二次抓取全文（fulltext stage）。
 - 12 个真实源接入。
 
-完成标准已达到：空系统可启动、迁移、调度、查询健康状态；重启不漏采、不重复写入。
+完成标准已达到：空系统可启动、迁移、调度、查询健康状态；在上游仍可重放的窗口内重启可续采，完全相同的内容不会重复落库。
 
 ### M1：结构化采集 ✅（部分合并到 M0）
 
 - RSS、REST API、GitHub Connector。
 - 接入前 9 个结构化 endpoint + 网页适配器。
 - Raw Item、checkpoint、幂等和采集健康。
-- **新增 SitemapConnector**：专为 SPA 站点设计，替换 Anthropic Web 适配器。
+- **新增并升级 SitemapConnector**：Anthropic 从 Web 适配器迁移为 Newsroom 快速发现 + Sitemap 定期对账。
 - **新增 ArxivConnector**：arXiv API 搜索。
 - **新增并发 fetch pipeline**：`asyncio.gather` 最多 5 个 endpoint 同时抓取。
-- **NVD 滚动时间窗 + 增量**：`date_params` + `last_success_at`。
-- 14 个 endpoint 真实可跑。
+- **NVD 滚动时间窗 + 增量**：`last_success_at - 15min` 重叠窗口 + `totalResults/startIndex` 完整分页。
+- 18 个 endpoint 真实可跑。
 
 ### M1.1：规则分类 ✅
 
 - RuleClassifier + taxonomy.yaml。
-- 四条主线分类（ai / ai_for_security / ai_enabled_threats / security_for_ai）。
+- 结构化 NVD/CISA 记录使用独立 `cve` 标签；新闻与论文使用 llm / agent / ai_for_security / security_for_ai / system_security 主题标签。完整四主线、特别是 ai_enabled_threats 的语义判定在 M2/M1.3 完成。
 - 事件类型优先级（source_id → connector → CVE/GHSA → 关键词 → 默认）。
 - Classification 溯源（method / rule_version / input_hash）。
 
-### M1.2：增量优化（进行中）
+### M1.2：增量优化 ✅
 
-- 所有连接器基于 DB `known_native_ids` 集合过滤已抓条目。
-- NVD + Sitemap 已实现 API 级增量；RSS/arXiv/CISA 待改造。
-- `Checkpoint.known_ids` 传递到连接器层。
+- Checkpoint 传递最近的 native ID/content hash，RSS、REST、GitHub、arXiv、Sitemap 在 Connector 层过滤未变化内容。
+- 同一 native ID 的内容修订保存为新的不可变 RawItem 版本。
+- NVD 使用 15 分钟重叠窗口和完整分页。
+- Anthropic 使用 Newsroom 快速发现 + 每日 Sitemap 重叠对账。
+- 已知内容缓存、feed 保留窗口和 NVD 旧记录 modified-time 对账的边界见 §6.1；这些是后续完整性优化项，不影响 DB 全历史幂等。
 
 ### M2：事件情报
 
@@ -828,6 +845,6 @@ Agent 只通过受限 API/MCP 使用情报能力，数据库仍是唯一事实�
 3. 首选 LLM Provider 和单日费用上限。
 4. 第一批 GitHub Watchlist 仓库。
 5. 紧急告警的固定资产/产品清单。
-6. 第一批 18 个 endpoint 是否需要替换或增加中文来源。
+6. 当前 18 个 endpoint 后续应优先补哪些国内一手来源。
 
 这些配置不改变总体架构，但会决定第一轮 Connector、模板和验收数据。

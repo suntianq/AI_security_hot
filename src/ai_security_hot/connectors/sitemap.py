@@ -1,29 +1,9 @@
-"""Sitemap connector — reads sitemap.xml, filters URLs by pattern, fetches each
-article page concurrently and extracts full text via trafilatura.
+"""Hybrid listing + sitemap connector for article sites.
 
-This is a generic connector for SPA sites that have a sitemap but no static
-article body on the listing page (e.g. Anthropic Newsroom / Research).  The
-sitemap is the reliable discovery layer; trafilatura handles static article
-pages.  Any site with a sitemap can reuse this without code changes.
-
-**Incremental mode**: if the checkpoint carries ``last_success_at`` (set on
-the second and subsequent polls), only URLs whose ``<lastmod>`` is newer than
-that timestamp are fetched.  On the very first poll (no ``last_success_at``),
-all matching URLs are fetched (capped by ``max_urls``).
-
-**Concurrency**: article pages are fetched concurrently via ``asyncio.gather``
-with a semaphore to respect the per-endpoint ``requests_per_minute`` limit.
-
-Configuration via ``options.sitemap`` in ``sources.yaml``::
-
-    options:
-      sitemap:
-        url_patterns:          # only keep URLs matching any of these
-          - "/news/"
-          - "/research/"
-        strip_query: true      # remove query strings from URLs before dedup
-        max_urls: 50           # cap on URLs to fetch per poll (newest first)
-        concurrency: 5         # max concurrent article fetches
+The fast path reads a server-rendered listing page and fetches only unknown
+article URLs.  A slower sitemap reconciliation runs periodically with an
+overlap window, catching listing omissions and revisions without comparing a
+coarse ``lastmod`` directly to the precise fetch-completion timestamp.
 """
 
 from __future__ import annotations
@@ -33,8 +13,11 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
+
+from lxml import html as lxml_html
 
 from ai_security_hot.config.sources import EndpointPolicy
 from ai_security_hot.connectors.base import Checkpoint, Connector, PollResult
@@ -49,7 +32,6 @@ _NS = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
 
 
 def _to_utc(dt: datetime) -> datetime:
-    """Normalize a datetime to offset-aware UTC."""
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
@@ -62,10 +44,6 @@ class _SitemapEntry:
 
 
 def _parse_sitemap(xml_bytes: bytes) -> list[_SitemapEntry]:
-    """Parse a sitemap XML (regular or sitemap-index is not followed in M0)."""
-    # S314: defusedxml is not a dependency; sitemap XML comes from a trusted
-    # endpoint (configured by the operator in sources.yaml), not arbitrary user
-    # input.  The SSRF guard already limits which hosts we fetch from.
     root = ElementTree.fromstring(xml_bytes)  # noqa: S314
     entries: list[_SitemapEntry] = []
     for url_el in root.findall("sm:url", _NS):
@@ -90,113 +68,229 @@ def _filter_urls(
     max_urls: int,
     since: datetime | None = None,
 ) -> list[_SitemapEntry]:
-    """Keep only URLs matching any pattern, optionally newer than *since*,
-    strip query, cap count."""
     if patterns:
-        compiled = [re.compile(p) for p in patterns]
-        entries = [e for e in entries if any(r.search(e.loc) for r in compiled)]
+        compiled = [re.compile(pattern) for pattern in patterns]
+        entries = [entry for entry in entries if any(p.search(entry.loc) for p in compiled)]
     if since:
-        since_utc = since if since.tzinfo else since.replace(tzinfo=UTC)
+        since_utc = _to_utc(since)
         entries = [
-            e for e in entries
-            if e.lastmod is None
-            or _to_utc(e.lastmod) > since_utc
+            entry
+            for entry in entries
+            if entry.lastmod is None or _to_utc(entry.lastmod) >= since_utc
         ]
     if strip_query:
-        for e in entries:
-            e.loc = e.loc.split("?", 1)[0]
-    entries.sort(key=lambda e: e.lastmod or datetime.min.replace(tzinfo=UTC), reverse=True)
+        entries = [
+            _SitemapEntry(loc=entry.loc.split("?", 1)[0], lastmod=entry.lastmod)
+            for entry in entries
+        ]
+    entries.sort(
+        key=lambda entry: _to_utc(entry.lastmod)
+        if entry.lastmod
+        else datetime.min.replace(tzinfo=UTC),
+        reverse=True,
+    )
     return entries[:max_urls]
 
 
+def _parse_listing_links(
+    html_text: str,
+    listing_url: str,
+    patterns: list[str] | None,
+    max_urls: int,
+) -> list[str]:
+    if not html_text:
+        return []
+    doc = lxml_html.fromstring(html_text)
+    base_host = urlparse(listing_url).hostname
+    compiled = [re.compile(pattern) for pattern in patterns or []]
+    links: list[str] = []
+    seen: set[str] = set()
+    for href in doc.xpath("//a[@href]/@href"):
+        absolute = urljoin(listing_url, str(href)).split("?", 1)[0]
+        parsed = urlparse(absolute)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname != base_host:
+            continue
+        if compiled and not any(pattern.search(parsed.path) for pattern in compiled):
+            continue
+        if absolute not in seen:
+            seen.add(absolute)
+            links.append(absolute)
+        if len(links) >= max_urls:
+            break
+    return links
+
+
+def _reconciled_at(cursor: str | None) -> datetime | None:
+    if not cursor:
+        return None
+    try:
+        value = json.loads(cursor).get("sitemap_reconciled_at")
+        return datetime.fromisoformat(value) if value else None
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _checkpoint_cursor(reconciled_at: datetime | None) -> str | None:
+    if reconciled_at is None:
+        return None
+    return json.dumps({"sitemap_reconciled_at": _to_utc(reconciled_at).isoformat()})
+
+
 class SitemapConnector(Connector):
-    version = "sitemap-1"
+    version = "sitemap-2"
 
     async def apoll(self, policy: EndpointPolicy, checkpoint: Checkpoint) -> PollResult:
         opts = (policy.options or {}).get("sitemap", {})
-        url_patterns = opts.get("url_patterns")
+        patterns = opts.get("url_patterns")
         strip_query = opts.get("strip_query", True)
-        max_urls = opts.get("max_urls", 50)
-        concurrency = opts.get("concurrency", 5)
+        max_urls = int(opts.get("max_urls", 50))
+        concurrency = int(opts.get("concurrency", 5))
+        listing_url = opts.get("listing_url")
+        listing_max_urls = int(opts.get("listing_max_urls", 20))
+        reconcile_hours = int(opts.get("reconcile_interval_hours", 0))
+        overlap_hours = int(opts.get("overlap_hours", 48))
 
-        # 1. Fetch the sitemap (single request, sync is fine)
-        res = self.ctx.get(policy.url, policy)
-        if res.status_code != 200:
-            return PollResult([], checkpoint)
+        now = datetime.now(UTC)
+        candidates: dict[str, _SitemapEntry] = {}
+        listing_failed = False
 
-        # 2. Parse sitemap entries and filter — incremental: skip already-seen
-        entries = _parse_sitemap(res.body)
-        entries = _filter_urls(
-            entries, url_patterns, strip_query, max_urls,
-            since=checkpoint.last_success_at,
+        # Fast path: one listing request, then only previously unseen URLs.
+        if listing_url:
+            try:
+                listing_res = await self.ctx.aget(listing_url, policy)
+                listing_html = listing_res.body.decode("utf-8", errors="replace")
+                for url in _parse_listing_links(
+                    listing_html, listing_url, patterns, listing_max_urls
+                ):
+                    if url not in checkpoint.known_native_ids:
+                        candidates[url] = _SitemapEntry(loc=url)
+            except Exception as exc:
+                listing_failed = True
+                log.warning("listing fetch failed for %s: %s", policy.id, exc)
+
+        last_reconciled = _reconciled_at(checkpoint.cursor)
+        reconcile_due = (
+            not listing_url
+            or listing_failed
+            or last_reconciled is None
+            or now - _to_utc(last_reconciled) >= timedelta(hours=reconcile_hours)
         )
+        watermark = checkpoint.last_published_at
+        reconciled = last_reconciled
 
+        # Slow path: periodic overlapping sitemap reconciliation.
+        if reconcile_due:
+            bootstrapping_existing = watermark is None and bool(checkpoint.known_native_ids)
+            sitemap_res = await self.ctx.aget(policy.url, policy)
+            sitemap_entries = _parse_sitemap(sitemap_res.body)
+            matching_entries = _filter_urls(
+                sitemap_entries,
+                patterns,
+                strip_query,
+                max_urls,
+                since=(
+                    _to_utc(watermark) - timedelta(hours=overlap_hours)
+                    if watermark
+                    else None
+                ),
+            )
+            compiled = [re.compile(pattern) for pattern in patterns or []]
+            dated = [
+                entry.lastmod
+                for entry in sitemap_entries
+                if entry.lastmod
+                and (not compiled or any(pattern.search(entry.loc) for pattern in compiled))
+            ]
+            if dated:
+                newest = max(_to_utc(value) for value in dated)
+                watermark = max(_to_utc(watermark), newest) if watermark else newest
+
+            for entry in matching_entries:
+                if bootstrapping_existing and entry.loc in checkpoint.known_native_ids:
+                    continue
+                current = candidates.get(entry.loc)
+                if current is None or current.lastmod is None:
+                    candidates[entry.loc] = entry
+            reconciled = now
+
+        entries = list(candidates.values())[:max_urls]
         if not entries:
-            return PollResult([], checkpoint)
+            return PollResult(
+                [],
+                Checkpoint(
+                    etag=checkpoint.etag,
+                    last_modified=checkpoint.last_modified,
+                    cursor=_checkpoint_cursor(reconciled),
+                    last_published_at=watermark,
+                ),
+            )
 
-        # 3. Deduplicate URLs
-        seen: set[str] = set()
-        unique: list[_SitemapEntry] = []
-        for e in entries:
-            if e.loc not in seen:
-                seen.add(e.loc)
-                unique.append(e)
-
-        # 4. Fetch article pages concurrently
-        sem = asyncio.Semaphore(concurrency)
+        semaphore = asyncio.Semaphore(concurrency)
 
         async def _fetch_one(entry: _SitemapEntry) -> RawItem | None:
-            url = entry.loc
-            async with sem:
+            async with semaphore:
                 try:
-                    art_res = await self.ctx.aget(url, policy)
-                except Exception as e:
-                    log.warning("sitemap article fetch failed for %s: %s", url, e)
+                    article_res = await self.ctx.aget(entry.loc, policy)
+                except Exception as exc:
+                    log.warning("sitemap article fetch failed for %s: %s", entry.loc, exc)
                     return None
-            if art_res.status_code != 200:
-                return None
 
-            html = art_res.body.decode("utf-8", errors="replace")
-            art = extract_article(html)
-
-            blob_ref = get_blob_store().put(art_res.body)
-
+            html_text = article_res.body.decode("utf-8", errors="replace")
+            article = await asyncio.to_thread(extract_article, html_text)
+            blob_ref = await asyncio.to_thread(get_blob_store().put, article_res.body)
+            source_published = article.published or entry.lastmod
+            published = _to_utc(source_published) if source_published else None
             raw_text = json.dumps(
                 {
-                    "url": url,
-                    "title": art.title or "",
-                    "body": art.body or "",
-                    "published": art.published.isoformat() if art.published else None,
+                    "url": entry.loc,
+                    "title": article.title or "",
+                    "body": article.body or "",
+                    "published": article.published.isoformat() if article.published else None,
                     "lastmod": entry.lastmod.isoformat() if entry.lastmod else None,
                 },
                 ensure_ascii=False,
             )
-            content_hash = content_sha256(url, art.body or "")
+            # Keep the v1 hash formula for compatibility with existing rows;
+            # body revisions still create a new immutable content version.
+            item_hash = content_sha256(entry.loc, article.body or "")
+            if checkpoint.known_content_hashes.get(entry.loc) == item_hash:
+                return None
 
             return RawItem(
                 endpoint_id=policy.id,
                 source_id=policy.source_id,
-                native_id=url,
-                request_url=url,
-                final_url=art_res.final_url,
-                http_status=art_res.status_code,
-                published_at=entry.lastmod,
-                fetched_at=art_res.fetched_at,
+                native_id=entry.loc,
+                request_url=entry.loc,
+                final_url=article_res.final_url,
+                http_status=article_res.status_code,
+                published_at=published,
+                fetched_at=article_res.fetched_at,
                 language=policy.language,
-                content_hash=content_hash,
+                content_hash=item_hash,
                 blob_ref=blob_ref,
                 raw_text=raw_text,
-                canonical_url=url,
+                canonical_url=entry.loc,
                 connector_kind=ConnectorKind.SITEMAP,
                 connector_version=self.version,
             )
 
-        results = await asyncio.gather(*[_fetch_one(e) for e in unique])
-        items: list[RawItem] = [r for r in results if r is not None]
-
-        new_ck = Checkpoint(cursor=str(len(items)))
-        return PollResult(items, new_ck)
+        results = await asyncio.gather(*(_fetch_one(entry) for entry in entries))
+        items = [item for item in results if item is not None]
+        return PollResult(
+            items,
+            Checkpoint(
+                etag=checkpoint.etag,
+                last_modified=checkpoint.last_modified,
+                cursor=_checkpoint_cursor(reconciled),
+                last_published_at=watermark,
+            ),
+        )
 
     def poll(self, policy: EndpointPolicy, checkpoint: Checkpoint) -> PollResult:
-        """Synchronous fallback — runs the async apoll via asyncio.run."""
-        return asyncio.run(self.apoll(policy, checkpoint))
+        async def _run() -> PollResult:
+            try:
+                return await self.apoll(policy, checkpoint)
+            finally:
+                await self.ctx.aclose()
+
+        return asyncio.run(_run())

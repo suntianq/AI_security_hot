@@ -1,18 +1,14 @@
-"""FetchContext — the single controlled HTTP egress layer (plan 修正 2/3).
+"""The single controlled HTTP egress layer.
 
-Every connector calls ``ctx.get(...)`` or ``await ctx.aget(...)`` instead of
-using httpx directly, so SSRF, proxy selection, rate limiting, retry, timeout,
-size cap and ETag/Last-Modified handling are implemented once. Adding a new
-connector kind never re-implements this.
-
-The synchronous ``get()`` is kept for backwards-compatible connectors; the
-async ``aget()`` is used by async connectors (e.g. SitemapConnector) for
-concurrent HTTP requests.
+Sync and async callers share SSRF validation, proxy selection, strict request
+start-rate limiting, retries, timeouts and streaming response-size caps. Async
+requests reuse pooled clients for the lifetime of one pipeline pass.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -35,39 +31,39 @@ class ResponseTooLarge(Exception):
 
 @dataclass
 class _RateLimiter:
-    """Simple per-endpoint token bucket keyed by requests_per_minute."""
+    """Reserve request start times per endpoint, safely across threads/tasks."""
 
-    _last_call: dict[str, float] = field(default_factory=dict)
+    _next_call: dict[str, float] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def _reserve(self, endpoint_id: str, rpm: float) -> float:
+        if rpm <= 0:
+            return 0.0
+        interval = 60.0 / rpm
+        now = time.monotonic()
+        with self._lock:
+            target = max(now, self._next_call.get(endpoint_id, now))
+            self._next_call[endpoint_id] = target + interval
+        return max(0.0, target - now)
 
     def wait(self, endpoint_id: str, rpm: float) -> None:
-        if rpm <= 0:
-            return
-        min_interval = 60.0 / rpm
-        last = self._last_call.get(endpoint_id, 0.0)
-        elapsed = time.monotonic() - last
-        if elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
-        self._last_call[endpoint_id] = time.monotonic()
+        delay = self._reserve(endpoint_id, rpm)
+        if delay:
+            time.sleep(delay)
 
     async def await_(self, endpoint_id: str, rpm: float) -> None:
-        if rpm <= 0:
-            return
-        min_interval = 60.0 / rpm
-        last = self._last_call.get(endpoint_id, 0.0)
-        elapsed = time.monotonic() - last
-        if elapsed < min_interval:
-            await asyncio.sleep(min_interval - elapsed)
-        self._last_call[endpoint_id] = time.monotonic()
+        delay = self._reserve(endpoint_id, rpm)
+        if delay:
+            await asyncio.sleep(delay)
 
 
 class FetchContext:
     def __init__(self) -> None:
         self.settings = get_settings()
         self._rate = _RateLimiter()
+        self._async_clients: dict[tuple[str | None, int], httpx.AsyncClient] = {}
 
     def _proxy_for(self, route: EgressRoute) -> str | None:
-        """Resolve the proxy URL for a route. Falls back to direct if the pool
-        is not configured (so a dev box with no proxy still works)."""
         if route is EgressRoute.PROXY_POOL_CN:
             return self.settings.proxy_pool_cn
         if route is EgressRoute.PROXY_POOL_GLOBAL:
@@ -91,6 +87,25 @@ class FetchContext:
             headers.update(extra_headers)
         return headers
 
+    def _async_client(self, policy: EndpointPolicy, proxy: str | None) -> httpx.AsyncClient:
+        key = (proxy, policy.fetch.max_redirects)
+        client = self._async_clients.get(key)
+        if client is None:
+            client = httpx.AsyncClient(
+                follow_redirects=True,
+                max_redirects=policy.fetch.max_redirects,
+                proxy=proxy,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+            self._async_clients[key] = client
+        return client
+
+    async def aclose(self) -> None:
+        clients = list(self._async_clients.values())
+        self._async_clients.clear()
+        if clients:
+            await asyncio.gather(*(client.aclose() for client in clients))
+
     def get(
         self,
         url: str,
@@ -100,7 +115,7 @@ class FetchContext:
         last_modified: str | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> FetchResult:
-        """Perform one synchronous controlled GET. Returns FetchResult; 304 => from_cache."""
+        """Perform one synchronous controlled GET. A 304 is marked from_cache."""
         validate_url(url)
         proxy = self._proxy_for(policy.egress.route)
         self._rate.wait(policy.id, policy.fetch.requests_per_minute)
@@ -141,6 +156,7 @@ class FetchContext:
                             egress_route=policy.egress.route,
                             from_cache=True,
                         )
+                    resp.raise_for_status()
                     cap = policy.fetch.max_response_bytes
                     chunks: list[bytes] = []
                     total = 0
@@ -149,7 +165,6 @@ class FetchContext:
                         if total > cap:
                             raise ResponseTooLarge(f"{url} exceeded {cap} bytes")
                         chunks.append(chunk)
-                    resp.raise_for_status()
                     return FetchResult(
                         url=url,
                         final_url=str(resp.url),
@@ -171,8 +186,7 @@ class FetchContext:
         last_modified: str | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> FetchResult:
-        """Async version of ``get()`` — same SSRF/rate-limit/retry/size-cap logic,
-        but uses ``httpx.AsyncClient`` for concurrent I/O."""
+        """Async controlled GET using a reusable connection-pooled client."""
         validate_url(url)
         proxy = self._proxy_for(policy.egress.route)
         await self._rate.await_(policy.id, policy.fetch.requests_per_minute)
@@ -190,16 +204,15 @@ class FetchContext:
             reraise=True,
         )
         async def _do() -> FetchResult:
-            async with httpx.AsyncClient(
-                timeout=policy.fetch.timeout_seconds,
-                follow_redirects=True,
-                max_redirects=policy.fetch.max_redirects,
-                proxy=proxy,
+            client = self._async_client(policy, proxy)
+            if not proxy:
+                validate_resolved(httpx.URL(url).host)
+            async with client.stream(
+                "GET",
+                url,
                 headers=headers,
-            ) as client:
-                if not proxy:
-                    validate_resolved(httpx.URL(url).host)
-                resp = await client.get(url)
+                timeout=policy.fetch.timeout_seconds,
+            ) as resp:
                 if resp.status_code == 304:
                     return FetchResult(
                         url=url,
@@ -211,17 +224,21 @@ class FetchContext:
                         egress_route=policy.egress.route,
                         from_cache=True,
                     )
-                if len(resp.content) > policy.fetch.max_response_bytes:
-                    raise ResponseTooLarge(
-                        f"{url} exceeded {policy.fetch.max_response_bytes} bytes"
-                    )
                 resp.raise_for_status()
+                cap = policy.fetch.max_response_bytes
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > cap:
+                        raise ResponseTooLarge(f"{url} exceeded {cap} bytes")
+                    chunks.append(chunk)
                 return FetchResult(
                     url=url,
                     final_url=str(resp.url),
                     status_code=resp.status_code,
                     headers={k.lower(): v for k, v in resp.headers.items()},
-                    body=resp.content,
+                    body=b"".join(chunks),
                     fetched_at=datetime.now(UTC),
                     egress_route=policy.egress.route,
                 )

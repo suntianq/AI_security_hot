@@ -17,7 +17,7 @@ from ai_security_hot.domain.models import RawItem, content_sha256
 
 
 class GitHubConnector(Connector):
-    version = "github-1"
+    version = "github-2"
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
@@ -47,6 +47,9 @@ class GitHubConnector(Connector):
             pub_dt = datetime.fromisoformat(published.replace("Z", "+00:00")) if published else None
             title = rel.get("name") or rel.get("tag_name") or ""
             body = rel.get("body") or ""
+            item_hash = content_sha256(native_id, title, body)
+            if checkpoint.known_content_hashes.get(native_id) == item_hash:
+                continue
             items.append(
                 RawItem(
                     endpoint_id=policy.id,
@@ -58,7 +61,7 @@ class GitHubConnector(Connector):
                     published_at=pub_dt,
                     fetched_at=res.fetched_at,
                     language=policy.language,
-                    content_hash=content_sha256(native_id, title, body),
+                    content_hash=item_hash,
                     raw_text=f"{title}\n\n{body}",
                     canonical_url=rel.get("html_url", policy.url),
                     connector_kind=ConnectorKind.GITHUB,
@@ -70,5 +73,14 @@ class GitHubConnector(Connector):
             etag=res.etag or checkpoint.etag,
             last_modified=res.last_modified or checkpoint.last_modified,
             cursor=checkpoint.cursor,
+            last_published_at=max(
+                [it.published_at for it in items if it.published_at]
+                + (
+                    [checkpoint.last_published_at]
+                    if checkpoint.last_published_at
+                    else []
+                ),
+                default=None,
+            ),
         )
         return PollResult(items, new_ck)

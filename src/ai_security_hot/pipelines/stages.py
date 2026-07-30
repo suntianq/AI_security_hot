@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 
 from ai_security_hot.config.sources import EndpointPolicy, load_registry
 from ai_security_hot.connectors.fetch import FetchContext
@@ -54,9 +55,15 @@ def run_fetch_stage(limit: int = 5, lease_seconds: int = 300) -> dict:
         policy = registry.endpoint(endpoint_id)
         return await _afetch_one(ctx, policy)
 
-    results = asyncio.run(
-        _gather_with_concurrency(FETCH_CONCURRENCY, [_fetch_endpoint(eid) for eid in due_ids])
-    )
+    async def _run_all() -> list[int]:
+        try:
+            return await _gather_with_concurrency(
+                FETCH_CONCURRENCY, [_fetch_endpoint(endpoint_id) for endpoint_id in due_ids]
+            )
+        finally:
+            await ctx.aclose()
+
+    results = asyncio.run(_run_all())
 
     for new_count in results:
         stats["items_new"] += new_count
@@ -91,6 +98,7 @@ async def _afetch_one(ctx: FetchContext, policy: EndpointPolicy) -> int:
 
 async def _afetch_one_async(ctx: FetchContext, policy: EndpointPolicy, connector) -> int:
     """Fetch one endpoint using an async connector's apoll method."""
+    started_at = datetime.now(UTC)
     error: str | None = None
     items_new = 0
     items_fetched = 0
@@ -114,17 +122,20 @@ async def _afetch_one_async(ctx: FetchContext, policy: EndpointPolicy, connector
             session, policy.id, new_checkpoint,
             success=success, error=error,
             interval_minutes=policy.schedule.interval_minutes,
+            jitter_seconds=policy.schedule.jitter_seconds,
         )
         repo.record_fetch_run(
             session, policy.id,
             status="ok" if success else "error",
             items_fetched=items_fetched, items_new=items_new, error=error,
+            started_at=started_at,
         )
     log.info("fetched %s: fetched=%d new=%d ok=%s", policy.id, items_fetched, items_new, success)
     return items_new
 
 
 def _fetch_one(ctx: FetchContext, policy: EndpointPolicy) -> int:
+    started_at = datetime.now(UTC)
     connector = get_connector(policy.connector, ctx)
     error: str | None = None
     items_new = 0
@@ -150,11 +161,13 @@ def _fetch_one(ctx: FetchContext, policy: EndpointPolicy) -> int:
             session, policy.id, new_checkpoint,
             success=success, error=error,
             interval_minutes=policy.schedule.interval_minutes,
+            jitter_seconds=policy.schedule.jitter_seconds,
         )
         repo.record_fetch_run(
             session, policy.id,
             status="ok" if success else "error",
             items_fetched=items_fetched, items_new=items_new, error=error,
+            started_at=started_at,
         )
     log.info("fetched %s: fetched=%d new=%d ok=%s", policy.id, items_fetched, items_new, success)
     return items_new
@@ -282,7 +295,11 @@ def run_classify_stage(limit: int = 500) -> dict:
     stats = {"classified": 0}
 
     with session_scope() as session:
-        docs = repo.claim_unclassified_documents(session, limit=limit)
+        docs = repo.claim_unclassified_documents(
+            session,
+            limit=limit,
+            rule_version=classifier.tax.version,
+        )
         for d in docs:
             ndoc = NormalizedDocument(
                 raw_item_native_id=str(d.raw_item_id),

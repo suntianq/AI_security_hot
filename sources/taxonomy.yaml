@@ -4,7 +4,7 @@
 # Matching is case-insensitive, word-boundary aware. Keep aliases specific
 # enough to avoid false hits (e.g. "GLM" alone is risky → require "智谱"/"ChatGLM").
 
-version: taxonomy-v1
+version: taxonomy-v2
 
 # --- Layer 1: 公司与模型 (multi-label) — borrowed from aihot ---
 # id -> list of aliases (matched in title + body)
@@ -25,9 +25,18 @@ company_models:
   cursor: ["Cursor"]
   openrouter: ["OpenRouter"]
 
-# --- Layer 2: 技术方向 (multi-label) — only the 3 the user cares about ---
-# A doc may hit 0..3. No hit => general AI (not force-tagged).
+# --- Layer 2: 内容/技术标签 ---
+# Structured NVD/CISA records are assigned `cve` in code and do not enter the
+# topical keyword buckets. News and papers may hit 0..5 topical labels.
+# No hit => general AI (not force-tagged).
 tech_directions:
+  cve:
+    keywords: []
+  llm:
+    keywords:
+      ["LLM", "large language model", "large-language model", "language model",
+       "foundation model", "transformer model", "generative AI",
+       "大语言模型", "大模型", "基础模型", "生成式 AI", "生成式人工智能"]
   ai_for_security:
     # AI used FOR defense / security work
     keywords:

@@ -63,6 +63,7 @@ def normalize(limit: int = 50) -> None:
 def run_once(limit: int = 5) -> None:
     """Fetch + normalize + fulltext a single pass — used by the e2e test."""
     from ai_security_hot.pipelines.stages import (
+        run_classify_stage,
         run_fetch_stage,
         run_fulltext_stage,
         run_normalize_stage,
@@ -72,8 +73,16 @@ def run_once(limit: int = 5) -> None:
     fetch_stats = run_fetch_stage(limit=limit)
     norm_stats = run_normalize_stage()
     ft_stats = run_fulltext_stage()
+    classify_stats = run_classify_stage()
     typer.echo(
-        json.dumps({"fetch": fetch_stats, "normalize": norm_stats, "fulltext": ft_stats})
+        json.dumps(
+            {
+                "fetch": fetch_stats,
+                "normalize": norm_stats,
+                "fulltext": ft_stats,
+                "classify": classify_stats,
+            }
+        )
     )
 
 

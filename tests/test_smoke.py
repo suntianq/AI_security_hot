@@ -274,3 +274,130 @@ def test_sitemap_connector_and_parser() -> None:
     assert doc.body_text is not None and len(doc.body_text) > 80
     assert "example.com" in doc.canonical_url
     assert doc.parse_quality >= 0.6
+
+
+@respx.mock
+def test_rss_filters_unchanged_but_emits_revision() -> None:
+    policy = _policy()
+    respx.get("https://example.com/rss.xml").mock(
+        return_value=httpx.Response(200, text=_RSS)
+    )
+    first = RSSConnector(FetchContext()).poll(policy, Checkpoint())
+    assert len(first.items) == 1
+    raw = first.items[0]
+
+    unchanged = RSSConnector(FetchContext()).poll(
+        policy, Checkpoint(known_content_hashes={raw.native_id: raw.content_hash})
+    )
+    assert unchanged.items == []
+
+    revised_feed = _RSS.replace("A serious issue", "An updated serious issue")
+    respx.get("https://example.com/rss.xml").mock(
+        return_value=httpx.Response(200, text=revised_feed)
+    )
+    revised = RSSConnector(FetchContext()).poll(
+        policy, Checkpoint(known_content_hashes={raw.native_id: raw.content_hash})
+    )
+    assert len(revised.items) == 1
+    assert revised.items[0].native_id == raw.native_id
+    assert revised.items[0].content_hash != raw.content_hash
+
+
+@respx.mock
+def test_rest_connector_drains_nvd_pagination() -> None:
+    from ai_security_hot.connectors.rest import RestApiConnector
+
+    policy = EndpointPolicy.model_validate(
+        {
+            "id": "test-nvd-pages",
+            "source_id": "nvd",
+            "connector": "rest",
+            "parser": "nvd-v1",
+            "url": "https://example.com/nvd-pages?resultsPerPage=1",
+            "fetch": {"requests_per_minute": 0},
+            "options": {
+                "rest": {
+                    "list_key": "vulnerabilities",
+                    "nested_key": "cve",
+                    "id_field": "id",
+                    "pagination": {
+                        "start_param": "startIndex",
+                        "start_key": "startIndex",
+                        "page_size_key": "resultsPerPage",
+                        "total_key": "totalResults",
+                    },
+                }
+            },
+        }
+    )
+    page_1 = {
+        "startIndex": 0,
+        "resultsPerPage": 1,
+        "totalResults": 2,
+        "vulnerabilities": [{"cve": {"id": "CVE-2026-0001"}}],
+    }
+    page_2 = {
+        "startIndex": 1,
+        "resultsPerPage": 1,
+        "totalResults": 2,
+        "vulnerabilities": [{"cve": {"id": "CVE-2026-0002"}}],
+    }
+    respx.get("https://example.com/nvd-pages?resultsPerPage=1").mock(
+        return_value=httpx.Response(200, json=page_1)
+    )
+    respx.get(
+        "https://example.com/nvd-pages?resultsPerPage=1&startIndex=1"
+    ).mock(return_value=httpx.Response(200, json=page_2))
+
+    result = RestApiConnector(FetchContext()).poll(policy, Checkpoint())
+    assert [item.native_id for item in result.items] == [
+        "CVE-2026-0001",
+        "CVE-2026-0002",
+    ]
+
+
+@respx.mock
+def test_sitemap_connector_uses_listing_fast_path_without_sitemap() -> None:
+    import json
+    from datetime import UTC, datetime
+
+    from ai_security_hot.connectors.sitemap import SitemapConnector
+
+    policy = EndpointPolicy.model_validate(
+        {
+            "id": "test-anthropic-fast",
+            "source_id": "anthropic",
+            "connector": "sitemap",
+            "parser": "sitemap-article-v1",
+            "url": "https://example.com/sitemap.xml",
+            "fetch": {"requests_per_minute": 0},
+            "options": {
+                "sitemap": {
+                    "listing_url": "https://example.com/news",
+                    "listing_max_urls": 20,
+                    "reconcile_interval_hours": 24,
+                    "overlap_hours": 72,
+                    "url_patterns": ["/news/", "/research/"],
+                }
+            },
+        }
+    )
+    listing = (
+        '<html><body><a href="/news/new-release">New</a>'
+        '<a href="/careers/job">Ignore</a></body></html>'
+    )
+    respx.get("https://example.com/news").mock(
+        return_value=httpx.Response(200, text=listing)
+    )
+    respx.get("https://example.com/news/new-release").mock(
+        return_value=httpx.Response(200, text=_ARTICLE_HTML_1)
+    )
+    now = datetime.now(UTC)
+    checkpoint = Checkpoint(
+        cursor=json.dumps({"sitemap_reconciled_at": now.isoformat()}),
+        last_published_at=now,
+    )
+
+    result = SitemapConnector(FetchContext()).poll(policy, checkpoint)
+    assert len(result.items) == 1
+    assert result.items[0].native_id == "https://example.com/news/new-release"

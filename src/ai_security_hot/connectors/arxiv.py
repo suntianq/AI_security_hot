@@ -46,7 +46,7 @@ def _pdf_url(entry) -> str | None:
 
 
 class ArxivConnector(Connector):
-    version = "arxiv-1"
+    version = "arxiv-2"
 
     def poll(self, policy: EndpointPolicy, checkpoint: Checkpoint) -> PollResult:
         res = self.ctx.get(
@@ -74,6 +74,9 @@ class ArxivConnector(Connector):
                 "abs_url": _abs_url(entry),
                 "pdf_url": _pdf_url(entry),
             }
+            item_hash = content_sha256(native_id, record["title"], summary)
+            if checkpoint.known_content_hashes.get(native_id) == item_hash:
+                continue
             items.append(
                 RawItem(
                     endpoint_id=policy.id,
@@ -85,7 +88,7 @@ class ArxivConnector(Connector):
                     published_at=_published(entry),
                     fetched_at=res.fetched_at,
                     language=policy.language,
-                    content_hash=content_sha256(native_id, record["title"], summary),
+                    content_hash=item_hash,
                     raw_text=json.dumps(record, ensure_ascii=False),
                     canonical_url=record["abs_url"] or native_id,
                     connector_kind=ConnectorKind.ARXIV,
@@ -97,5 +100,14 @@ class ArxivConnector(Connector):
             etag=res.etag or checkpoint.etag,
             last_modified=res.last_modified or checkpoint.last_modified,
             cursor=checkpoint.cursor,
+            last_published_at=max(
+                [it.published_at for it in items if it.published_at]
+                + (
+                    [checkpoint.last_published_at]
+                    if checkpoint.last_published_at
+                    else []
+                ),
+                default=None,
+            ),
         )
         return PollResult(items, new_ck)

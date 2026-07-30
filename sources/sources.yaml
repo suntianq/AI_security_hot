@@ -12,6 +12,11 @@ sources:
     trust_tier: A
     language: en
     org: OpenAI
+  - id: aihot
+    name: AI HOT
+    trust_tier: B
+    language: zh
+    org: Virxact
   - id: cisa
     name: CISA Known Exploited Vulnerabilities
     trust_tier: A
@@ -47,6 +52,21 @@ sources:
     trust_tier: B
     language: en
     org: PortSwigger
+  - id: apple-ml
+    name: Apple Machine Learning Research
+    trust_tier: A
+    language: en
+    org: Apple
+  - id: nvidia-blog
+    name: NVIDIA Blog
+    trust_tier: A
+    language: en
+    org: NVIDIA
+  - id: wiz
+    name: Wiz Blog
+    trust_tier: B
+    language: en
+    org: Wiz
   - id: arxiv
     name: arXiv
     trust_tier: A
@@ -98,6 +118,23 @@ endpoints:
       requests_per_minute: 2
     topics: [ai, security_for_ai]
 
+  # AI HOT recommended selected feed. It contains the latest 50 curated
+  # summaries and keeps both the AI HOT reading page and the original link.
+  # The publisher supports ETag/304 and recommends polling every 30 minutes or slower.
+  - id: aihot-selected-rss
+    source_id: aihot
+    connector: rss
+    parser: rss-default-v1
+    url: https://aihot.virxact.com/feed.xml
+    enabled: true
+    trust_tier: B
+    priority: P0
+    language: zh
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 30, jitter_seconds: 120 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai, security_for_ai, ai_for_security]
+
   # --- REST API (JSON vuln feed) ---
   - id: cisa-kev
     source_id: cisa
@@ -121,10 +158,10 @@ endpoints:
     topics: [ai_for_security, security_for_ai]
 
   # --- Sitemap adapter: Anthropic Newsroom + Research ---
-  # Anthropic's site is a JS SPA (no static article body on the listing page),
-  # but their sitemap.xml exposes all /news/ and /research/ URLs with <lastmod>.
-  # SitemapConnector reads the sitemap, filters URLs, fetches each article page
-  # and extracts full text via trafilatura — no Playwright needed.
+  # Anthropic's Newsroom is server-rendered enough for fast URL discovery.
+  # Every poll reads that small listing and fetches only unknown articles; a
+  # daily sitemap reconciliation with overlap catches omissions and revisions.
+  # Article pages are extracted with trafilatura — no Playwright needed.
   - id: anthropic-news
     source_id: anthropic
     connector: sitemap
@@ -143,9 +180,17 @@ endpoints:
       timeout_seconds: 25
       max_response_bytes: 10485760
       max_redirects: 3
-      requests_per_minute: 5
+      # Strict request-start limiter. The fast path normally fetches 0-2 pages.
+      requests_per_minute: 30
     options:
       sitemap:
+        # Fast path: parse the server-rendered newsroom every scheduled poll.
+        listing_url: https://www.anthropic.com/news
+        listing_max_urls: 20
+        # Slow path: overlapping sitemap reconciliation once per day.
+        reconcile_interval_hours: 24
+        overlap_hours: 72
+        concurrency: 5
         url_patterns:
           - "/news/"
           - "/research/"
@@ -154,14 +199,15 @@ endpoints:
     topics: [ai, security_for_ai]
 
   # --- REST: NVD (nested JSON: vulnerabilities[].cve, id under .cve.id) ---
-  # Rolling 30-day time window: pubStartDate / pubEndDate are injected at
-  # fetch time so every poll gets the latest CVE.  ETag is skipped because
-  # the URL changes every tick; idempotency is on (endpoint_id, native_id).
+  # First poll reads 30 days; later polls start at last_success_at - 15min
+  # and drain every NVD page. ETag is skipped because the URL changes each
+  # tick; unchanged content is filtered and DB idempotency includes its hash.
+  # This is a publication window, not yet an old-CVE modified-time reconcile.
   - id: nvd-recent
     source_id: nvd
     connector: rest
     parser: nvd-v1
-    url: https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=200
+    url: https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=2000
     enabled: true
     trust_tier: A
     priority: P0
@@ -182,6 +228,8 @@ endpoints:
         nested_key: cve
         id_field: id
         date_params:
+          # Re-read a small overlap to catch delayed/out-of-order publication.
+          overlap_minutes: 15
           start:
             param: pubStartDate
             offset_days: 30
@@ -189,6 +237,12 @@ endpoints:
             param: pubEndDate
             offset_days: 0
           format: "%Y-%m-%dT%H:%M:%S.000"
+        pagination:
+          start_param: startIndex
+          start_key: startIndex
+          page_size_key: resultsPerPage
+          total_key: totalResults
+          max_pages: 100
     topics: [ai_for_security, security_for_ai]
 
   # --- RSS: Security for AI / research feeds ---
@@ -250,6 +304,51 @@ endpoints:
     schedule: { interval_minutes: 180, jitter_seconds: 300 }
     fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
     topics: [ai_for_security, security_for_ai]
+
+  # Apple publishes a first-party RSS feed for the ML Research catalogue.
+  - id: apple-ml-research-rss
+    source_id: apple-ml
+    connector: rss
+    parser: rss-default-v1
+    url: https://machinelearning.apple.com/rss.xml
+    enabled: true
+    trust_tier: A
+    priority: P1
+    language: en
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 360, jitter_seconds: 600 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai, security_for_ai]
+
+  # NVIDIA first-party all-blog feed; taxonomy retains the AI/security directions.
+  - id: nvidia-blog-rss
+    source_id: nvidia-blog
+    connector: rss
+    parser: rss-default-v1
+    url: https://blogs.nvidia.com/feed/
+    enabled: true
+    trust_tier: A
+    priority: P1
+    language: en
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 120, jitter_seconds: 300 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai, ai_for_security, security_for_ai]
+
+  # Wiz exposes a large but cacheable first-party RSS feed.
+  - id: wiz-blog-rss
+    source_id: wiz
+    connector: rss
+    parser: rss-default-v1
+    url: https://www.wiz.io/feed/rss.xml
+    enabled: true
+    trust_tier: B
+    priority: P1
+    language: en
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 120, jitter_seconds: 300 }
+    fetch: { timeout_seconds: 25, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai, ai_for_security, security_for_ai]
 
   # ===== 新增源（arXiv / HN / IT之家 / Google Blog / GitHub Trending）=====
 

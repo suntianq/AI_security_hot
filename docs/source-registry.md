@@ -1,8 +1,8 @@
 # AI × Security 信源注册表（Seed List）
 
-> 状态：初稿 → 实施中  
-> 最后核验：2026-07-29  
-> 当前已接入：14 个 endpoint（13 个 source），6 类 Connector（RSS/REST/GitHub/Web/arXiv/Sitemap）  
+> 状态：初稿 → 实施中
+> 最后核验：2026-07-30
+> 当前已接入：18 个 endpoint（17 个 source），6 类 Connector（RSS/REST/GitHub/Web/arXiv/Sitemap）
 > 目标：为 `AI`、`AI for Security`、`AI-enabled Threats`、`Security for AI` 四条内容主线提供可追溯、可扩展的信源池。
 
 ## 1. 使用说明
@@ -27,32 +27,40 @@
 4. 启用网页采集前必须单独检查 robots.txt、服务条款、版权和访问频率。
 5. 网页、论文、Issue、PoC 和模型卡均视为不可信输入，不执行其中的命令、代码或提示词。
 
-## 1.1 当前已接入 14 个 endpoint
+## 1.1 当前已接入 18 个 endpoint
 
 | Endpoint | Source | Connector | Parser | 增量机制 | 状态 |
 |---|---|---|---|---|---|
-| openai-news-rss | OpenAI | RSS | rss-default-v1 | ETag/304 | ✅ |
-| cisa-kev | CISA | REST | cisa-kev-v1 | ETag/304 | ✅ |
-| nvd-recent | NVD | REST | nvd-v1 | date_params + last_success_at | ✅ |
-| anthropic-news | Anthropic | **Sitemap** | sitemap-article-v1 | lastmod 增量 | ✅（从 Web 迁移到 Sitemap） |
-| huggingface-blog-rss | HuggingFace | RSS + fulltext | rss-default-v1 | ETag/304 | ✅ |
-| google-security-rss | Google Security | RSS | rss-default-v1 | ETag/304 | ✅ |
-| trailofbits-rss | Trail of Bits | RSS | rss-default-v1 | ETag/304 | ✅ |
-| portswigger-research-rss | PortSwigger | RSS + fulltext | rss-default-v1 | ETag/304 | ✅ |
-| arxiv-ai-llm | arXiv | arXiv | arxiv-v1 | 304（低效） | ✅ |
-| arxiv-security-ai | arXiv | arXiv | arxiv-v1 | 304（低效） | ✅ |
-| hackernews-rss | Hacker News | RSS | rss-default-v1 | ETag/304 | ✅ |
-| ithome-rss | IT之家 | RSS | rss-default-v1 | ETag/304 | ✅ |
-| google-blog-ai-rss | Google AI Blog | RSS | rss-default-v1 | ETag/304 | ✅ |
-| github-trending-rss | GitHub Trending | RSS | rss-default-v1 | ETag/304 | ✅ |
+| openai-news-rss | OpenAI | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
+| aihot-selected-rss | AI HOT | RSS | rss-default-v1 | ETag/304 + 最新 50 条精选窗口 + content hash | ✅ |
+| cisa-kev | CISA | REST | cisa-kev-v1 | ETag/304 + 同 CVE 内容修订检测 | ✅ |
+| nvd-recent | NVD | REST | nvd-v1 | 15min 发布窗口重叠 + 完整分页 + content hash | ✅ |
+| anthropic-news | Anthropic | **Newsroom + Sitemap** | sitemap-article-v1 | 快速发现 + 每日 72h 重叠对账 | ✅ |
+| huggingface-blog-rss | HuggingFace | RSS + fulltext | rss-default-v1 | ETag/304 + content hash | ✅ |
+| google-security-rss | Google Security | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
+| trailofbits-rss | Trail of Bits | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
+| portswigger-research-rss | PortSwigger | RSS + fulltext | rss-default-v1 | ETag/304 + content hash | ✅ |
+| apple-ml-research-rss | Apple ML Research | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash | ✅ |
+| nvidia-blog-rss | NVIDIA Blog | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash | ✅ |
+| wiz-blog-rss | Wiz Blog | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash | ✅ |
+| arxiv-ai-llm | arXiv | arXiv | arxiv-v1 | native ID/content hash；304 辅助 | ✅ |
+| arxiv-security-ai | arXiv | arXiv | arxiv-v1 | native ID/content hash；304 辅助 | ✅ |
+| hackernews-rss | Hacker News | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
+| ithome-rss | IT之家 | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
+| google-blog-ai-rss | Google AI Blog | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
+| github-trending-rss | GitHub Trending | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
 
 > 4 个 GitHub Releases endpoint（langchain/dify/ollama/vllm-releases）因内容噪音过大已删除（2026-07-29）。
+
+> 表中的“内容修订检测”只针对本轮被上游重新返回的记录：NVD 当前按发布时间窗口同步，尚未启用 modified-time 对账；Anthropic 则通过 Newsroom 快速发现和每日 Sitemap 对账扩大覆盖。Connector 预过滤使用最近 5,000 个 RawItem 版本，DB 唯一约束对全历史兜底。
+>
+> 本轮四个新增站点均有官方 RSS，直接复用 `rss-2`/`rss-default-v1` 即可，无需新增 Connector/Parser 类。真实验证中四个源的第二次条件请求均返回 304。AI HOT 当前采用官方推荐的最新 50 条精选 RSS；完整镜像仍需专门支持 `snapshot + changes` opaque cursor、409 重建和撤选语义。
 
 ## 2. P0：结构化权威源与聚合入口
 
 | 优先级 | 可信度 | 信源 | 主线 | 推荐接入 | 入口 | 主要用途 |
 |---|---:|---|---|---|---|---|
-| P0 | B | AI HOT | AI | REST API v1、RSS | [Agent/API/RSS](https://aihot.virxact.com/agent) | 通用 AI 中文精选的启动上游；必须保留 AI HOT 署名及原文入口 |
+| P0 | B | AI HOT | AI | **RSS（已接入）**；REST snapshot/changes（完整镜像候选） | [Agent/API/RSS](https://aihot.virxact.com/agent) | 通用 AI 中文精选的启动上游；必须保留 AI HOT 署名及原文入口 |
 | P0 | A | OpenAI News RSS | AI / Security for AI | RSS | [RSS](https://openai.com/news/rss.xml) | OpenAI 模型、产品、安全、工程、政策和安全事件 |
 | P0 | A | arXiv | 全部 | API | [API 文档](https://info.arxiv.org/help/api/index.html) | `cs.AI`、`cs.CL`、`cs.LG`、`cs.CR`、`cs.SE`、`stat.ML`；按关键词二次筛选 |
 | P0 | B | Hugging Face Daily Papers | AI / Security for AI | 网页或社区数据接口 | [Daily Papers](https://huggingface.co/papers) | 社区热度论文发现；必须回链 arXiv/论文主页 |
@@ -75,8 +83,8 @@
 | 优先级 | 可信度 | 信源 | 主线 | 推荐接入 | 入口 | 重点关注 |
 |---|---:|---|---|---|---|---|
 | P0 | A | OpenAI News | AI / Security for AI | RSS | [News](https://openai.com/news/) | Model、Product、Safety、Security、Engineering、Policy |
-| P0 | A | Anthropic Newsroom | AI / Security for AI | **Sitemap**（已接入） | [News](https://www.anthropic.com/news) | Claude 发布、安全政策、企业能力、事故说明 |
-| P0 | A | Anthropic Research | Security for AI / 研究 | **Sitemap**（已接入） | [Research](https://www.anthropic.com/research) | 对齐、可解释性、红队、模型行为、网络能力评估 |
+| P0 | A | Anthropic Newsroom | AI / Security for AI | **Newsroom 列表 + Sitemap 对账**（已接入） | [News](https://www.anthropic.com/news) | Claude 发布、安全政策、企业能力、事故说明 |
+| P0 | A | Anthropic Research | Security for AI / 研究 | **共享 Sitemap 对账**（已接入） | [Research](https://www.anthropic.com/research) | 对齐、可解释性、红队、模型行为、网络能力评估 |
 | P0 | A | Google DeepMind | AI / Security for AI | 官方网页适配器 | [News](https://deepmind.google/blog/) | 模型、评测、责任与安全、Agent、科学智能 |
 | P0 | A | Google AI / Technology | AI | RSS 或网页 | [AI](https://blog.google/technology/ai/) | Gemini、产品和平台发布 |
 | P1 | A | Google Research | AI / 研究 | RSS 或网页 | [Research Blog](https://research.google/blog/) | 论文、算法、系统与安全研究 |
@@ -85,9 +93,9 @@
 | P1 | A | Microsoft Research | AI / 研究 | RSS 或网页 | [Research Blog](https://www.microsoft.com/en-us/research/blog/) | 论文、系统、评测和安全研究 |
 | P0 | A | xAI / SpaceXAI News | AI | 官方网页适配器 | [News](https://x.ai/news) | Grok、API、模型和产品发布；同时跟踪官方 GitHub |
 | P0 | A | Hugging Face Blog | AI / Security for AI | RSS 或网页 | [Blog](https://huggingface.co/blog) | 模型、数据集、推理、Hub 安全和供应链 |
-| P0 | A | NVIDIA AI Blog | AI / AI for Security | RSS 或网页 | [Deep Learning](https://blogs.nvidia.com/blog/category/deep-learning/) | GPU、推理平台、AI 安全、企业与网络安全模型 |
+| P0 | A | NVIDIA AI Blog | AI / AI for Security | **RSS（已接入）** | [NVIDIA Blog](https://blogs.nvidia.com/) | GPU、推理平台、AI 安全、企业与网络安全模型 |
 | P1 | A | NVIDIA Developer Blog | AI / AI for Security | RSS 或网页 | [Developer Blog](https://developer.nvidia.com/blog/) | CUDA、推理优化、AI Red Team 与安全工程 |
-| P1 | A | Apple Machine Learning Research | AI / 研究 | RSS 或网页 | [ML Research](https://machinelearning.apple.com/) | 端侧模型、隐私、多模态和基础研究 |
+| P1 | A | Apple Machine Learning Research | AI / 研究 | **RSS（已接入）** | [ML Research](https://machinelearning.apple.com/research/) | 端侧模型、隐私、多模态和基础研究 |
 | P0 | A | Mistral AI | AI | 官方网页适配器 | [News](https://mistral.ai/news/) | 模型、开源权重、Agent 与企业平台 |
 | P1 | A | Cohere | AI | RSS 或网页 | [Blog](https://cohere.com/blog) | 企业模型、RAG、检索和安全部署 |
 | P1 | A | Stability AI | AI | RSS 或网页 | [News](https://stability.ai/news) | 图像、视频、音频和开放模型 |
@@ -165,7 +173,7 @@
 | P1 | B | CrowdStrike Blog | RSS/网页 | [Blog](https://www.crowdstrike.com/en-us/blog/) | 威胁情报、攻击者、AI 驱动 SOC |
 | P1 | B | SentinelOne Labs | RSS | [Labs](https://www.sentinelone.com/labs/) | 恶意软件、APT、AI 安全和检测 |
 | P1 | B | Elastic Security Labs | RSS | [Labs](https://www.elastic.co/security-labs) | 检测工程、恶意软件、规则与 AI SOC |
-| P1 | B | Wiz Research | RSS/网页 | [Research](https://www.wiz.io/blog/tag/research) | 云漏洞、AI 云资产、身份与供应链 |
+| P1 | B | Wiz Blog / Research | **RSS（已接入）** | [Blog](https://www.wiz.io/blog) | 云漏洞、AI 云资产、身份与供应链 |
 | P1 | B | Check Point Research | RSS | [Research](https://research.checkpoint.com/) | 恶意软件、攻击活动、生成式 AI 滥用 |
 | P1 | B | Trend Micro Research | RSS/网页 | [Research](https://www.trendmicro.com/en_us/research.html) | 云、IoT、AI 威胁和犯罪生态 |
 | P1 | B | ESET WeLiveSecurity | RSS | [WeLiveSecurity](https://www.welivesecurity.com/) | 恶意软件、APT 和事件分析 |
@@ -250,11 +258,11 @@
 
 ## 10. 首批候选池与实际 MVP
 
-下面约 35 个逻辑信源是形成较完整主题覆盖的首批候选池，不要求在工程 MVP 中一次接入。**当前已接入 14 个 endpoint（见 §1.1）**，详见[后端 MVP 设计方案](./mvp-design.md#54-当前已接入-14-个-endpoint13-个-source)。在首发稳定并完成 7 天验收后，再从下面的候选池逐步扩展。
+下面约 35 个逻辑信源是形成较完整主题覆盖的首批候选池，不要求在工程 MVP 中一次接入。**当前已接入 18 个 endpoint（见 §1.1）**，详见[后端 MVP 设计方案](./mvp-design.md#54-当前已接入-18-个-endpoint17-个-source)。在首发稳定并完成 7 天验收后，再从下面的候选池逐步扩展。
 
 ### 通用 AI
 
-- AI HOT API/RSS
+- AI HOT RSS（已接入）；REST snapshot/changes 完整镜像模式待实现
 - OpenAI RSS
 - Anthropic News + Research
 - Google DeepMind

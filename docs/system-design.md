@@ -1,11 +1,11 @@
 # AI × Security 情报系统整体框架设计
 
 > 状态：完整目标蓝图 / 后续演进参考  
-> 最后更新：2026-07-29  
+> 最后更新：2026-07-30
 > 定位：完整目标蓝图；不是第一版的全部实施范围  
 > 当前实施基线：[后端 MVP 设计方案](./mvp-design.md)  
 > 配套文档：[信源注册表](./source-registry.md)  
-> 当前已完成：M0 骨架 + M1.1 规则分类（14 endpoint，6 类 Connector）
+> 当前已完成：M0 骨架 + M1.1 规则分类 + M1.2 增量优化（18 endpoint，17 source，6 类 Connector）
 
 第一版实现以《后端 MVP 设计方案》为准。本文保留网站、Agent、完整证据模型、团队版和长期扩展设计，用于约束后续演进方向。
 
@@ -147,21 +147,21 @@ health() -> SourceHealth
 已实现六类 Connector：
 
 1. `RSSConnector`（sync `poll`）
-2. `RestApiConnector`（sync `poll`，支持 `date_params` 动态注入 `last_success_at`）
+2. `RestApiConnector`（sync `poll`，支持重叠时间窗、通用分页和同 ID 内容修订检测）
 3. `GitHubConnector`（sync `poll`）
 4. `WebListConnector`（sync `poll`）
 5. `ArxivConnector`（sync `poll`）
-6. `SitemapConnector`（async `apoll`，sitemap.xml → URL 模式过滤 → lastmod 增量 → 并发抓取原文）
+6. `SitemapConnector`（async `apoll`，列表页快速发现 + Sitemap 重叠对账 → 并发抓取原文）
 
-`PlaywrightConnector` 保留接口和独立运行 Profile，但不作为首批来源的默认依赖。
+`playwright` 目前只保留枚举和 Compose Profile 运行位；尚无 `PlaywrightConnector` 与浏览器镜像，属于未来动态网页兜底能力。
 
 FetchContext 提供：
-- 同步 `get()`：传统连接器使用，内部 `_RateLimiter` 限速。
-- 异步 `aget()`：Sitemap 等并发连接器使用，共享同一个 `_RateLimiter`。
+- 同步 `get()`：传统连接器使用，统一执行请求启动限速、重试、超时和流式大小限制。
+- 异步 `aget()`：Sitemap 等并发连接器使用；单轮 pipeline 复用连接池，共享线程安全的严格请求启动限速器。
 
 并发 fetch pipeline：
 - `run_fetch_stage()` 使用 `asyncio.gather` + `Semaphore(5)` 并发处理多个 endpoint。
-- 同步连接器通过 `run_in_executor` 调度，异步连接器直接 `apoll()`。
+- 同步连接器通过 `run_in_executor` 调度，异步连接器直接 `apoll()`；正文抽取等同步 CPU 工作通过线程池执行。
 
 每个 endpoint 配置：
 
@@ -202,25 +202,26 @@ rate_limit:
 - ETag
 - Last-Modified
 - cursor / page token
-- last successful published time
+- last successful published/content watermark
 - last successful fetched time
-- **last_success_at**（上次成功推进时间，用于 NVD date_params + Sitemap lastmod 增量过滤）
+- **last_success_at**（上次成功推进时间，用于 NVD 重叠时间窗）
 - content hash
 - consecutive failure count
 
 增量过滤优先级：
 
-1. **API 级增量**（最强）：NVD `date_params` 用 `pubStartDate=last_success_at`；Sitemap 用 `lastmod > last_success_at`。
-2. **known_ids 集合过滤**（M1.2 待实现）：DB 已有 `native_id` 集合，连接器跳过已知条目。
+1. **API/水位增量**：NVD 使用重叠时间窗和完整分页；Sitemap 使用独立内容水位与重叠对账。
+2. **known content 过滤**：Checkpoint 携带 `native_id → content_hash`；未变化内容在 Connector 层跳过，修订内容生成新版本。
 3. **HTTP 级增量**：ETag/304，部分源有效（CISA），部分源几乎不返回 304（arXiv）。
-4. **DB 级幂等兜底**：`ON CONFLICT DO NOTHING` on `(endpoint_id, native_id)`。
+4. **DB 级幂等兜底**：`ON CONFLICT DO NOTHING` on `(endpoint_id, native_id, content_hash)`；同 ID 内容变化保留新版本。
 
 幂等键优先级：
 
-1. 来源原生 ID。
-2. Canonical URL。
-3. 标准化 URL + 发布时间。
-4. 内容指纹。
+1. 来源原生 ID + 内容指纹（不可变内容版本）。
+2. Canonical URL + 发布时间 + 内容指纹。
+3. 标准化 URL。
+
+当前实现使用最近 5,000 个 RawItem 版本构造 Connector 级 known-content 映射，DB 唯一约束仍覆盖全历史。RSS/arXiv 受上游返回窗口限制；Anthropic 用 Newsroom + 每日 72 小时 Sitemap 对账缓解；NVD 当前是发布时间窗口，尚未加入针对窗口外旧 CVE 更新的 modified-time 对账。因此，内容修订检测只保证本轮被上游重新返回或对账命中的记录。
 
 ## 5. 原始内容与安全边界
 

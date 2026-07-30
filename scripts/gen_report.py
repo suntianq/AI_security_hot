@@ -20,6 +20,8 @@ from ai_security_hot.models.base import session_scope
 from ai_security_hot.models.tables import Document
 
 TECH_LABELS = {
+    "cve": "CVE",
+    "llm": "LLM",
     "ai_for_security": "AI for Security",
     "security_for_ai": "Security for AI",
     "agent": "Agent",

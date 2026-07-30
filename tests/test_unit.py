@@ -32,6 +32,28 @@ def test_ssrf_allows_public_https() -> None:
     validate_url("https://openai.com/news/rss.xml")  # no raise
 
 
+def test_source_registry_includes_new_rss_endpoints() -> None:
+    from ai_security_hot.config.sources import load_registry
+
+    registry = load_registry()
+    expected = {
+        "aihot-selected-rss": "https://aihot.virxact.com/feed.xml",
+        "apple-ml-research-rss": "https://machinelearning.apple.com/rss.xml",
+        "nvidia-blog-rss": "https://blogs.nvidia.com/feed/",
+        "wiz-blog-rss": "https://www.wiz.io/feed/rss.xml",
+    }
+
+    assert len(registry.sources) == 17
+    assert len(registry.endpoints) == 18
+    assert len({source.id for source in registry.sources}) == len(registry.sources)
+    assert len({endpoint.id for endpoint in registry.endpoints}) == len(registry.endpoints)
+    for endpoint_id, url in expected.items():
+        endpoint = registry.endpoint(endpoint_id)
+        assert endpoint.url == url
+        assert endpoint.connector.value == "rss"
+        assert endpoint.parser == "rss-default-v1"
+
+
 def test_extract_identifiers() -> None:
     text = "See CVE-2025-12345 and GHSA-aaaa-bbbb-cccc plus CWE-79 and CNVD-2024-1234"
     ids = extract_identifiers(text)
@@ -79,11 +101,31 @@ def test_rule_classifier_cve_is_vulnerability() -> None:
 
     rc = RuleClassifier()
     doc = NormalizedDocument(
-        raw_item_native_id="x", endpoint_id="e", title_original="Some flaw",
-        body_text="details", canonical_url="http://x", cve_ids=["CVE-2025-1"],
+        raw_item_native_id="x", endpoint_id="nvd-recent",
+        title_original="CVE-2025-1: RCE in an LLM agent",
+        body_text="Remote code execution in an agentic language model.",
+        canonical_url="http://x", cve_ids=["CVE-2025-1"],
     )
-    c = rc.classify(doc)
+    c = rc.classify(doc, source_id="nvd", connector="rest")
     assert c.event_type == "vulnerability"  # hard signal: CVE present
+    assert c.tech_directions == ["cve"]
+
+
+def test_rule_classifier_news_and_papers_get_topic_labels() -> None:
+    from ai_security_hot.classify.rules import RuleClassifier
+    from ai_security_hot.domain.models import NormalizedDocument
+
+    rc = RuleClassifier()
+    doc = NormalizedDocument(
+        raw_item_native_id="x", endpoint_id="arxiv-ai-llm",
+        title_original="A new large language model for tool-using agents",
+        body_text="We study an LLM agent and its tool calling workflow.",
+        canonical_url="http://x",
+    )
+    c = rc.classify(doc, source_id="arxiv", connector="arxiv")
+    assert "llm" in c.tech_directions
+    assert "agent" in c.tech_directions
+    assert "cve" not in c.tech_directions
 
 
 def test_rule_classifier_no_match_is_empty() -> None:
@@ -141,3 +183,25 @@ def test_inject_date_params_no_config() -> None:
 
     url = "https://example.com/api"
     assert _inject_date_params(url, {}) == url
+
+
+def test_inject_date_params_uses_overlap() -> None:
+    from datetime import UTC, datetime
+    from urllib.parse import unquote
+
+    from ai_security_hot.connectors.rest import _inject_date_params
+
+    cfg = {
+        "start": {"param": "pubStartDate", "offset_days": 30},
+        "end": {"param": "pubEndDate", "offset_days": 0},
+        "overlap_minutes": 15,
+        "format": "%Y-%m-%dT%H:%M:%S.000",
+    }
+    result = unquote(
+        _inject_date_params(
+            "https://example.com/api",
+            cfg,
+            last_success_at=datetime(2026, 7, 15, 10, 0, tzinfo=UTC),
+        )
+    )
+    assert "pubStartDate=2026-07-15T09:45:00.000" in result
