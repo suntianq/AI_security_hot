@@ -32,7 +32,7 @@ def test_ssrf_allows_public_https() -> None:
     validate_url("https://openai.com/news/rss.xml")  # no raise
 
 
-def test_source_registry_includes_new_rss_endpoints() -> None:
+def test_source_registry_rss_endpoints() -> None:
     from ai_security_hot.config.sources import load_registry
 
     registry = load_registry()
@@ -41,6 +41,9 @@ def test_source_registry_includes_new_rss_endpoints() -> None:
         "apple-ml-research-rss": "https://machinelearning.apple.com/rss.xml",
         "nvidia-blog-rss": "https://blogs.nvidia.com/feed/",
         "wiz-blog-rss": "https://www.wiz.io/feed/rss.xml",
+        "hackernews-rss": "https://hnrss.org/frontpage",
+        "huggingface-blog-rss": "https://huggingface.co/blog/feed.xml",
+        "google-security-rss": "https://blog.google/security/rss/",
     }
 
     assert len(registry.sources) == 17
@@ -52,6 +55,47 @@ def test_source_registry_includes_new_rss_endpoints() -> None:
         assert endpoint.url == url
         assert endpoint.connector.value == "rss"
         assert endpoint.parser == "rss-default-v1"
+
+
+def test_url_change_resets_endpoint_checkpoint_and_health() -> None:
+    from datetime import UTC, datetime
+
+    from ai_security_hot.models.tables import SourceEndpoint
+    from ai_security_hot.storage.repositories import (
+        _reset_endpoint_state_for_url_change,
+    )
+
+    row = SourceEndpoint(
+        id="feed",
+        source_id="source",
+        connector="rss",
+        parser="rss-default-v1",
+        url="https://old.example/feed",
+        enabled=True,
+        priority="P1",
+        trust_tier="B",
+        egress_route="direct",
+        policy={},
+        consecutive_failures=3,
+        status="degraded",
+    )
+    row.etag = "old-etag"
+    row.last_modified = "old-date"
+    row.cursor = "old-cursor"
+    row.last_error = "network failed"
+    row.last_success_at = datetime(2026, 7, 1, tzinfo=UTC)
+    now = datetime(2026, 7, 30, tzinfo=UTC)
+
+    _reset_endpoint_state_for_url_change(row, now=now)
+
+    assert row.etag is None
+    assert row.last_modified is None
+    assert row.cursor is None
+    assert row.last_success_at is None
+    assert row.consecutive_failures == 0
+    assert row.status == "active"
+    assert row.last_error is None
+    assert row.next_run_at == now
 
 
 def test_extract_identifiers() -> None:

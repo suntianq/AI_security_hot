@@ -37,7 +37,7 @@
 | nvd-recent | NVD | REST | nvd-v1 | 15min 发布窗口重叠 + 完整分页 + content hash | ✅ |
 | anthropic-news | Anthropic | **Newsroom + Sitemap** | sitemap-article-v1 | 快速发现 + 每日 72h 重叠对账 | ✅ |
 | huggingface-blog-rss | HuggingFace | RSS + fulltext | rss-default-v1 | ETag/304 + content hash | ✅ |
-| google-security-rss | Google Security | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
+| google-security-rss | Google Security | RSS | rss-default-v1 | native ID/content hash（无稳定 HTTP validator） | ✅ |
 | trailofbits-rss | Trail of Bits | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
 | portswigger-research-rss | PortSwigger | RSS + fulltext | rss-default-v1 | ETag/304 + content hash | ✅ |
 | apple-ml-research-rss | Apple ML Research | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash | ✅ |
@@ -45,7 +45,7 @@
 | wiz-blog-rss | Wiz Blog | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash | ✅ |
 | arxiv-ai-llm | arXiv | arXiv | arxiv-v1 | native ID/content hash；304 辅助 | ✅ |
 | arxiv-security-ai | arXiv | arXiv | arxiv-v1 | native ID/content hash；304 辅助 | ✅ |
-| hackernews-rss | Hacker News | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
+| hackernews-rss | Hacker News | RSS | rss-default-v1 | HNRSS Last-Modified/304 + content hash | ✅ |
 | ithome-rss | IT之家 | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
 | google-blog-ai-rss | Google AI Blog | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
 | github-trending-rss | GitHub Trending | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |

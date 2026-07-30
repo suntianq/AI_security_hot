@@ -226,12 +226,12 @@ MVP Source Policy 至少包含：
 | 3 | nvd-recent | REST | nvd-v1 | 15min 重叠时间窗 + 完整分页 + content hash |
 | 4 | anthropic-news | **Newsroom + Sitemap** | sitemap-article-v1 | 快速发现 + 每日 72h 重叠对账 |
 | 5 | huggingface-blog-rss | RSS + fulltext | rss-default-v1 | ETag/304 + content hash |
-| 6 | google-security-rss | RSS | rss-default-v1 | ETag/304 + content hash |
+| 6 | google-security-rss | RSS | rss-default-v1 | native ID/content hash（无稳定 HTTP validator） |
 | 7 | trailofbits-rss | RSS | rss-default-v1 | ETag/304 + content hash |
 | 8 | portswigger-research-rss | RSS + fulltext | rss-default-v1 | ETag/304 + content hash |
 | 9 | arxiv-ai-llm | arXiv | arxiv-v1 | native ID/content hash；304 辅助 |
 | 10 | arxiv-security-ai | arXiv | arxiv-v1 | native ID/content hash；304 辅助 |
-| 11 | hackernews-rss | RSS | rss-default-v1 | ETag/304 + content hash |
+| 11 | hackernews-rss | RSS | rss-default-v1 | HNRSS Last-Modified/304 + content hash |
 | 12 | ithome-rss | RSS | rss-default-v1 | ETag/304 + content hash |
 | 13 | google-blog-ai-rss | RSS | rss-default-v1 | ETag/304 + content hash |
 | 14 | github-trending-rss | RSS | rss-default-v1 | ETag/304 + content hash |
@@ -714,7 +714,7 @@ docker compose up
 - Worker 中断后重新启动。
 - SSRF、重定向、超大响应和恶意 HTML。
 
-当前离线套件有 29 个用例，已覆盖 NVD 重叠窗口/分页、同 ID 内容修订、Anthropic 列表快速发现/Sitemap 对账、严格限速和流式大小限制等 M1.2 路径；事件聚类、LLM 与投递相关条目属于后续里程碑。
+当前离线套件有 30 个用例，已覆盖 NVD 重叠窗口/分页、同 ID 内容修订、Anthropic 列表快速发现/Sitemap 对账、严格限速和流式大小限制等 M1.2 路径；事件聚类、LLM 与投递相关条目属于后续里程碑。
 
 ### 16.2 最小指标
 

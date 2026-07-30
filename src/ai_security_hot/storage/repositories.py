@@ -22,6 +22,24 @@ from ai_security_hot.domain.models import RawItem as RawItemDTO
 from ai_security_hot.models.tables import Document, FetchRun, RawItem, Source, SourceEndpoint
 
 
+def _reset_endpoint_state_for_url_change(
+    row: SourceEndpoint, *, now: datetime
+) -> None:
+    """Start a fresh HTTP/health checkpoint when an endpoint URL changes."""
+    row.etag = None
+    row.last_modified = None
+    row.cursor = None
+    row.last_published_at = None
+    row.last_fetched_at = None
+    row.last_success_at = None
+    row.content_hash = None
+    row.consecutive_failures = 0
+    row.status = "active"
+    row.last_error = None
+    row.next_run_at = now
+    row.lease_until = None
+
+
 def sync_registry(session: Session, registry: SourceRegistry) -> None:
     """Upsert sources + endpoints from sources.yaml into the DB."""
     for s in registry.sources:
@@ -44,6 +62,7 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
                 policy=policy_json, next_run_at=datetime.now(UTC),
             ))
         else:
+            url_changed = row.url != ep.url
             row.source_id = ep.source_id
             row.priority = ep.priority.value
             row.trust_tier = ep.trust_tier.value
@@ -54,6 +73,8 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
             row.enabled = ep.enabled
             row.egress_route = ep.egress.route.value
             row.policy = policy_json
+            if url_changed:
+                _reset_endpoint_state_for_url_change(row, now=datetime.now(UTC))
     session.commit()
 
 

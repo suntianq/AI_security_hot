@@ -52,7 +52,7 @@
 | nvd-recent | REST | `last_success_at - 15min` 重叠窗口 + 完整分页 + content hash |
 | anthropic-news | **Newsroom + Sitemap** | 快速发现 + 每日 72h 重叠对账 |
 | huggingface-blog-rss | RSS + fulltext | ETag/304 + content hash |
-| google-security-rss | RSS | ETag/304 + content hash |
+| google-security-rss | RSS | native ID/content hash（无稳定 HTTP validator） |
 | trailofbits-rss | RSS | ETag/304 + content hash |
 | portswigger-research-rss | RSS + fulltext | ETag/304 + content hash |
 | apple-ml-research-rss | RSS | ETag/Last-Modified/304 + content hash |
@@ -60,7 +60,7 @@
 | wiz-blog-rss | RSS | ETag/Last-Modified/304 + content hash |
 | arxiv-ai-llm | arXiv | native ID/content hash；304 辅助 |
 | arxiv-security-ai | arXiv | native ID/content hash；304 辅助 |
-| hackernews-rss | RSS | ETag/304 + content hash |
+| hackernews-rss | RSS | HNRSS Last-Modified/304 + content hash |
 | ithome-rss | RSS | ETag/304 + content hash |
 | google-blog-ai-rss | RSS | ETag/304 + content hash |
 | github-trending-rss | RSS | ETag/304 + content hash |
@@ -129,7 +129,7 @@ INTEL_RUN_LIVE=1 uv run pytest -m live                  # 真实爬取端到端
 uv run ruff check . && uv run pyright                   # 质量门禁
 ```
 
-当前离线套件覆盖 29 个用例；`live` 测试默认跳过，只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
+当前离线套件覆盖 30 个用例；`live` 测试默认跳过，只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
 
 ## 部署（Docker Compose）
 
