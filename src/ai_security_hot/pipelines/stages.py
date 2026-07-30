@@ -8,7 +8,8 @@ fast one. M0 implements two real stages end-to-end:
   fulltext   : for fulltext-enabled endpoints whose feed only gave a summary,
                second-fetch the article URL → update Document.body_text → DONE
 
-Later stages (dedupe/cluster/enrich) are declared but no-op in M0.
+M2 adds versioned dedupe and event clustering after classification. Enrichment
+and delivery remain later milestones.
 """
 
 from __future__ import annotations
@@ -119,15 +120,21 @@ async def _afetch_one_async(ctx: FetchContext, policy: EndpointPolicy, connector
 
     with session_scope() as session:
         repo.advance_checkpoint(
-            session, policy.id, new_checkpoint,
-            success=success, error=error,
+            session,
+            policy.id,
+            new_checkpoint,
+            success=success,
+            error=error,
             interval_minutes=policy.schedule.interval_minutes,
             jitter_seconds=policy.schedule.jitter_seconds,
         )
         repo.record_fetch_run(
-            session, policy.id,
+            session,
+            policy.id,
             status="ok" if success else "error",
-            items_fetched=items_fetched, items_new=items_new, error=error,
+            items_fetched=items_fetched,
+            items_new=items_new,
+            error=error,
             started_at=started_at,
         )
     log.info("fetched %s: fetched=%d new=%d ok=%s", policy.id, items_fetched, items_new, success)
@@ -158,15 +165,21 @@ def _fetch_one(ctx: FetchContext, policy: EndpointPolicy) -> int:
 
     with session_scope() as session:
         repo.advance_checkpoint(
-            session, policy.id, new_checkpoint,
-            success=success, error=error,
+            session,
+            policy.id,
+            new_checkpoint,
+            success=success,
+            error=error,
             interval_minutes=policy.schedule.interval_minutes,
             jitter_seconds=policy.schedule.jitter_seconds,
         )
         repo.record_fetch_run(
-            session, policy.id,
+            session,
+            policy.id,
             status="ok" if success else "error",
-            items_fetched=items_fetched, items_new=items_new, error=error,
+            items_fetched=items_fetched,
+            items_new=items_new,
+            error=error,
             started_at=started_at,
         )
     log.info("fetched %s: fetched=%d new=%d ok=%s", policy.id, items_fetched, items_new, success)
@@ -190,12 +203,18 @@ def run_normalize_stage(limit: int = 50, lease_seconds: int = 300) -> dict:
                 from ai_security_hot.domain.models import RawItem as RawItemDTO
 
                 dto = RawItemDTO(
-                    endpoint_id=raw.endpoint_id, source_id=raw.source_id,
-                    native_id=raw.native_id, request_url=raw.request_url,
-                    final_url=raw.final_url, http_status=raw.http_status,
-                    published_at=raw.published_at, fetched_at=raw.fetched_at,
-                    language=raw.language, content_hash=raw.content_hash,
-                    blob_ref=raw.blob_ref, raw_text=raw.raw_text,
+                    endpoint_id=raw.endpoint_id,
+                    source_id=raw.source_id,
+                    native_id=raw.native_id,
+                    request_url=raw.request_url,
+                    final_url=raw.final_url,
+                    http_status=raw.http_status,
+                    published_at=raw.published_at,
+                    fetched_at=raw.fetched_at,
+                    language=raw.language,
+                    content_hash=raw.content_hash,
+                    blob_ref=raw.blob_ref,
+                    raw_text=raw.raw_text,
                     canonical_url=raw.canonical_url,
                     connector_kind=ConnectorKind(policy.connector),
                     connector_version=raw.connector_version,
@@ -278,7 +297,6 @@ def run_fulltext_stage(limit: int = 20, lease_seconds: int = 300) -> dict:
     return stats
 
 
-
 def run_classify_stage(limit: int = 500) -> dict:
     """Classify documents that have no classification yet (M1.1, rule-based).
 
@@ -316,3 +334,60 @@ def run_classify_stage(limit: int = 500) -> dict:
             repo.apply_classification(session, d.id, cls)
             stats["classified"] += 1
     return stats
+
+
+def run_dedupe_stage(*, force: bool = False) -> dict:
+    """Recompute deterministic duplicate components when the rule version is stale."""
+    from ai_security_hot.events.intelligence import DEDUPE_VERSION, deduplicate_documents
+
+    with session_scope() as session:
+        if not repo.try_event_stage_lock(session, "dedupe"):
+            return {"status": "locked", "version": DEDUPE_VERSION}
+        due = repo.count_dedupe_due(session)
+        if due == 0 and not force:
+            return {
+                "status": "current",
+                "version": DEDUPE_VERSION,
+                "due": 0,
+                "updated": 0,
+            }
+        documents = repo.load_intel_documents(session)
+        decisions = deduplicate_documents(documents)
+        stats = repo.apply_dedup_decisions(session, decisions)
+        return {
+            "status": "ok",
+            "version": DEDUPE_VERSION,
+            "due": due,
+            "scanned": len(documents),
+            **stats,
+        }
+
+
+def run_cluster_stage(*, force: bool = False) -> dict:
+    """Materialize explainable events and evidence links from deduped documents."""
+    from ai_security_hot.events.intelligence import CLUSTER_VERSION, build_event_drafts
+
+    with session_scope() as session:
+        if not repo.try_event_stage_lock(session, "cluster"):
+            return {"status": "locked", "version": CLUSTER_VERSION}
+        due = repo.count_cluster_due(session)
+        if due == 0 and not force:
+            return {
+                "status": "current",
+                "version": CLUSTER_VERSION,
+                "due": 0,
+                "events_created": 0,
+                "events_updated": 0,
+            }
+        decisions = repo.load_dedup_decisions(session)
+        documents = [doc for doc in repo.load_intel_documents(session) if doc.id in decisions]
+        drafts = build_event_drafts(documents, decisions)
+        stats = repo.apply_event_drafts(session, drafts)
+        return {
+            "status": "ok",
+            "version": CLUSTER_VERSION,
+            "due": due,
+            "documents": len(documents),
+            "events": len(drafts),
+            **stats,
+        }

@@ -162,22 +162,38 @@ class Document(Base):
     classify_rule_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     classify_input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # --- M1.2 dedup (forward field, populated later) ---
-    near_dup_of: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # --- M2 event intelligence: versioned, non-destructive dedup ---
+    near_dup_of: Mapped[int | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    duplicate_kind: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    duplicate_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dedupe_version: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    deduped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cluster_version: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    clustered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Event(Base):
     __tablename__ = "events"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    fingerprint: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     event_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     topic: Mapped[str | None] = mapped_column(String(32), nullable=True)
     title: Mapped[str] = mapped_column(Text)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="detected")
-    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    evidence_level: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    cluster_version: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     current_version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class EventDocument(Base):
@@ -189,6 +205,7 @@ class EventDocument(Base):
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"))
     stance: Mapped[str] = mapped_column(String(16), default="support")
     evidence_level: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    relation_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class DeliveryRun(Base):

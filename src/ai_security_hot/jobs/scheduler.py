@@ -15,6 +15,8 @@ from ai_security_hot.config.settings import get_settings
 from ai_security_hot.jobs.self_check import run_self_check
 from ai_security_hot.pipelines.stages import (
     run_classify_stage,
+    run_cluster_stage,
+    run_dedupe_stage,
     run_fetch_stage,
     run_fulltext_stage,
     run_normalize_stage,
@@ -30,9 +32,16 @@ def tick() -> None:
         norm_stats = run_normalize_stage()
         ft_stats = run_fulltext_stage()
         cls_stats = run_classify_stage()
+        dedupe_stats = run_dedupe_stage()
+        cluster_stats = run_cluster_stage()
         log.info(
-            "tick: fetch=%s normalize=%s fulltext=%s classify=%s",
-            fetch_stats, norm_stats, ft_stats, cls_stats,
+            "tick: fetch=%s normalize=%s fulltext=%s classify=%s dedupe=%s cluster=%s",
+            fetch_stats,
+            norm_stats,
+            ft_stats,
+            cls_stats,
+            dedupe_stats,
+            cluster_stats,
         )
     except Exception:
         log.exception("tick failed")
@@ -42,16 +51,25 @@ def run_worker() -> None:
     settings = get_settings()
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(
-        tick, "interval", seconds=settings.tick_interval_seconds, id="tick",
-        max_instances=1, coalesce=True,
+        tick,
+        "interval",
+        seconds=settings.tick_interval_seconds,
+        id="tick",
+        max_instances=1,
+        coalesce=True,
     )
     scheduler.add_job(
-        run_self_check, "interval", seconds=settings.self_check_interval_seconds,
-        id="self_check", max_instances=1, coalesce=True,
+        run_self_check,
+        "interval",
+        seconds=settings.self_check_interval_seconds,
+        id="self_check",
+        max_instances=1,
+        coalesce=True,
     )
     log.info(
         "worker started: tick=%ds self_check=%ds",
-        settings.tick_interval_seconds, settings.self_check_interval_seconds,
+        settings.tick_interval_seconds,
+        settings.self_check_interval_seconds,
     )
     tick()  # run once immediately on startup
     scheduler.start()

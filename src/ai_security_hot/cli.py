@@ -1,14 +1,16 @@
 """Typer CLI — the single operational entry point.
 
-    intel sync              # load sources.yaml into the DB
-    intel fetch [--limit N] # run one fetch stage pass
-    intel normalize         # run one normalize stage pass
-    intel run-once          # fetch + normalize once (used by e2e test)
-    intel worker            # start the blocking scheduler
-    intel serve             # start the API (uvicorn)
-    intel self-check        # print the self-check report
-    intel stats             # print pipeline stats
-    intel export            # export documents to json/jsonl/csv
+intel sync              # load sources.yaml into the DB
+intel fetch [--limit N] # run one fetch stage pass
+intel normalize         # run one normalize stage pass
+intel run-once          # fetch + normalize once (used by e2e test)
+intel dedupe            # build versioned duplicate relationships
+intel cluster           # materialize events and evidence links
+intel worker            # start the blocking scheduler
+intel serve             # start the API (uvicorn)
+intel self-check        # print the self-check report
+intel stats             # print pipeline stats
+intel export            # export documents to json/jsonl/csv
 """
 
 from __future__ import annotations
@@ -64,6 +66,8 @@ def run_once(limit: int = 5) -> None:
     """Fetch + normalize + fulltext a single pass — used by the e2e test."""
     from ai_security_hot.pipelines.stages import (
         run_classify_stage,
+        run_cluster_stage,
+        run_dedupe_stage,
         run_fetch_stage,
         run_fulltext_stage,
         run_normalize_stage,
@@ -74,6 +78,8 @@ def run_once(limit: int = 5) -> None:
     norm_stats = run_normalize_stage()
     ft_stats = run_fulltext_stage()
     classify_stats = run_classify_stage()
+    dedupe_stats = run_dedupe_stage()
+    cluster_stats = run_cluster_stage()
     typer.echo(
         json.dumps(
             {
@@ -81,6 +87,8 @@ def run_once(limit: int = 5) -> None:
                 "normalize": norm_stats,
                 "fulltext": ft_stats,
                 "classify": classify_stats,
+                "dedupe": dedupe_stats,
+                "cluster": cluster_stats,
             }
         )
     )
@@ -102,6 +110,41 @@ def classify(limit: int = 500) -> None:
 
     _setup_logging()
     typer.echo(json.dumps(run_classify_stage(limit=limit)))
+
+
+@app.command()
+def dedupe(
+    force: bool = typer.Option(False, help="recompute even when version is current"),
+) -> None:
+    """Build non-destructive exact/near-duplicate relationships (M2)."""
+    from ai_security_hot.pipelines.stages import run_dedupe_stage
+
+    _setup_logging()
+    typer.echo(json.dumps(run_dedupe_stage(force=force)))
+
+
+@app.command()
+def cluster(
+    force: bool = typer.Option(False, help="recompute even when version is current"),
+) -> None:
+    """Materialize strong-key events and their evidence links (M2)."""
+    from ai_security_hot.pipelines.stages import run_cluster_stage
+
+    _setup_logging()
+    typer.echo(json.dumps(run_cluster_stage(force=force)))
+
+
+@app.command("eventize")
+def eventize(force: bool = typer.Option(False, help="recompute both M2 stages")) -> None:
+    """Run dedupe then event clustering as one operational command."""
+    from ai_security_hot.pipelines.stages import run_cluster_stage, run_dedupe_stage
+
+    _setup_logging()
+    typer.echo(
+        json.dumps(
+            {"dedupe": run_dedupe_stage(force=force), "cluster": run_cluster_stage(force=force)}
+        )
+    )
 
 
 @app.command()
@@ -184,15 +227,32 @@ def export(
 def stats() -> None:
     from sqlalchemy import func, select
 
-    from ai_security_hot.models.tables import Document, RawItem
+    from ai_security_hot.models.tables import Document, Event, EventDocument, RawItem
 
     with session_scope() as session:
-        rows = session.execute(
-            select(RawItem.stage, func.count()).group_by(RawItem.stage)
-        ).all()
+        rows = session.execute(select(RawItem.stage, func.count()).group_by(RawItem.stage)).all()
         by_stage = {stage: count for stage, count in rows}
         docs = session.execute(select(func.count()).select_from(Document)).scalar_one()
-    typer.echo(json.dumps({"raw_items_by_stage": by_stage, "documents": docs}))
+        duplicates = session.execute(
+            select(func.count()).select_from(Document).where(Document.near_dup_of.is_not(None))
+        ).scalar_one()
+        events = session.execute(
+            select(func.count()).select_from(Event).where(Event.status == "detected")
+        ).scalar_one()
+        evidence_links = session.execute(
+            select(func.count()).select_from(EventDocument)
+        ).scalar_one()
+    typer.echo(
+        json.dumps(
+            {
+                "raw_items_by_stage": by_stage,
+                "documents": docs,
+                "near_duplicates": duplicates,
+                "events": events,
+                "event_documents": evidence_links,
+            }
+        )
+    )
 
 
 def main() -> None:

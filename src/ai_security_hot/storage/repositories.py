@@ -11,7 +11,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from secrets import randbelow
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -19,12 +19,25 @@ from ai_security_hot.config.sources import SourceRegistry
 from ai_security_hot.connectors.base import Checkpoint
 from ai_security_hot.domain.enums import PipelineStage
 from ai_security_hot.domain.models import RawItem as RawItemDTO
-from ai_security_hot.models.tables import Document, FetchRun, RawItem, Source, SourceEndpoint
+from ai_security_hot.events.intelligence import (
+    CLUSTER_VERSION,
+    DEDUPE_VERSION,
+    DedupDecision,
+    EventDraft,
+    IntelDocument,
+)
+from ai_security_hot.models.tables import (
+    Document,
+    Event,
+    EventDocument,
+    FetchRun,
+    RawItem,
+    Source,
+    SourceEndpoint,
+)
 
 
-def _reset_endpoint_state_for_url_change(
-    row: SourceEndpoint, *, now: datetime
-) -> None:
+def _reset_endpoint_state_for_url_change(row: SourceEndpoint, *, now: datetime) -> None:
     """Start a fresh HTTP/health checkpoint when an endpoint URL changes."""
     row.etag = None
     row.last_modified = None
@@ -43,8 +56,11 @@ def _reset_endpoint_state_for_url_change(
 def sync_registry(session: Session, registry: SourceRegistry) -> None:
     """Upsert sources + endpoints from sources.yaml into the DB."""
     for s in registry.sources:
-        session.merge(Source(id=s.id, name=s.name, trust_tier=s.trust_tier.value,
-                             language=s.language, org=s.org))
+        session.merge(
+            Source(
+                id=s.id, name=s.name, trust_tier=s.trust_tier.value, language=s.language, org=s.org
+            )
+        )
     for ep in registry.endpoints:
         row = session.get(SourceEndpoint, ep.id)
         policy_json = {
@@ -54,13 +70,22 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
             "options": ep.options,
         }
         if row is None:
-            session.add(SourceEndpoint(
-                id=ep.id, source_id=ep.source_id, connector=ep.connector.value,
-                parser=ep.parser, url=ep.url, enabled=ep.enabled,
-                priority=ep.priority.value, trust_tier=ep.trust_tier.value,
-                language=ep.language, egress_route=ep.egress.route.value,
-                policy=policy_json, next_run_at=datetime.now(UTC),
-            ))
+            session.add(
+                SourceEndpoint(
+                    id=ep.id,
+                    source_id=ep.source_id,
+                    connector=ep.connector.value,
+                    parser=ep.parser,
+                    url=ep.url,
+                    enabled=ep.enabled,
+                    priority=ep.priority.value,
+                    trust_tier=ep.trust_tier.value,
+                    language=ep.language,
+                    egress_route=ep.egress.route.value,
+                    policy=policy_json,
+                    next_run_at=datetime.now(UTC),
+                )
+            )
         else:
             url_changed = row.url != ep.url
             row.source_id = ep.source_id
@@ -150,11 +175,20 @@ def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
         stmt = (
             pg_insert(RawItem)
             .values(
-                endpoint_id=it.endpoint_id, source_id=it.source_id, native_id=it.native_id,
-                request_url=it.request_url, final_url=it.final_url, http_status=it.http_status,
-                published_at=it.published_at, fetched_at=it.fetched_at, language=it.language,
-                content_hash=it.content_hash, blob_ref=it.blob_ref, raw_text=it.raw_text,
-                canonical_url=it.canonical_url, connector_version=it.connector_version,
+                endpoint_id=it.endpoint_id,
+                source_id=it.source_id,
+                native_id=it.native_id,
+                request_url=it.request_url,
+                final_url=it.final_url,
+                http_status=it.http_status,
+                published_at=it.published_at,
+                fetched_at=it.fetched_at,
+                language=it.language,
+                content_hash=it.content_hash,
+                blob_ref=it.blob_ref,
+                raw_text=it.raw_text,
+                canonical_url=it.canonical_url,
+                connector_version=it.connector_version,
                 stage=PipelineStage.FETCHED.value,
             )
             .on_conflict_do_nothing()
@@ -167,7 +201,9 @@ def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
 
 
 def advance_checkpoint(
-    session: Session, endpoint_id: str, checkpoint: Checkpoint,
+    session: Session,
+    endpoint_id: str,
+    checkpoint: Checkpoint,
     *,
     success: bool,
     error: str | None,
@@ -205,15 +241,26 @@ def advance_checkpoint(
 
 
 def record_fetch_run(
-    session: Session, endpoint_id: str, *, status: str,
-    items_fetched: int, items_new: int, error: str | None,
+    session: Session,
+    endpoint_id: str,
+    *,
+    status: str,
+    items_fetched: int,
+    items_new: int,
+    error: str | None,
     started_at: datetime | None = None,
 ) -> None:
-    session.add(FetchRun(
-        endpoint_id=endpoint_id, started_at=started_at or datetime.now(UTC),
-        finished_at=datetime.now(UTC), status=status,
-        items_fetched=items_fetched, items_new=items_new, error=error,
-    ))
+    session.add(
+        FetchRun(
+            endpoint_id=endpoint_id,
+            started_at=started_at or datetime.now(UTC),
+            finished_at=datetime.now(UTC),
+            status=status,
+            items_fetched=items_fetched,
+            items_new=items_new,
+            error=error,
+        )
+    )
     session.commit()
 
 
@@ -239,19 +286,30 @@ def claim_stage_items(
     return rows
 
 
-def persist_document(
-    session: Session, raw_item_id: int, doc, next_stage: PipelineStage
-) -> None:
+def persist_document(session: Session, raw_item_id: int, doc, next_stage: PipelineStage) -> None:
     """Store a normalized document and advance the raw item's stage."""
-    session.add(Document(
-        raw_item_id=raw_item_id, endpoint_id=doc.endpoint_id,
-        title_original=doc.title_original, title_zh=doc.title_zh, body_text=doc.body_text,
-        canonical_url=doc.canonical_url, author=doc.author, org=doc.org,
-        published_at_utc=doc.published_at_utc, language=doc.language,
-        identifiers={"cve": doc.cve_ids, "ghsa": doc.ghsa_ids,
-                     "cnvd": doc.cnvd_ids, "cwe": doc.cwe_ids},
-        entities=doc.entities, parse_quality=doc.parse_quality,
-    ))
+    session.add(
+        Document(
+            raw_item_id=raw_item_id,
+            endpoint_id=doc.endpoint_id,
+            title_original=doc.title_original,
+            title_zh=doc.title_zh,
+            body_text=doc.body_text,
+            canonical_url=doc.canonical_url,
+            author=doc.author,
+            org=doc.org,
+            published_at_utc=doc.published_at_utc,
+            language=doc.language,
+            identifiers={
+                "cve": doc.cve_ids,
+                "ghsa": doc.ghsa_ids,
+                "cnvd": doc.cnvd_ids,
+                "cwe": doc.cwe_ids,
+            },
+            entities=doc.entities,
+            parse_quality=doc.parse_quality,
+        )
+    )
     raw = session.get(RawItem, raw_item_id)
     if raw is None:
         raise KeyError(f"unknown raw_item: {raw_item_id}")
@@ -307,6 +365,8 @@ def apply_fulltext(
         doc.body_text = body_text
         if parse_quality is not None:
             doc.parse_quality = parse_quality
+        doc.dedupe_version = None
+        doc.cluster_version = None
     raw.stage = PipelineStage.DONE.value
     raw.stage_lease_until = None
     session.commit()
@@ -369,12 +429,7 @@ def claim_unclassified_documents(
                 | (Document.classify_rule_version != rule_version)
             )
         )
-    stmt = (
-        select(Document)
-        .where(needs_classification)
-        .order_by(Document.id)
-        .limit(limit)
-    )
+    stmt = select(Document).where(needs_classification).order_by(Document.id).limit(limit)
     return list(session.execute(stmt).scalars().all())
 
 
@@ -393,4 +448,262 @@ def apply_classification(session: Session, document_id: int, cls) -> None:
     doc.classify_rule_version = cls.rule_version
     doc.classify_input_hash = cls.input_hash
     doc.classified_at = datetime.now(UTC)
+    doc.cluster_version = None
     session.commit()
+
+
+# Stable PostgreSQL advisory-lock keys for M2 derived-data stages.
+_DEDUPE_LOCK_KEY = 0x41495348000201
+_CLUSTER_LOCK_KEY = 0x41495348000202
+
+
+def try_event_stage_lock(session: Session, stage: str) -> bool:
+    """Take a transaction-scoped lock so manual and scheduled runs cannot race."""
+    keys = {"dedupe": _DEDUPE_LOCK_KEY, "cluster": _CLUSTER_LOCK_KEY}
+    if stage not in keys:
+        raise ValueError(f"unknown event stage: {stage}")
+    return bool(session.execute(select(func.pg_try_advisory_xact_lock(keys[stage]))).scalar_one())
+
+
+def count_dedupe_due(session: Session, *, version: str = DEDUPE_VERSION) -> int:
+    return int(
+        session.execute(
+            select(func.count())
+            .select_from(Document)
+            .where(Document.dedupe_version.is_(None) | (Document.dedupe_version != version))
+        ).scalar_one()
+    )
+
+
+def count_cluster_due(session: Session, *, version: str = CLUSTER_VERSION) -> int:
+    return int(
+        session.execute(
+            select(func.count())
+            .select_from(Document)
+            .where(
+                Document.dedupe_version == DEDUPE_VERSION,
+                Document.cluster_version.is_(None) | (Document.cluster_version != version),
+            )
+        ).scalar_one()
+    )
+
+
+def load_intel_documents(session: Session) -> list[IntelDocument]:
+    """Load the normalized evidence needed by both M2 pure functions."""
+    rows = session.execute(
+        select(Document, RawItem.fetched_at, SourceEndpoint.source_id, SourceEndpoint.trust_tier)
+        .join(RawItem, RawItem.id == Document.raw_item_id)
+        .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
+        .order_by(Document.id)
+    ).all()
+    return [
+        IntelDocument(
+            id=doc.id,
+            endpoint_id=doc.endpoint_id,
+            source_id=source_id,
+            trust_tier=trust_tier,
+            title=doc.title_original,
+            body=doc.body_text,
+            canonical_url=doc.canonical_url,
+            published_at=doc.published_at_utc,
+            fetched_at=fetched_at,
+            identifiers=doc.identifiers or {},
+            tech_directions=list(doc.tech_directions or []),
+            event_type=doc.classified_event_type,
+            parse_quality=doc.parse_quality,
+        )
+        for doc, fetched_at, source_id, trust_tier in rows
+    ]
+
+
+def apply_dedup_decisions(
+    session: Session,
+    decisions: dict[int, DedupDecision],
+    *,
+    version: str = DEDUPE_VERSION,
+) -> dict[str, int]:
+    """Persist a full deterministic decision set and invalidate changed clusters."""
+    now = datetime.now(UTC)
+    rows = {
+        row.id: row
+        for row in session.execute(select(Document).where(Document.id.in_(decisions))).scalars()
+    }
+    updated = 0
+    duplicates = 0
+    for document_id, decision in decisions.items():
+        doc = rows[document_id]
+        relationship_changed = (
+            doc.near_dup_of != decision.near_dup_of
+            or doc.duplicate_kind != decision.duplicate_kind
+            or doc.duplicate_score != decision.duplicate_score
+        )
+        version_changed = doc.dedupe_version != version
+        if relationship_changed or version_changed:
+            doc.near_dup_of = decision.near_dup_of
+            doc.duplicate_kind = decision.duplicate_kind
+            doc.duplicate_score = decision.duplicate_score
+            doc.dedupe_version = version
+            doc.deduped_at = now
+            doc.cluster_version = None
+            doc.clustered_at = None
+            updated += 1
+        if decision.near_dup_of is not None:
+            duplicates += 1
+    return {"updated": updated, "duplicates": duplicates}
+
+
+def load_dedup_decisions(session: Session) -> dict[int, DedupDecision]:
+    rows = session.execute(
+        select(
+            Document.id,
+            Document.near_dup_of,
+            Document.duplicate_kind,
+            Document.duplicate_score,
+        ).where(Document.dedupe_version == DEDUPE_VERSION)
+    ).all()
+    return {
+        document_id: DedupDecision(document_id, near_dup_of, kind, score)
+        for document_id, near_dup_of, kind, score in rows
+    }
+
+
+def apply_event_drafts(
+    session: Session,
+    drafts: dict[str, EventDraft],
+    *,
+    version: str = CLUSTER_VERSION,
+) -> dict[str, int]:
+    """Upsert events, reconcile derived memberships, and version changed events."""
+    now = datetime.now(UTC)
+    existing = {event.fingerprint: event for event in session.execute(select(Event)).scalars()}
+    created = 0
+    updated = 0
+    for fingerprint, draft in drafts.items():
+        event = existing.get(fingerprint)
+        if event is None:
+            event = Event(
+                fingerprint=fingerprint,
+                event_type=draft.event_type,
+                topic=draft.topic,
+                title=draft.title,
+                summary=draft.summary,
+                status=draft.status,
+                score=draft.score,
+                evidence_level=draft.evidence_level,
+                cluster_version=version,
+                first_seen_at=draft.first_seen_at,
+                last_seen_at=draft.last_seen_at,
+                current_version=1,
+                updated_at=now,
+            )
+            session.add(event)
+            existing[fingerprint] = event
+            created += 1
+            continue
+        current = (
+            event.event_type,
+            event.topic,
+            event.title,
+            event.summary,
+            event.status,
+            event.score,
+            event.evidence_level,
+            event.cluster_version,
+            event.first_seen_at,
+            event.last_seen_at,
+        )
+        desired = (
+            draft.event_type,
+            draft.topic,
+            draft.title,
+            draft.summary,
+            draft.status,
+            draft.score,
+            draft.evidence_level,
+            version,
+            draft.first_seen_at,
+            draft.last_seen_at,
+        )
+        if current != desired:
+            (
+                event.event_type,
+                event.topic,
+                event.title,
+                event.summary,
+                event.status,
+                event.score,
+                event.evidence_level,
+                event.cluster_version,
+                event.first_seen_at,
+                event.last_seen_at,
+            ) = desired
+            event.current_version += 1
+            event.updated_at = now
+            updated += 1
+
+    desired_fingerprints = set(drafts)
+    for fingerprint, event in existing.items():
+        if (
+            event.cluster_version is not None
+            and fingerprint not in desired_fingerprints
+            and event.status != "superseded"
+        ):
+            event.status = "superseded"
+            event.current_version += 1
+            event.updated_at = now
+            updated += 1
+
+    session.flush()
+    desired_links = {
+        (existing[fingerprint].id, membership.document_id): membership
+        for fingerprint, draft in drafts.items()
+        for membership in draft.memberships
+    }
+    active_event_ids = [existing[fingerprint].id for fingerprint in drafts]
+    old_links = {}
+    if active_event_ids:
+        old_links = {
+            (link.event_id, link.document_id): link
+            for link in session.execute(
+                select(EventDocument).where(EventDocument.event_id.in_(active_event_ids))
+            ).scalars()
+        }
+    stale_link_ids = [link.id for key, link in old_links.items() if key not in desired_links]
+    if stale_link_ids:
+        session.execute(delete(EventDocument).where(EventDocument.id.in_(stale_link_ids)))
+
+    links_created = 0
+    links_updated = 0
+    for key, membership in desired_links.items():
+        link = old_links.get(key)
+        if link is None:
+            session.add(
+                EventDocument(
+                    event_id=key[0],
+                    document_id=key[1],
+                    stance="support",
+                    evidence_level=membership.evidence_level,
+                    relation_reason=membership.relation_reason,
+                )
+            )
+            links_created += 1
+        elif (
+            link.evidence_level != membership.evidence_level
+            or link.relation_reason != membership.relation_reason
+        ):
+            link.evidence_level = membership.evidence_level
+            link.relation_reason = membership.relation_reason
+            links_updated += 1
+
+    session.execute(
+        update(Document)
+        .where(Document.dedupe_version == DEDUPE_VERSION)
+        .values(cluster_version=version, clustered_at=now)
+    )
+    return {
+        "events_created": created,
+        "events_updated": updated,
+        "links_created": links_created,
+        "links_updated": links_updated,
+        "links_removed": len(stale_link_ids),
+    }

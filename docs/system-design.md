@@ -4,8 +4,8 @@
 > 最后更新：2026-07-30
 > 定位：完整目标蓝图；不是第一版的全部实施范围  
 > 当前实施基线：[后端 MVP 设计方案](./mvp-design.md)  
-> 配套文档：[信源注册表](./source-registry.md)  
-> 当前已完成：M0 骨架 + M1.1 规则分类 + M1.2 增量优化（18 endpoint，17 source，6 类 Connector）
+> 配套文档：[信源注册表](./source-registry.md) · [M2 事件情报](./event-intelligence.md)
+> 当前已完成：M0 骨架 + M1 结构化采集 + M2.0 确定性事件情报（18 endpoint，17 source，6 类 Connector）
 
 第一版实现以《后端 MVP 设计方案》为准。本文保留网站、Agent、完整证据模型、团队版和长期扩展设计，用于约束后续演进方向。
 
@@ -265,7 +265,7 @@ rate_limit:
 
 #### 第一层：文档级硬去重
 
-- canonical URL 相同。
+- canonical URL 相同；但共享目录 URL 下互斥的 CVE/GHSA/CNVD 不能合并。
 - 来源原生 ID 相同。
 - 内容哈希相同。
 - CVE/GHSA + 来源相同。
@@ -292,6 +292,8 @@ rate_limit:
 - 同一公司 + 同一事故 + 相近时间：强合并候选。
 
 模型只提出“合并建议”；当事件类型、版本或时间明显冲突时由规则拒绝。高风险事件的错误合并和错误拆分都进入人工复核队列。
+
+当前 M2.0 已实现其中的保守确定性子集：URL/标题/正文硬去重、RapidFuzz 高阈值近重复、CVE/GHSA/CNVD/arXiv 强键、fallback event、证据等级和规则分。SimHash/向量/LLM 候选、模型+版本强键与人工复核队列属于 M2.1，详见 [M2 事件情报](./event-intelligence.md)。
 
 ### 6.3 事件更新而非重复发布
 

@@ -2,7 +2,8 @@
 
 把 AI/安全情报的采集能力融为一个稳定、可扩展的后端。基于 `docs/` 三份设计文档
 （[MVP 设计](docs/mvp-design.md) · [整体蓝图](docs/system-design.md) ·
-[信源注册表](docs/source-registry.md)）实现的 **M0 工程骨架 + M1.1 规则分类 + M1.2 增量优化**。
+[信源注册表](docs/source-registry.md) · [M2 事件情报](docs/event-intelligence.md)）实现的
+**M0 工程骨架 + M1 结构化采集 + M2.0 事件情报基线**。
 
 ## 已实现
 
@@ -13,7 +14,7 @@
 - **Egress/代理一等配置**：`sources.yaml` 的 `egress.route` + 环境变量代理池，同一份代码跑国内/海外 VM。
 - **并发 fetch pipeline**：多个 endpoint 并发抓取；异步请求复用连接池并严格限制每个 endpoint 的请求启动速率。
 - **BlobStore**：网页 HTML 快照存本地卷，DB 只存哈希+引用（后期可换 S3/MinIO）。
-- **无状态调度 tick + self_check**：DB 是唯一真相；自检发现 stale/degraded/stuck。
+- **无状态调度 tick + self_check**：DB 是唯一真相；自检发现 stale/degraded/stuck，并报告 M2 去重/聚类积压。
 - **FastAPI 只读/运维 API** + **`intel` CLI**（含 `export` 导出 JSON/JSONL/CSV）。
 - **迁移 / Lint / 类型检查 / 单元+冒烟+真实爬取测试 / Linux CI**。
 
@@ -30,6 +31,17 @@
 - **NVD 完整性**：15 分钟重叠窗口 + `totalResults/startIndex` 分页，避免发布延迟和单页上限漏数。
 - **Anthropic 双通道**：Newsroom 快速发现 + 每日 Sitemap 72 小时重叠对账。
 - **调度可靠性**：应用 endpoint jitter，失败按指数退避，FetchRun 记录真实开始/结束时间。
+
+### M2.0 事件情报基线
+
+- **非破坏式去重**：保留每份原始文档，只写入 `near_dup_of / duplicate_kind / duplicate_score`；同 URL、同标题、同正文和近似标题均可解释。
+- **强标识冲突保护**：不同 CVE/GHSA/CNVD 不因共享目录 URL或相似标题被误合并；异常大组件有关系数量熔断保护。
+- **稳定事件指纹**：优先使用 `CVE / GHSA / CNVD / arXiv` 强键；无强键时按重复组件主文档生成 fallback event。
+- **证据与评分**：`EventDocument` 保留来源等级和关联原因；规则分由来源可信度、强标识、独立来源数和解析质量组成。
+- **版本化增量触发**：无过期版本时零扫描；有新增或下游失效时做全局一致性重算，但只写入变化记录。正文、分类或重复主记录变化会自动触发事件重算。
+- **事件 API**：`GET /events` 支持主题、类型、证据等级和最低分过滤；`GET /events/{id}` 返回完整证据链。
+
+算法、运维命令、评分公式和当前边界详见 [M2 事件情报](docs/event-intelligence.md)。
 
 ### 六类 Connector + Parser
 
@@ -96,8 +108,11 @@ CLI 常用命令：
 
 ```bash
 uv run intel sync        # 载入/更新 sources.yaml
-uv run intel run-once    # 手动抓一轮（fetch + normalize + fulltext + classify）
-uv run intel stats       # 各阶段数量
+uv run intel run-once    # 手动跑完整一轮（含 dedupe + cluster）
+uv run intel eventize    # 只跑 M2：dedupe + cluster
+uv run intel dedupe      # 单独重算去重（--force 可强制）
+uv run intel cluster     # 单独重算事件（--force 可强制）
+uv run intel stats       # 文档、近重复、事件和证据数量
 uv run intel serve       # 起 API（:8000）
 uv run intel worker      # 起后台常驻调度
 uv run intel self-check  # 健康自检
@@ -118,18 +133,20 @@ uv run intel export --format json                         # 不加 --out 则打�
 curl localhost:8000/health
 curl localhost:8000/stats
 curl "localhost:8000/documents?min_quality=1&limit=5"
+curl "localhost:8000/events?topic=cve&min_score=80&limit=5"
+curl localhost:8000/events/1
 curl localhost:8000/sources
 ```
 
 ## 测试
 
 ```bash
-uv run pytest tests/test_unit.py tests/test_smoke.py   # 离线：SSRF/规范化/连接器/分类器逻辑
+uv run pytest -q                                      # 全部离线单元/冒烟/M2 测试
 INTEL_RUN_LIVE=1 uv run pytest -m live                  # 真实爬取端到端
 uv run ruff check . && uv run pyright                   # 质量门禁
 ```
 
-当前离线套件覆盖 30 个用例；`live` 测试默认跳过，只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
+当前离线套件覆盖 40 个用例，包括不同 CVE 冲突保护、共享目录 URL、近重复、强键事件、多来源证据和关系膨胀保护；`live` 测试默认跳过，只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
 
 ## 部署（Docker Compose）
 
@@ -145,7 +162,7 @@ curl localhost:8000/health        # {"status":"ok"}
 - `worker` 随后 `intel sync` 载入 `sources.yaml`，并按调度持续抓取。
 - 数据持久化在 `pgdata` 卷，网页快照存 `blobdata` 卷。
 
-已有数据库升级到本版本时，必须先应用 `c3e1d7a4b902_raw_item_content_versions`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行该命令。迁移只替换 RawItem 唯一约束，不删除或回填已有数据。
+已有数据库升级到本版本时必须应用到 `e71a2c9d4f10_m2_event_intelligence`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。迁移只增加派生字段、索引和约束，不删除文档；Worker 的下一次 tick 会自动回填去重关系和事件。
 
 > 当前 API 未实现认证，且包含 `/ops/tick` 运维写操作。部署时应只绑定可信内网或在前置网关完成认证与访问控制。
 
@@ -177,8 +194,9 @@ export INTEL_DATABASE_URL=postgresql+psycopg://intel:intel@localhost:5432/intel
 
 uv run alembic upgrade head     # 迁移
 uv run intel sync               # 载入 sources.yaml（18 个 endpoint）
-uv run intel run-once           # 真实抓取 + 标准化 + 分类一轮
-uv run intel stats              # 查看各阶段数量
+uv run intel run-once           # 完整增量流水线（含事件化）
+uv run intel eventize           # 只运行 M2 去重 + 事件聚类
+uv run intel stats              # 查看文档/重复/事件/证据数量
 uv run intel serve              # 起 API（:8000）
 ```
 
@@ -192,20 +210,21 @@ src/ai_security_hot/
   connectors/   FetchContext（sync get + async aget）+ SSRF + 6 类连接器（RSS/REST/GitHub/Web/arXiv/Sitemap）
   parsers/      各源 Parser（rss/cisa_kev/nvd/github_releases/web_article/arxiv/sitemap_article）+ normalize
   classify/     RuleClassifier + Classification 溯源 + taxonomy.yaml
-  storage/      BlobStore + repositories（租约/幂等/阶段推进/导出）
-  pipelines/    并发 fetch stage + normalize/fulltext/classify stage
+  events/       M2 去重、强键事件聚类、证据等级和规则评分
+  storage/      BlobStore + repositories（租约/幂等/阶段推进/事件 upsert/导出）
+  pipelines/    fetch/normalize/fulltext/classify/dedupe/cluster stages
   jobs/         无状态调度 tick + self_check
   api/          FastAPI 只读/运维接口
-  cli.py        intel CLI（sync/run-once/serve/worker/export/self-check/stats/classify/fetch/normalize/fulltext）
+  cli.py        intel CLI（采集、分类、eventize、查询、导出与运维）
 sources/        sources.yaml（18 个真实 endpoint）+ taxonomy.yaml
-migrations/     Alembic（initial + classification + RawItem 内容版本）
-tests/          unit / smoke（离线）+ integration（真实爬取）
+migrations/     Alembic（initial + classification + RawItem 内容版本 + M2 event intelligence）
+tests/          unit / smoke / event intelligence（离线）+ integration（真实爬取）
 ```
 
-## 后续（M2+）
+## 后续（M2.1+）
 
-- **去重聚类**：近重复检测（RapidFuzz + SimHash）+ 事件聚类 + 强合并键（CVE/GHSA/模型+版本）。
-- **LLM 摘要/分类**：M1.3 混合分类器（规则 + LLM），中文摘要，事件影响分析。
+- **事件聚类增强**：加入模型+版本、公司+事故等实体强键；以离线标注集评估 SimHash/语义候选，不在缺少指标时扩大自动合并范围。
+- **LLM 摘要/分类**：M1.3 混合分类器（规则 + LLM），中文摘要、影响分析和不确定性表达；不覆盖权威字段。
 - **日报与投递**：日报冻结/生成/版本化 + 飞书/邮件投递幂等。
 - **更多信源**：在当前 18 个 endpoint 基础上扩展至约 35 个。
 - Parser 漂移检测、pgvector 可选增强。均由实际指标触发，不提前引入。

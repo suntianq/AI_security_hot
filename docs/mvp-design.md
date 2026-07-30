@@ -1,9 +1,9 @@
 # AI × Security 情报后端 MVP 设计方案
 
-> 版本：v0.2  
-> 状态：实施基线（M0 骨架 + M1.1 规则分类 + M1.2 增量优化 已完成）<br>
+> 版本：v0.3
+> 状态：实施基线（M0 + M1 + M2.0 确定性事件情报 已完成）<br>
 > 最后更新：2026-07-30
-> 相关文档：[完整目标蓝图](./system-design.md) · [信源注册表](./source-registry.md)
+> 相关文档：[完整目标蓝图](./system-design.md) · [信源注册表](./source-registry.md) · [M2 事件情报](./event-intelligence.md)
 
 ## 1. 已确认的产品与技术决策
 
@@ -417,9 +417,9 @@ actionability   0-10
 | `source_endpoints` | Connector、Parser、URL、Policy、checkpoint、健康状态 |
 | `fetch_runs` | 开始结束时间、状态、数量、错误、租约 |
 | `raw_items` | 原始证据、哈希、请求元数据、版本 |
-| `documents` | 标准化正文、标题、时间、标识符和实体 JSON |
-| `events` | 类型、主线、标题、摘要、状态、评分、当前版本 |
-| `event_documents` | 事件与文档关系、支持/反对、来源等级 |
+| `documents` | 标准化正文、标题、时间、标识符、分类，以及 M2 去重主记录/原因/分数/算法版本 |
+| `events` | 稳定 fingerprint、类型、主线、确定性摘要、证据等级、评分、观测时间、聚类版本和当前版本 |
+| `event_documents` | 事件与文档关系、支持/反对、来源等级、关联原因 |
 | `digests` | 日期、状态、生成版本和目标 Profile |
 | `digest_items` | 排序、栏目、事件、摘要版本 |
 | `delivery_runs` | 渠道、目标、幂等键、状态、错误和时间 |
@@ -433,6 +433,7 @@ MVP 不建立独立图数据库。实体和框架映射先存规范字段与 JSO
 raw_items(endpoint_id, native_id, content_hash)
 raw_items(endpoint_id, canonical_url, published_at, content_hash)
 delivery_runs(channel, target, payload_hash)
+events(fingerprint)
 event_documents(event_id, document_id)
 ```
 
@@ -449,6 +450,8 @@ GET /v1/digests/{date}
 GET /v1/alerts
 GET /v1/sources/health
 ```
+
+M2.0 当前代码先提供同语义的 `GET /events`、`GET /events/{event_id}` 和 `/stats`；统一 `/v1` 前缀在认证与公开 API 定稿时补齐。
 
 查询条件至少支持：
 
@@ -601,7 +604,8 @@ src/
     ├── connectors/        FetchContext (sync get + async aget) + 6 类连接器
     ├── parsers/           各源 Parser + normalize
     ├── classify/          RuleClassifier + taxonomy.yaml + Classification 溯源
-    ├── pipelines/         并发 fetch stage + normalize/fulltext/classify stage
+    ├── events/            M2 去重、强键事件聚类、证据等级和规则评分
+    ├── pipelines/         fetch/normalize/fulltext/classify/dedupe/cluster stages
     ├── domain/            枚举 + RawItem/NormalizedDocument/Checkpoint（known content + 内容水位）
     ├── storage/           BlobStore + repositories（租约/幂等/阶段推进/导出）
     ├── models/            SQLAlchemy 表 + 会话
@@ -621,7 +625,7 @@ tests/
 ├── test_smoke.py         集成冒烟
 └── integration/          真实爬取（INTEL_RUN_LIVE=1）
 
-migrations/               Alembic（initial + classification + RawItem 内容版本）
+migrations/               Alembic（initial + classification + RawItem 内容版本 + M2 event intelligence）
 compose.yaml
 Dockerfile
 pyproject.toml
@@ -714,7 +718,7 @@ docker compose up
 - Worker 中断后重新启动。
 - SSRF、重定向、超大响应和恶意 HTML。
 
-当前离线套件有 30 个用例，已覆盖 NVD 重叠窗口/分页、同 ID 内容修订、Anthropic 列表快速发现/Sitemap 对账、严格限速和流式大小限制等 M1.2 路径；事件聚类、LLM 与投递相关条目属于后续里程碑。
+当前离线套件有 40 个用例，除 M1.2 路径外，已覆盖 M2 的不同 CVE 冲突保护、共享目录 URL、近重复、arXiv 强键、多来源证据和异常组件关系膨胀保护；LLM 与投递相关条目属于后续里程碑。
 
 ### 16.2 最小指标
 
@@ -731,7 +735,7 @@ docker compose up
 - `delivery_failure_total`
 - 每个 endpoint 的最后成功时间和连续失败次数
 
-MVP 使用 JSON 日志和 `/health`、`/v1/sources/health`。需要跨进程指标和告警后再增加 Prometheus/OpenTelemetry。
+MVP 使用结构化日志、`/health`、`/stats` 和 self-check；self-check 已报告 `dedupe_due / cluster_due / events`。需要跨进程指标和告警后再增加 Prometheus/OpenTelemetry。
 
 ## 17. 实施里程碑
 
@@ -775,15 +779,16 @@ MVP 使用 JSON 日志和 `/health`、`/v1/sources/health`。需要跨进程指�
 - Anthropic 使用 Newsroom 快速发现 + 每日 Sitemap 重叠对账。
 - 已知内容缓存、feed 保留窗口和 NVD 旧记录 modified-time 对账的边界见 §6.1；这些是后续完整性优化项，不影响 DB 全历史幂等。
 
-### M2：事件情报
+### M2：事件情报 ✅（M2.0 确定性基线）
 
-- 标准化和硬去重。
-- 近重复和事件候选。
-- 四条主线分类（已有规则分类；LLM 混合分类器在 M1.3）。
-- 评分、证据等级和结构化摘要。
-- 接入更多官方网页适配器。
+- 非破坏式硬去重和 RapidFuzz 近重复，记录主文档、关系原因、相似分和算法版本。
+- CVE/GHSA/CNVD/arXiv 稳定强键；无强键内容按重复组件生成 fallback event。
+- 不同漏洞强标识冲突保护、共享目录 URL 保护和异常组件关系膨胀保护。
+- EventDocument 保存来源等级与关联原因；事件保存证据等级、确定性摘要、时间范围、规则分和版本。
+- 去重/聚类独立增量版本、PostgreSQL advisory lock、正文/分类变化下游失效和幂等重放。
+- Worker、`intel eventize`、`/events` 列表/详情、`/stats` 和 self-check 已接通。
 
-完成标准：能够通过 API 获得带证据的事件列表。
+完成标准已达到：API 能获得带完整证据链的事件列表。M2.1 再增加实体强键、标注集驱动的语义候选、完整 EventVersion/Claim 模型和人工复核；更多信源接入保持为独立持续任务。详见 [M2 事件情报实现说明](./event-intelligence.md)。
 
 ### M3：日报与推送
 
