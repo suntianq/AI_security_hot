@@ -182,6 +182,18 @@ curl localhost:8000/health        # {"status":"ok"}
 - 海外 VM 抓国内源 → 设 `INTEL_PROXY_POOL_CN`
 - 未配代理池时自动回退直连。
 
+Docker 容器里的 `127.0.0.1` 指向容器自身，不能直接填写宿主机仅监听
+loopback 的代理地址。若宿主机代理只监听 `127.0.0.1:7897`，可在该项目
+Docker 网桥的 gateway 上建立一个受限 TCP bridge，再在 `.env` 中填写：
+
+```dotenv
+INTEL_PROXY_POOL_GLOBAL=http://172.18.0.1:17897
+```
+
+这里的 IP、端口应按实际 Compose 网络调整。bridge 只应监听项目 Docker
+网桥的 gateway，不要监听 `0.0.0.0`，避免把本机代理暴露到外部网络。修改
+`.env` 后需重建 `worker`，使新的代理环境变量进入容器。
+
 ### 部署踩坑速查
 
 | 现象 | 原因 | 解决 |
@@ -190,6 +202,7 @@ curl localhost:8000/health        # {"status":"ok"}
 | 构建失败 `Readme file does not exist` | Dockerfile 未 COPY `README.md` | Dockerfile 已 `COPY README.md` |
 | `api` 崩溃 `duplicate key ... alembic_version` | 多容器并发跑迁移竞态 | 迁移归 `worker` 独占 |
 | 依赖安装极慢 | 容器内走代理拉 PyPI 慢 | 已配清华镜像源 |
+| 海外源报 `Network is unreachable` | 宿主代理只监听 loopback，容器不可达 | 仅在 Docker gateway 建受限 bridge，并配置对应 proxy pool |
 
 ## 纯宿主机开发
 
