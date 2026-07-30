@@ -19,7 +19,7 @@ from sqlalchemy.exc import OperationalError
 
 from ai_security_hot.config.sources import load_registry
 from ai_security_hot.models.base import session_scope
-from ai_security_hot.models.tables import Document, RawItem
+from ai_security_hot.models.tables import Document, RawItem, SourceEndpoint
 from ai_security_hot.pipelines.stages import run_fetch_stage, run_normalize_stage
 from ai_security_hot.storage import repositories as repo
 
@@ -46,6 +46,22 @@ def test_real_crawl_produces_documents() -> None:
     registry = load_registry()
     with session_scope() as session:
         repo.sync_registry(session, registry)
+        legacy = session.get(SourceEndpoint, "aihot-selected-rss")
+        replacement = session.get(SourceEndpoint, "aihot-selected-api")
+        assert legacy is not None
+        assert replacement is not None
+        assert legacy.replacement_endpoint_id == replacement.id
+        assert legacy.status == "retired"
+        first_retired_at = legacy.retired_at
+        assert first_retired_at is not None
+
+    # Registry sync is order-independent and idempotent: the retired timestamp
+    # must not move every time a worker starts and reloads sources.yaml.
+    with session_scope() as session:
+        repo.sync_registry(session, registry)
+        legacy = session.get(SourceEndpoint, "aihot-selected-rss")
+        assert legacy is not None
+        assert legacy.retired_at == first_retired_at
 
     fetch_stats = run_fetch_stage(limit=10)
     assert fetch_stats["endpoints"] >= 1

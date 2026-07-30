@@ -161,7 +161,10 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
                     url=ep.url,
                     enabled=ep.enabled,
                     state_version=ep.state_version,
-                    replacement_endpoint_id=ep.replaced_by,
+                    # Replacement FKs are assigned in a second pass after every
+                    # endpoint exists. Query-triggered autoflush may otherwise insert
+                    # a retired endpoint before its replacement on a fresh database.
+                    replacement_endpoint_id=None,
                     retired_at=now if ep.replaced_by else None,
                     status=(
                         SourceStatus.RETIRED.value
@@ -189,8 +192,6 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
             row.url = ep.url
             row.enabled = ep.enabled
             row.state_version = ep.state_version
-            row.replacement_endpoint_id = ep.replaced_by
-            row.retired_at = now if ep.replaced_by else None
             row.egress_route = ep.egress.route.value
             row.policy = policy_json
             if state_changed:
@@ -204,7 +205,24 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
             elif row.status in {SourceStatus.PAUSED.value, SourceStatus.RETIRED.value}:
                 row.status = SourceStatus.ACTIVE.value
 
+    # Phase 1 deliberately persists every endpoint without adding new
+    # self-referential replacement FKs. This makes fresh registry syncs
+    # independent of YAML ordering and SQLAlchemy autoflush boundaries.
     session.flush()
+
+    # Phase 2 can now safely converge replacement links and retirement times.
+    # Preserve the original retired_at across idempotent syncs.
+    for ep in registry.endpoints:
+        row = session.get(SourceEndpoint, ep.id)
+        if row is None:  # pragma: no cover - phase 1 guarantees this invariant
+            raise RuntimeError(f"endpoint disappeared during registry sync: {ep.id}")
+        row.replacement_endpoint_id = ep.replaced_by
+        if ep.replaced_by:
+            row.retired_at = row.retired_at or now
+        else:
+            row.retired_at = None
+    session.flush()
+
     for ep in registry.endpoints:
         if ep.replaced_by:
             _retire_replaced_endpoint(session, ep.id, ep.replaced_by, now=now)
