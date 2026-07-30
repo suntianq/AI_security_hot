@@ -5,7 +5,7 @@
 > 定位：完整目标蓝图；不是第一版的全部实施范围  
 > 当前实施基线：[后端 MVP 设计方案](./mvp-design.md)  
 > 配套文档：[信源注册表](./source-registry.md) · [M1 增量与分类](./m1-data-pipeline.md) · [M2 事件情报](./event-intelligence.md)
-> 当前已完成：M0 骨架 + M1.1/M1.2.x/M1.3 + M2.0 确定性事件情报（18 endpoint，17 source，8 类 Connector）
+> 当前已完成：M0 骨架 + M1.1/M1.2.x/M1.3 + M2.0 确定性事件情报（19 个 endpoint 配置：18 active + 1 retired；17 source，8 类 Connector）
 
 第一版实现以《后端 MVP 设计方案》为准。本文保留网站、Agent、完整证据模型、团队版和长期扩展设计，用于约束后续演进方向。
 
@@ -209,6 +209,7 @@ rate_limit:
 - **last_success_at**（上次成功推进时间，用于 NVD 重叠时间窗）
 - content hash
 - consecutive failure count
+- endpoint status / replacement endpoint / retired time
 
 增量过滤优先级：
 
@@ -223,7 +224,7 @@ rate_limit:
 2. Canonical URL + 发布时间 + 内容指纹。
 3. 标准化 URL。
 
-当前实现用 SourceRecord 保存源端当前投影，并从其中构造有界 known-content 映射；DB 唯一约束覆盖全历史。AI HOT 使用完整 snapshot + durable changes 并支持撤回/409 重建；CISA 作为权威快照检测删除；NVD 使用 120 天 durable 分片 bootstrap/catch-up 与 15 分钟稳态重叠；Anthropic 使用 Newsroom + 每日 72 小时 Sitemap 对账。RSS/arXiv 仍受上游窗口限制。完整契约见 [M1 增量与分类](./m1-data-pipeline.md)。
+当前实现用 SourceRecord 保存源端当前投影，并从其中构造有界 known-content 映射；DB 唯一约束覆盖全历史。AI HOT 使用完整 snapshot + durable changes 并支持撤回/409 重建，旧 RSS 通过 `replaced_by` 退役；CISA 作为权威快照检测删除；NVD 使用 120 天 durable 分片 bootstrap/catch-up、15 分钟稳态重叠，并把上游 `vulnStatus` 映射为 published/rejected/withdrawn/unknown；Anthropic 使用 Newsroom + 每日 72 小时 Sitemap 对账。当前视图统一要求来源 active 且上游记录不是 Rejected/Withdrawn。RSS/arXiv 仍受上游窗口限制。完整契约见 [M1 增量与分类](./m1-data-pipeline.md)。
 
 ## 5. 原始内容与安全边界
 
@@ -425,7 +426,7 @@ published -> retracted
 
 ### 9.1 当前 M1.3 分类实现
 
-M1.3 已实现规则/模型硬边界、provider registry、严格 JSON Schema + Pydantic/taxonomy 白名单、模型缓存与逐次审计、分类租约 heartbeat/fencing、指数退避和规则 fallback。结构化 CVE 只走规则；模型只处理新闻/论文语义。ingest、classify、event 使用独立调度，慢模型不阻塞采集。详见 [M1 实现说明](./m1-data-pipeline.md)。
+M1.3 已实现规则/模型硬边界、provider registry、严格 JSON Schema + Pydantic/taxonomy 白名单、模型缓存与逐次审计、分类租约 heartbeat/fencing、指数退避和规则 fallback。结构化 CVE 只走规则；模型只处理新闻/论文语义。fetch、normalize、fulltext、classify、event 使用独立调度，长窗口抓取与慢模型都不会阻塞其他阶段。详见 [M1 实现说明](./m1-data-pipeline.md)。
 
 ### 9.2 重要性分数
 
@@ -541,11 +542,11 @@ CVSS / EPSS / KEV
 ### 11.1 信源与采集
 
 - `sources`
-- `source_endpoints`
+- `source_endpoints`（含 active/paused/retired、replacement、retired_at）
 - `source_checkpoints`
 - `fetch_runs`
 - `raw_items`
-- `documents`
+- `documents`（含本地 source_status 与上游 record_status 双轴生命周期）
 - `document_versions`
 
 ### 11.2 事件与证据

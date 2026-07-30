@@ -52,6 +52,10 @@ class SourceEndpoint(Base):
     url: Mapped[str] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(default=True)
     state_version: Mapped[str] = mapped_column(String(32), default="1")
+    replacement_endpoint_id: Mapped[str | None] = mapped_column(
+        ForeignKey("source_endpoints.id", ondelete="SET NULL"), nullable=True
+    )
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     priority: Mapped[str] = mapped_column(String(4), default="P1")
     trust_tier: Mapped[str] = mapped_column(String(1), default="B")
     language: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -170,7 +174,12 @@ class Document(Base):
     entities: Mapped[dict] = mapped_column(JSONB, default=dict)
     parse_quality: Mapped[float] = mapped_column(Float, default=0.0)  # plan 修正 4
     source_status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    source_status_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
     withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    record_status: Mapped[str] = mapped_column(
+        String(16), default="published", server_default="published", index=True
+    )
+    record_status_raw: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # --- M1.1 classification (multi-label) + provenance ---
     tech_directions: Mapped[list] = mapped_column(

@@ -23,18 +23,43 @@ from ai_security_hot.storage import repositories as repo
 log = logging.getLogger("intel.scheduler")
 
 
-def ingest_tick() -> None:
-    """Network and parsing stages; never wait for an LLM or event rebuild."""
+def fetch_tick() -> None:
+    """Network polling only; long source pagination cannot block local stages."""
+    try:
+        log.info("fetch_tick: %s", run_fetch_stage())
+    except Exception:
+        log.exception("fetch_tick failed")
+
+
+def normalize_tick() -> None:
+    """Drain immutable raw evidence independently from network fetch latency."""
     try:
         settings = get_settings()
-        stats = {
-            "fetch": run_fetch_stage(),
-            "normalize": run_normalize_stage(limit=settings.normalize_batch_size),
-            "fulltext": run_fulltext_stage(limit=settings.fulltext_batch_size),
-        }
-        log.info("ingest_tick: %s", stats)
+        log.info(
+            "normalize_tick: %s",
+            run_normalize_stage(limit=settings.normalize_batch_size),
+        )
     except Exception:
-        log.exception("ingest_tick failed")
+        log.exception("normalize_tick failed")
+
+
+def fulltext_tick() -> None:
+    """Bounded second-fetch work, isolated from both feed polling and parsing."""
+    try:
+        settings = get_settings()
+        log.info(
+            "fulltext_tick: %s",
+            run_fulltext_stage(limit=settings.fulltext_batch_size),
+        )
+    except Exception:
+        log.exception("fulltext_tick failed")
+
+
+def ingest_tick() -> None:
+    """Backward-compatible manual pass; worker schedules each stage separately."""
+    fetch_tick()
+    normalize_tick()
+    fulltext_tick()
 
 
 def classify_tick() -> None:
@@ -77,10 +102,28 @@ def run_worker() -> None:
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
     first_run = datetime.now(UTC)
     scheduler.add_job(
-        ingest_tick,
+        fetch_tick,
         "interval",
         seconds=settings.tick_interval_seconds,
-        id="ingest",
+        id="fetch",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=first_run,
+    )
+    scheduler.add_job(
+        normalize_tick,
+        "interval",
+        seconds=settings.normalize_interval_seconds,
+        id="normalize",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=first_run,
+    )
+    scheduler.add_job(
+        fulltext_tick,
+        "interval",
+        seconds=settings.fulltext_interval_seconds,
+        id="fulltext",
         max_instances=1,
         coalesce=True,
         next_run_time=first_run,
@@ -112,8 +155,11 @@ def run_worker() -> None:
         coalesce=True,
     )
     log.info(
-        "worker started: ingest=%ds classify=%ds event=%ds self_check=%ds",
+        "worker started: fetch=%ds normalize=%ds fulltext=%ds "
+        "classify=%ds event=%ds self_check=%ds",
         settings.tick_interval_seconds,
+        settings.normalize_interval_seconds,
+        settings.fulltext_interval_seconds,
         settings.classification_interval_seconds,
         settings.event_interval_seconds,
         settings.self_check_interval_seconds,

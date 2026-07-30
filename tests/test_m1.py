@@ -437,6 +437,38 @@ def test_source_registry_rejects_duplicate_endpoint_ids() -> None:
         SourceRegistry.model_validate(payload)
 
 
+def test_source_registry_validates_endpoint_replacement_contract() -> None:
+    from pydantic import ValidationError
+
+    from ai_security_hot.config.sources import SourceRegistry
+
+    base = {
+        "sources": [{"id": "s", "name": "S"}],
+        "endpoints": [
+            {
+                "id": "old",
+                "source_id": "s",
+                "connector": "rss",
+                "url": "https://example.com/old",
+                "enabled": False,
+                "replaced_by": "new",
+            },
+            {
+                "id": "new",
+                "source_id": "s",
+                "connector": "rss",
+                "url": "https://example.com/new",
+            },
+        ],
+    }
+    registry = SourceRegistry.model_validate(base)
+    assert registry.endpoint("old").replaced_by == "new"
+
+    base["endpoints"][0]["enabled"] = True
+    with pytest.raises(ValidationError, match="must be disabled"):
+        SourceRegistry.model_validate(base)
+
+
 @pytest.mark.parametrize(
     ("backlog", "expected_calls"),
     [(1001, []), (1000, ["dedupe", "cluster"])],

@@ -217,15 +217,15 @@ MVP Source Policy 至少包含：
 - checkpoint 类型
 - 连续失败阈值
 
-### 5.4 当前已接入 18 个 endpoint（17 个 source）
+### 5.4 当前配置 19 个 endpoint（18 active + 1 retired；17 个 source）
 
-> 4 个 GitHub Releases endpoint（langchain/dify/ollama/vllm）因内容噪音过大已删除；AI HOT 已从 50 条 RSS 升级为 selected snapshot/changes 专用连接器。目前为 18 个 endpoint。
+> 4 个 GitHub Releases endpoint（langchain/dify/ollama/vllm）因内容噪音过大已删除；AI HOT 已从 50 条 RSS 升级为 selected snapshot/changes 专用连接器。注册表保留旧 RSS 作为 retired 审计记录，因此共有 19 个配置项、18 个 active endpoint。
 
 | # | Endpoint | Connector | Parser | 增量机制 |
 |---|---|---|---|---|
 | 1 | openai-news-rss | RSS | rss-default-v1 | ETag/304 + native ID/content hash |
 | 2 | cisa-kev | REST | cisa-kev-v1 | 官方镜像 + ETag/304 + 修订/删除检测 |
-| 3 | nvd-recent | NVD | nvd-v1 | 120d durable 分片 bootstrap/catch-up + 15min 稳态 overlap |
+| 3 | nvd-recent | NVD | nvd-v2 | 120d durable 分片 bootstrap/catch-up + 15min 稳态 overlap |
 | 4 | anthropic-news | **Newsroom + Sitemap** | sitemap-article-v1 | 快速发现 + 每日 72h 重叠对账 |
 | 5 | huggingface-blog-rss | RSS + fulltext | rss-default-v1 | ETag/304 + content hash |
 | 6 | google-security-rss | RSS | rss-default-v1 | native ID/content hash（无稳定 HTTP validator） |
@@ -241,8 +241,9 @@ MVP Source Policy 至少包含：
 | 16 | apple-ml-research-rss | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash |
 | 17 | nvidia-blog-rss | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash |
 | 18 | wiz-blog-rss | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash |
+| 19 | aihot-selected-rss | RSS（retired） | rss-default-v1 | 已由 aihot-selected-api 替代；不再调度 |
 
-Apple、NVIDIA、Wiz 直接复用官方 RSS。AI HOT 已实现专用 `aihot-selected-v1` Connector：首次完整 snapshot，之后消费 opaque changes cursor，并支持 remove 与 409 自动重建；它不能用通用 REST/RSS 代替。
+Apple、NVIDIA、Wiz 直接复用官方 RSS。AI HOT 已实现专用 `aihot-selected-v1` Connector：首次完整 snapshot，之后消费 opaque changes cursor，并支持 remove 与 409 自动重建；它不能用通用 REST/RSS 代替。旧 RSS 使用 `replaced_by` 审计式退役，既有文档保留为 history，API 是唯一 active 通道。
 
 第一批的目标是验证八类 Connector、中文/英文处理和四条内容主线，不代表最终内容覆盖完整。
 
@@ -262,6 +263,7 @@ Apple、NVIDIA、Wiz 直接复用官方 RSS。AI HOT 已实现专用 `aihot-sele
 - `consecutive_failures`
 - `next_run_at`
 - `lease_until`、`lease_token`（心跳续租 + fencing）
+- `status`、`replacement_endpoint_id`、`retired_at`（采集通道生命周期与替代链）
 
 增量过滤优先级：
 
@@ -289,7 +291,8 @@ Apple、NVIDIA、Wiz 直接复用官方 RSS。AI HOT 已实现专用 `aihot-sele
 - RSS/arXiv 的覆盖范围受上游 feed/API 返回窗口限制，超过保留期的停机无法仅靠 content hash 补回。
 - NVD 使用 120 天 durable 分片 bootstrap；120 天以前的首次全历史需要独立 backfill。
 - Anthropic 每 2 小时检查 Newsroom，每 24 小时执行一次最多 50 URL、72 小时重叠的 Sitemap 对账。
-- AI HOT 和 CISA 支持撤回；普通窗口型 feed 无法可靠推断删除。详见 [M1 实现说明](./m1-data-pipeline.md)。
+- AI HOT 和 CISA 支持撤回；NVD `vulnStatus` 映射为 published/rejected/withdrawn/unknown；普通窗口型 feed 无法可靠推断删除。
+- 当前视图统一要求 `source_status=active` 且 `record_status` 不是 rejected/withdrawn；API、导出、report、分类与 M2 均复用该条件。详见 [M1 实现说明](./m1-data-pipeline.md)。
 
 ### 6.2 原始证据
 
@@ -417,10 +420,10 @@ actionability   0-10
 | 表 | 关键内容 |
 |---|---|
 | `sources` | 名称、可信度、语言、机构 |
-| `source_endpoints` | Connector、Parser、URL、Policy、checkpoint、健康状态 |
+| `source_endpoints` | Connector、Parser、URL、Policy、checkpoint、健康状态、替代 endpoint 与退役时间 |
 | `fetch_runs` | 开始结束时间、状态、数量、错误、租约 |
 | `raw_items` | 原始证据、哈希、请求元数据、版本 |
-| `documents` | 标准化正文、标题、时间、标识符、分类，以及 M2 去重主记录/原因/分数/算法版本 |
+| `documents` | 标准化正文、标题、时间、标识符、本地 source_status、上游 record_status、分类，以及 M2 去重主记录/原因/分数/算法版本 |
 | `events` | 稳定 fingerprint、类型、主线、确定性摘要、证据等级、评分、观测时间、聚类版本和当前版本 |
 | `event_documents` | 事件与文档关系、支持/反对、来源等级、关联原因 |
 | `digests` | 日期、状态、生成版本和目标 Profile |
@@ -497,7 +500,7 @@ intel event reprocess <id>
 | 日报投递 | 北京时间 08:30 |
 | 数据保留与健康汇总 | 每日一次 |
 
-APScheduler 只负责触发高层任务，例如 `collect_due_sources`。每个 endpoint 的真实到期时间、租约和运行结果保存在 PostgreSQL，不能只依赖 Scheduler 内存状态。
+APScheduler 分别触发 fetch、normalize、fulltext、classify、event 与 self-check；每个 endpoint 的真实到期时间、租约和运行结果保存在 PostgreSQL，不能只依赖 Scheduler 内存状态。各阶段 job 独立限并发：长 NVD fetch 不会阻塞每 10 秒、每批 2,000 条的 normalize。
 
 ## 11. 日报和告警
 
@@ -618,7 +621,7 @@ src/
     └── main.py
 
 sources/
-├── sources.yaml          18 个真实 endpoint 配置
+├── sources.yaml          19 个 endpoint 配置（18 active + 1 retired）
 ├── taxonomy.yaml         分类规则词表
 └── parsers/
 
@@ -721,7 +724,7 @@ docker compose up
 - Worker 中断后重新启动。
 - SSRF、重定向、超大响应和恶意 HTML。
 
-当前离线套件有 54 个用例，覆盖 AI HOT snapshot/changes/remove/409、CISA 权威快照撤回、NVD 参数、HTTP 重试、M1.3 Schema/白名单/CVE bypass，以及 M2 的冲突保护、近重复、强键、多来源证据和关系膨胀保护；投递仍属于后续里程碑。
+当前离线套件有 56 个用例，覆盖 AI HOT snapshot/changes/remove/409、CISA 权威快照撤回、NVD 参数、HTTP 重试、M1.3 Schema/白名单/CVE bypass，以及 M2 的冲突保护、近重复、强键、多来源证据和关系膨胀保护；投递仍属于后续里程碑。
 
 ### 16.2 最小指标
 
@@ -765,7 +768,7 @@ MVP 使用结构化日志、`/health`、`/stats` 和 self-check；self-check 已
 - **新增 ArxivConnector**：arXiv API 搜索。
 - **新增并发 fetch pipeline**：`asyncio.gather` 最多 5 个 endpoint 同时抓取。
 - **NVD modified-time 增量**：120 天 durable 分片 bootstrap/catch-up + 密度缩窗 + 15 分钟稳态 overlap。
-- 18 个 endpoint 真实可跑。
+- 18 个 active endpoint 真实可跑，另保留 1 个 retired endpoint 的审计配置。
 
 ### M1.1：规则分类 ✅
 
@@ -776,17 +779,17 @@ MVP 使用结构化日志、`/health`、`/stats` 和 self-check；self-check 已
 
 ### M1.2.x：增量优化 ✅
 
-- RawItem 不可变内容/撤回版本 + SourceRecord 当前投影 + Document active/superseded/withdrawn。
+- RawItem 不可变内容/撤回版本 + SourceRecord 当前投影 + Document 双轴生命周期（source_status 与上游 record_status）。
 - AI HOT snapshot/changes/remove/409 重建；CISA 权威快照删除检测。
 - NVD 120 天 durable 分片 bootstrap/catch-up、密度缩窗和 15 分钟稳态 overlap。
 - Anthropic Newsroom 快速发现 + 每日 Sitemap 重叠对账。
-- endpoint state_version、YAML 删除自动暂停、正确的 4xx/429/5xx 重试语义。
+- endpoint state_version、YAML 删除自动暂停、`replaced_by` 审计式退役、正确的 4xx/429/5xx 重试语义。
 
 ### M1.3：混合分类 ✅
 
 - provider registry、严格 JSON Schema/Pydantic/taxonomy 白名单。
 - model_cache、model_runs、分类租约、缓存命中、指数退避与规则 fallback。
-- 结构化 CVE 不调用 LLM；ingest/classify/event 三个 job 相互独立。
+- 结构化 CVE 不调用 LLM；fetch/normalize/fulltext/classify/event 各 job 相互独立。
 
 完整实现与非保证边界见 [M1 增量与分类](./m1-data-pipeline.md)。
 
@@ -861,6 +864,6 @@ Agent 只通过受限 API/MCP 使用情报能力，数据库仍是唯一事实�
 3. 首选 LLM Provider 和单日费用上限。
 4. 第一批 GitHub Watchlist 仓库。
 5. 紧急告警的固定资产/产品清单。
-6. 当前 18 个 endpoint 后续应优先补哪些国内一手来源。
+6. 当前 18 个 active endpoint 后续应优先补哪些国内一手来源。
 
 这些配置不改变总体架构，但会决定第一轮 Connector、模板和验收数据。

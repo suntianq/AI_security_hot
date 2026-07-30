@@ -118,6 +118,25 @@ endpoints:
       requests_per_minute: 2
     topics: [ai, security_for_ai]
 
+  # Legacy discovery endpoint retained declaratively for auditable retirement.
+  # It never runs again; immutable RawItems stay queryable, while its documents
+  # leave the current corpus because the API below is authoritative.
+  - id: aihot-selected-rss
+    source_id: aihot
+    connector: rss
+    parser: rss-default-v1
+    url: https://aihot.virxact.com/feed.xml
+    enabled: false
+    replaced_by: aihot-selected-api
+    state_version: "retired-1"
+    trust_tier: B
+    priority: P0
+    language: zh
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 30, jitter_seconds: 120 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai, security_for_ai, ai_for_security]
+
   # AI HOT exact selected-set mirror. Bootstrap all selected items once,
   # then consume its durable change ledger (upsert/remove). A 409 automatically
   # rebuilds the authoritative snapshot. This is not the 50-item RSS window.
@@ -219,7 +238,7 @@ endpoints:
   - id: nvd-recent
     source_id: nvd
     connector: nvd
-    parser: nvd-v1
+    parser: nvd-v2
     url: https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=2000
     enabled: true
     state_version: "3"

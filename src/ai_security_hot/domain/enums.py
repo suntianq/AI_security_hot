@@ -67,12 +67,37 @@ class PipelineStage(StrEnum):
 class SourceRecordStatus(StrEnum):
     ACTIVE = "active"
     WITHDRAWN = "withdrawn"
+    RETIRED = "retired"
+
+
+class DocumentSourceStatus(StrEnum):
+    """Lifecycle of a local document revision/evidence membership."""
+
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    WITHDRAWN = "withdrawn"
+    RETIRED = "retired"
+
+
+class UpstreamRecordStatus(StrEnum):
+    """Normalized semantic status asserted by the upstream publisher."""
+
+    PUBLISHED = "published"
+    REJECTED = "rejected"
+    WITHDRAWN = "withdrawn"
+    UNKNOWN = "unknown"
+
+
+NON_CURRENT_UPSTREAM_STATUSES = frozenset(
+    {UpstreamRecordStatus.REJECTED.value, UpstreamRecordStatus.WITHDRAWN.value}
+)
 
 
 class SourceStatus(StrEnum):
     ACTIVE = "active"
     DEGRADED = "degraded"
     PAUSED = "paused"
+    RETIRED = "retired"
 
 
 class DeliveryChannel(StrEnum):

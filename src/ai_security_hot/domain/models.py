@@ -89,6 +89,9 @@ class NormalizedDocument(BaseModel):
     cwe_ids: list[str] = Field(default_factory=list)
     entities: dict[str, list[str]] = Field(default_factory=dict)  # companies/models/repos/...
     raw_metadata: dict[str, str] = Field(default_factory=dict)
+    # Upstream semantic state is independent from local revision lifecycle.
+    record_status: str = "published"
+    record_status_raw: str | None = None
     # parse quality (plan 修正 4): did the parse hit the source's minimum bar?
     parse_quality: float = 0.0
 

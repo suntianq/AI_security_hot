@@ -2,7 +2,7 @@
 
 > 状态：持续维护（M1 接入基线已完成）
 > 最后核验：2026-07-30
-> 当前已接入：18 个 endpoint（17 个 source），8 类 Connector（RSS/REST/NVD/AI HOT/GitHub/Web/arXiv/Sitemap）
+> 当前配置：19 个 endpoint（18 个 active、1 个 retired；17 个 source），8 类 Connector（RSS/REST/NVD/AI HOT/GitHub/Web/arXiv/Sitemap）
 > 目标：为 `AI`、`AI for Security`、`AI-enabled Threats`、`Security for AI` 四条内容主线提供可追溯、可扩展的信源池。
 
 ## 1. 使用说明
@@ -27,14 +27,15 @@
 4. 启用网页采集前必须单独检查 robots.txt、服务条款、版权和访问频率。
 5. 网页、论文、Issue、PoC 和模型卡均视为不可信输入，不执行其中的命令、代码或提示词。
 
-## 1.1 当前已接入 18 个 endpoint
+## 1.1 当前配置 19 个 endpoint（18 active + 1 retired）
 
 | Endpoint | Source | Connector | Parser | 增量机制 | 状态 |
 |---|---|---|---|---|---|
 | openai-news-rss | OpenAI | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
-| aihot-selected-api | AI HOT | AI HOT | aihot-v1 | snapshot + changes cursor + remove + 409 rebuild | ✅ |
+| aihot-selected-api | AI HOT | AI HOT | aihot-v1 | snapshot + changes cursor + remove + 409 rebuild | ✅ active |
+| aihot-selected-rss | AI HOT | RSS | rss-default-v1 | 已由 selected API 替代；保留历史与替代关系 | retired |
 | cisa-kev | CISA | REST | cisa-kev-v1 | 官方 GitHub 镜像 + ETag/304 + 修订/删除检测 | ✅ |
-| nvd-recent | NVD | NVD | nvd-v1 | 120d durable 分片 bootstrap/catch-up + 15min 稳态 overlap | ✅ |
+| nvd-recent | NVD | NVD | nvd-v2 | 120d durable 分片 bootstrap/catch-up + 15min 稳态 overlap | ✅ |
 | anthropic-news | Anthropic | **Newsroom + Sitemap** | sitemap-article-v1 | 快速发现 + 每日 72h 重叠对账 | ✅ |
 | huggingface-blog-rss | HuggingFace | RSS + fulltext | rss-default-v1 | ETag/304 + content hash | ✅ |
 | google-security-rss | Google Security | RSS | rss-default-v1 | native ID/content hash（无稳定 HTTP validator） | ✅ |
@@ -52,9 +53,9 @@
 
 > 4 个 GitHub Releases endpoint（langchain/dify/ollama/vllm-releases）因内容噪音过大已删除（2026-07-29）。
 
-> M1.2.x 已启用 SourceRecord 当前投影与 Document lifecycle。AI HOT 和 CISA 能表达撤回；NVD 使用 modified-time 对账；普通 RSS/arXiv 仍只能处理上游当前窗口返回的记录。完整保证与边界见 [M1 实现说明](./m1-data-pipeline.md)。
+> M1.2.x 已启用 SourceRecord 当前投影与 Document 双轴 lifecycle。当前视图要求本地来源 active 且上游记录不是 Rejected/Withdrawn；AI HOT 和 CISA 能表达撤回，NVD 使用 modified-time 对账并保留 `vulnStatus`。普通 RSS/arXiv 仍只能处理上游当前窗口返回的记录。完整保证与边界见 [M1 实现说明](./m1-data-pipeline.md)。
 >
-> AI HOT 因为有 snapshot/changes/409/remove 专用协议，使用独立 Connector/Parser；Apple、NVIDIA、Wiz 继续复用 RSS。CISA 的 cisa.gov 下载在部分运行环境返回 403，现使用 CISA 官方 `cisagov/kev-data` GitHub 镜像。
+> AI HOT 因为有 snapshot/changes/409/remove 专用协议，使用独立 Connector/Parser；旧 RSS endpoint 已通过 `replaced_by` 退役且不再调度，API 是唯一 active 通道。Apple、NVIDIA、Wiz 继续复用 RSS。CISA 的 cisa.gov 下载在部分运行环境返回 403，现使用 CISA 官方 `cisagov/kev-data` GitHub 镜像。
 
 ## 2. P0：结构化权威源与聚合入口
 
@@ -258,7 +259,7 @@
 
 ## 10. 首批候选池与实际 MVP
 
-下面约 35 个逻辑信源是形成较完整主题覆盖的首批候选池，不要求在工程 MVP 中一次接入。**当前已接入 18 个 endpoint（见 §1.1）**，详见[后端 MVP 设计方案](./mvp-design.md#54-当前已接入-18-个-endpoint17-个-source)。在首发稳定并完成 7 天验收后，再从下面的候选池逐步扩展。
+下面约 35 个逻辑信源是形成较完整主题覆盖的首批候选池，不要求在工程 MVP 中一次接入。**当前配置 19 个 endpoint（18 active + 1 retired，见 §1.1）**，详见[后端 MVP 设计方案](./mvp-design.md#54-当前配置-19-个-endpoint18-active--1-retired17-个-source)。在首发稳定并完成 7 天验收后，再从下面的候选池逐步扩展。
 
 ### 通用 AI
 

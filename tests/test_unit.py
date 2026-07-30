@@ -55,7 +55,7 @@ def test_source_registry_key_endpoints() -> None:
     }
 
     assert len(registry.sources) == 17
-    assert len(registry.endpoints) == 18
+    assert len(registry.endpoints) == 19
     assert len({source.id for source in registry.sources}) == len(registry.sources)
     assert len({endpoint.id for endpoint in registry.endpoints}) == len(registry.endpoints)
     for endpoint_id, (url, connector, parser) in expected.items():
@@ -64,8 +64,13 @@ def test_source_registry_key_endpoints() -> None:
         assert endpoint.connector.value == connector
         assert endpoint.parser == parser
 
+    legacy_aihot = registry.endpoint("aihot-selected-rss")
+    assert legacy_aihot.enabled is False
+    assert legacy_aihot.replaced_by == "aihot-selected-api"
+
     nvd = registry.endpoint("nvd-recent")
     assert nvd.connector.value == "nvd"
+    assert nvd.parser == "nvd-v2"
     assert nvd.state_version == "3"
     assert nvd.options["nvd"]["bootstrap_days"] == 120
     assert nvd.options["nvd"]["segment_days"] == 7
@@ -132,6 +137,17 @@ def test_parse_quality_scoring() -> None:
     assert score_parse_quality(title=None, published_at_present=False, body_text=None) == 0.0
     # title + body but no date => 0.8
     assert score_parse_quality(title="T", published_at_present=False, body_text="x" * 100) == 0.8
+
+
+def test_current_document_visibility_keeps_lifecycle_and_upstream_status_separate() -> None:
+    from ai_security_hot.storage.repositories import is_current_document
+
+    assert is_current_document("active", "published") is True
+    assert is_current_document("active", "unknown") is True
+    assert is_current_document("active", "rejected") is False
+    assert is_current_document("active", "withdrawn") is False
+    assert is_current_document("retired", "published") is False
+    assert is_current_document("superseded", "published") is False
 
 
 def test_rule_classifier_basic() -> None:

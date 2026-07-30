@@ -20,6 +20,7 @@ from ai_security_hot.models.tables import (
     EventDocument,
     ModelRun,
     RawItem,
+    Source,
     SourceEndpoint,
 )
 from ai_security_hot.pipelines.stages import (
@@ -30,6 +31,7 @@ from ai_security_hot.pipelines.stages import (
     run_fulltext_stage,
     run_normalize_stage,
 )
+from ai_security_hot.storage import repositories as repo
 
 app = FastAPI(title="AI Security Hot — Intel Backend", version="0.2.0")
 
@@ -53,6 +55,8 @@ def list_sources() -> list[dict]:
                 "enabled": ep.enabled,
                 "status": ep.status,
                 "state_version": ep.state_version,
+                "replacement_endpoint_id": ep.replacement_endpoint_id,
+                "retired_at": ep.retired_at.isoformat() if ep.retired_at else None,
                 "egress_route": ep.egress_route,
                 "consecutive_failures": ep.consecutive_failures,
                 "last_success_at": ep.last_success_at.isoformat() if ep.last_success_at else None,
@@ -72,20 +76,33 @@ def list_documents(
     ),
     company_model: str | None = Query(None, description="e.g. anthropic, openai"),
     event_type: str | None = Query(None),
-    include_inactive: bool = Query(False),
+    source_id: str | None = Query(None),
+    record_status: str | None = Query(None),
+    include_inactive: bool = Query(
+        False, description="Include retired/superseded/withdrawn/rejected history"
+    ),
 ) -> list[dict]:
     with session_scope() as session:
-        stmt = select(Document).where(Document.parse_quality >= min_quality)
+        stmt = (
+            select(Document, SourceEndpoint, Source)
+            .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
+            .join(Source, Source.id == SourceEndpoint.source_id)
+            .where(Document.parse_quality >= min_quality)
+        )
         if not include_inactive:
-            stmt = stmt.where(Document.source_status == "active")
+            stmt = stmt.where(*repo.current_document_conditions())
         if tech_direction:
             stmt = stmt.where(Document.tech_directions.contains([tech_direction]))
         if company_model:
             stmt = stmt.where(Document.company_models.contains([company_model]))
         if event_type:
             stmt = stmt.where(Document.classified_event_type == event_type)
+        if source_id:
+            stmt = stmt.where(SourceEndpoint.source_id == source_id)
+        if record_status:
+            stmt = stmt.where(Document.record_status == record_status)
         stmt = stmt.order_by(desc(Document.id)).limit(limit)
-        rows = session.execute(stmt).scalars().all()
+        rows = session.execute(stmt).all()
         return [
             {
                 "id": d.id,
@@ -100,9 +117,17 @@ def list_documents(
                 "company_models": d.company_models,
                 "event_type": d.classified_event_type,
                 "classify_method": d.classify_method,
+                "source_id": endpoint.source_id,
+                "source_name": source.name,
+                "endpoint_id": endpoint.id,
+                "endpoint_enabled": endpoint.enabled,
+                "endpoint_status": endpoint.status,
                 "source_status": d.source_status,
+                "source_status_reason": d.source_status_reason,
+                "record_status": d.record_status,
+                "record_status_raw": d.record_status_raw,
             }
-            for d in rows
+            for d, endpoint, source in rows
         ]
 
 
@@ -152,7 +177,7 @@ def list_events(
             .where(
                 Event.status == "detected",
                 Event.score >= min_score,
-                Document.source_status == "active",
+                *repo.current_document_conditions(),
             )
         )
         if topic:
@@ -208,6 +233,9 @@ def get_event(event_id: int) -> dict:
                 ),
                 "parse_quality": doc.parse_quality,
                 "source_status": doc.source_status,
+                "source_status_reason": doc.source_status_reason,
+                "record_status": doc.record_status,
+                "record_status_raw": doc.record_status_raw,
             }
             for link, doc, endpoint in rows
         ]
@@ -220,8 +248,17 @@ def stats() -> dict:
         rows = session.execute(select(RawItem.stage, func.count()).group_by(RawItem.stage)).all()
         by_stage = {stage: count for stage, count in rows}
         doc_count = session.execute(select(func.count()).select_from(Document)).scalar_one()
+        current_doc_count = session.execute(
+            select(func.count()).select_from(Document).where(*repo.current_document_conditions())
+        ).scalar_one()
         doc_status_rows = session.execute(
             select(Document.source_status, func.count()).group_by(Document.source_status)
+        ).all()
+        record_status_rows = session.execute(
+            select(Document.record_status, func.count()).group_by(Document.record_status)
+        ).all()
+        endpoint_status_rows = session.execute(
+            select(SourceEndpoint.status, func.count()).group_by(SourceEndpoint.status)
         ).all()
         model_status_rows = session.execute(
             select(ModelRun.status, func.count()).group_by(ModelRun.status)
@@ -238,7 +275,10 @@ def stats() -> dict:
     return {
         "raw_items_by_stage": {str(k): int(v) for k, v in by_stage.items()},
         "documents": int(doc_count),
+        "current_documents": int(current_doc_count),
         "documents_by_source_status": {str(k): int(v) for k, v in doc_status_rows},
+        "documents_by_record_status": {str(k): int(v) for k, v in record_status_rows},
+        "endpoints_by_status": {str(k): int(v) for k, v in endpoint_status_rows},
         "model_runs_by_status": {str(k): int(v) for k, v in model_status_rows},
         "near_duplicates": int(duplicate_count),
         "events": int(event_count),
@@ -288,6 +328,9 @@ def get_document(document_id: int) -> dict:
             "entities": d.entities,
             "parse_quality": d.parse_quality,
             "source_status": d.source_status,
+            "source_status_reason": d.source_status_reason,
+            "record_status": d.record_status,
+            "record_status_raw": d.record_status_raw,
             "withdrawn_at": d.withdrawn_at.isoformat() if d.withdrawn_at else None,
             "classify_error": d.classify_error,
         }

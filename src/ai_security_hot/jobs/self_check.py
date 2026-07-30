@@ -18,6 +18,7 @@ from ai_security_hot.events.intelligence import CLUSTER_VERSION, DEDUPE_VERSION
 from ai_security_hot.llm.registry import provider_names
 from ai_security_hot.models.base import session_scope
 from ai_security_hot.models.tables import Document, Event, ModelRun, RawItem, SourceEndpoint
+from ai_security_hot.storage import repositories as repo
 
 log = logging.getLogger("intel.self_check")
 
@@ -31,6 +32,7 @@ def run_self_check() -> dict:
         "failed_items": 0,
         "event_pipeline": {},
         "classification": {},
+        "data_quality": {},
     }
 
     with session_scope() as session:
@@ -56,9 +58,7 @@ def run_self_check() -> dict:
             select(func.count())
             .select_from(RawItem)
             .where(
-                RawItem.stage.notin_(
-                    [PipelineStage.DONE.value, PipelineStage.FAILED.value]
-                ),
+                RawItem.stage.notin_([PipelineStage.DONE.value, PipelineStage.FAILED.value]),
                 RawItem.stage_lease_until.is_not(None),
                 RawItem.stage_lease_until < now,
             )
@@ -70,22 +70,8 @@ def run_self_check() -> dict:
         ).scalar_one()
         report["stuck_items"] = int(stuck)
         report["failed_items"] = int(failed)
-        dedupe_due = session.execute(
-            select(func.count())
-            .select_from(Document)
-            .where(
-                Document.source_status == "active",
-                Document.dedupe_version.is_(None) | (Document.dedupe_version != DEDUPE_VERSION),
-            )
-        ).scalar_one()
-        cluster_due = session.execute(
-            select(func.count())
-            .select_from(Document)
-            .where(
-                Document.dedupe_version == DEDUPE_VERSION,
-                Document.cluster_version.is_(None) | (Document.cluster_version != CLUSTER_VERSION),
-            )
-        ).scalar_one()
+        dedupe_due = repo.count_dedupe_due(session, version=DEDUPE_VERSION)
+        cluster_due = repo.count_cluster_due(session, version=CLUSTER_VERSION)
         events = session.execute(
             select(func.count()).select_from(Event).where(Event.status == "detected")
         ).scalar_one()
@@ -93,6 +79,20 @@ def run_self_check() -> dict:
             "dedupe_due": int(dedupe_due),
             "cluster_due": int(cluster_due),
             "events": int(events),
+        }
+        record_status_rows = session.execute(
+            select(Document.record_status, func.count()).group_by(Document.record_status)
+        ).all()
+        source_status_rows = session.execute(
+            select(Document.source_status, func.count()).group_by(Document.source_status)
+        ).all()
+        current_documents = session.execute(
+            select(func.count()).select_from(Document).where(*repo.current_document_conditions())
+        ).scalar_one()
+        report["data_quality"] = {
+            "current_documents": int(current_documents),
+            "record_status": {str(k): int(v) for k, v in record_status_rows},
+            "source_status": {str(k): int(v) for k, v in source_status_rows},
         }
         expired_leases = session.execute(
             select(func.count())

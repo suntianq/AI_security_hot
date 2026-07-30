@@ -8,16 +8,30 @@ from datetime import UTC
 from dateutil import parser as dateparser
 
 from ai_security_hot.connectors.base import Parser
+from ai_security_hot.domain.enums import UpstreamRecordStatus
 from ai_security_hot.domain.models import NormalizedDocument, RawItem
 from ai_security_hot.parsers.normalize import extract_identifiers, score_parse_quality
 
 
 class NvdParser(Parser):
-    version = "nvd-v1"
+    version = "nvd-v2"
+
+    @staticmethod
+    def _record_status(raw_status: object) -> tuple[str, str | None]:
+        value = str(raw_status).strip() if raw_status is not None else ""
+        normalized = value.casefold()
+        if normalized == "rejected":
+            return UpstreamRecordStatus.REJECTED.value, value
+        if normalized == "withdrawn":
+            return UpstreamRecordStatus.WITHDRAWN.value, value
+        if value:
+            return UpstreamRecordStatus.PUBLISHED.value, value
+        return UpstreamRecordStatus.UNKNOWN.value, None
 
     def parse(self, raw: RawItem) -> NormalizedDocument:
         rec = json.loads(raw.raw_text or "{}")
         cve = rec.get("id", raw.native_id)
+        record_status, record_status_raw = self._record_status(rec.get("vulnStatus"))
 
         # English description preferred
         desc = ""
@@ -59,6 +73,9 @@ class NvdParser(Parser):
             ghsa_ids=ids["ghsa"],
             cnvd_ids=ids["cnvd"],
             cwe_ids=ids["cwe"],
+            record_status=record_status,
+            record_status_raw=record_status_raw,
+            raw_metadata={"vuln_status": record_status_raw or ""},
             parse_quality=score_parse_quality(
                 title=title,
                 published_at_present=pub is not None,

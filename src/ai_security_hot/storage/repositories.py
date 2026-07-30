@@ -17,7 +17,13 @@ from sqlalchemy.orm import Session
 
 from ai_security_hot.config.sources import SourceRegistry
 from ai_security_hot.connectors.base import Checkpoint
-from ai_security_hot.domain.enums import PipelineStage
+from ai_security_hot.domain.enums import (
+    NON_CURRENT_UPSTREAM_STATUSES,
+    DocumentSourceStatus,
+    PipelineStage,
+    SourceRecordStatus,
+    SourceStatus,
+)
 from ai_security_hot.domain.models import RawItem as RawItemDTO
 from ai_security_hot.events.intelligence import (
     CLUSTER_VERSION,
@@ -57,8 +63,73 @@ def _reset_endpoint_state_for_url_change(row: SourceEndpoint, *, now: datetime) 
     row.lease_token = None
 
 
+def current_document_conditions() -> tuple:
+    """Canonical SQL predicate for the current intelligence corpus."""
+    return (
+        Document.source_status == DocumentSourceStatus.ACTIVE.value,
+        Document.record_status.not_in(NON_CURRENT_UPSTREAM_STATUSES),
+    )
+
+
+def is_current_document(source_status: str, record_status: str) -> bool:
+    """Python equivalent used by exports and self-contained reports."""
+    return (
+        source_status == DocumentSourceStatus.ACTIVE.value
+        and record_status not in NON_CURRENT_UPSTREAM_STATUSES
+    )
+
+
+def _retire_replaced_endpoint(
+    session: Session, endpoint_id: str, replacement_id: str, *, now: datetime
+) -> int:
+    """Retire a superseded endpoint's projection while preserving evidence."""
+    reason = f"endpoint_replaced:{replacement_id}"
+    retired_ids = list(
+        session.execute(
+            update(Document)
+            .where(
+                Document.endpoint_id == endpoint_id,
+                Document.source_status == DocumentSourceStatus.ACTIVE.value,
+            )
+            .values(
+                source_status=DocumentSourceStatus.RETIRED.value,
+                source_status_reason=reason,
+                withdrawn_at=now,
+                classify_lease_until=None,
+                classify_lease_token=None,
+                near_dup_of=None,
+                duplicate_kind=None,
+                duplicate_score=None,
+                dedupe_version=DEDUPE_VERSION,
+                cluster_version=None,
+            )
+            .returning(Document.id)
+        ).scalars()
+    )
+    session.execute(
+        update(SourceRecord)
+        .where(
+            SourceRecord.endpoint_id == endpoint_id,
+            SourceRecord.status == SourceRecordStatus.ACTIVE.value,
+        )
+        .values(
+            status=SourceRecordStatus.RETIRED.value,
+            withdrawn_at=now,
+            last_seen_at=now,
+        )
+    )
+    if retired_ids:
+        # Removing a possible duplicate master can change any active component.
+        session.execute(
+            update(Document)
+            .where(Document.source_status == DocumentSourceStatus.ACTIVE.value)
+            .values(dedupe_version=None, cluster_version=None)
+        )
+    return len(retired_ids)
+
+
 def sync_registry(session: Session, registry: SourceRegistry) -> None:
-    """Upsert the registry, reset changed protocols and pause removed endpoints."""
+    """Upsert registry, retire replacements and pause removed endpoints."""
     now = datetime.now(UTC)
     configured_ids = {ep.id for ep in registry.endpoints}
     for s in registry.sources:
@@ -90,6 +161,15 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
                     url=ep.url,
                     enabled=ep.enabled,
                     state_version=ep.state_version,
+                    replacement_endpoint_id=ep.replaced_by,
+                    retired_at=now if ep.replaced_by else None,
+                    status=(
+                        SourceStatus.RETIRED.value
+                        if ep.replaced_by
+                        else (
+                            SourceStatus.ACTIVE.value if ep.enabled else SourceStatus.PAUSED.value
+                        )
+                    ),
                     priority=ep.priority.value,
                     trust_tier=ep.trust_tier.value,
                     language=ep.language,
@@ -109,10 +189,25 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
             row.url = ep.url
             row.enabled = ep.enabled
             row.state_version = ep.state_version
+            row.replacement_endpoint_id = ep.replaced_by
+            row.retired_at = now if ep.replaced_by else None
             row.egress_route = ep.egress.route.value
             row.policy = policy_json
             if state_changed:
                 _reset_endpoint_state_for_url_change(row, now=now)
+            if not ep.enabled:
+                row.status = (
+                    SourceStatus.RETIRED.value if ep.replaced_by else SourceStatus.PAUSED.value
+                )
+                row.lease_until = None
+                row.lease_token = None
+            elif row.status in {SourceStatus.PAUSED.value, SourceStatus.RETIRED.value}:
+                row.status = SourceStatus.ACTIVE.value
+
+    session.flush()
+    for ep in registry.endpoints:
+        if ep.replaced_by:
+            _retire_replaced_endpoint(session, ep.id, ep.replaced_by, now=now)
 
     # YAML is authoritative. Keeping removed endpoints active in PostgreSQL
     # creates ghost fetches and makes connector renames unsafe.
@@ -406,6 +501,7 @@ def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
                 )
                 .values(
                     source_status="withdrawn",
+                    source_status_reason="source_withdrawn",
                     withdrawn_at=item.fetched_at,
                     classify_lease_until=None,
                     classify_lease_token=None,
@@ -422,6 +518,7 @@ def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
                 .where(Document.raw_item_id == raw_id)
                 .values(
                     source_status="active",
+                    source_status_reason=None,
                     withdrawn_at=None,
                     dedupe_version=None,
                     cluster_version=None,
@@ -436,6 +533,7 @@ def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
                 )
                 .values(
                     source_status="superseded",
+                    source_status_reason="content_revision",
                     withdrawn_at=item.fetched_at,
                     classify_lease_until=None,
                     classify_lease_token=None,
@@ -594,6 +692,7 @@ def persist_document(session: Session, raw_item_id: int, doc, next_stage: Pipeli
         )
         .values(
             source_status="superseded",
+            source_status_reason="content_revision",
             withdrawn_at=raw.fetched_at,
             classify_lease_until=None,
             classify_lease_token=None,
@@ -625,6 +724,9 @@ def persist_document(session: Session, raw_item_id: int, doc, next_stage: Pipeli
             entities=doc.entities,
             parse_quality=doc.parse_quality,
             source_status="active",
+            source_status_reason=None,
+            record_status=doc.record_status,
+            record_status_raw=doc.record_status_raw,
         )
     )
     raw.stage = next_stage.value
@@ -703,7 +805,7 @@ def iter_documents_for_export(
     stmt = (
         select(Document)
         .where(
-            Document.source_status == "active",
+            *current_document_conditions(),
             Document.parse_quality >= min_quality,
         )
         .order_by(Document.id)
@@ -776,7 +878,7 @@ def claim_unclassified_documents(
         select(Document)
         .join(RawItem, RawItem.id == Document.raw_item_id)
         .where(
-            Document.source_status == "active",
+            *current_document_conditions(),
             RawItem.stage == PipelineStage.DONE.value,
             lease_available,
             due,
@@ -816,7 +918,7 @@ def extend_classification_leases(
                 Document.id.in_(document_ids),
                 Document.classify_lease_token == lease_token,
                 Document.classify_lease_until.is_not(None),
-                Document.source_status == "active",
+                *current_document_conditions(),
             )
             .values(classify_lease_until=datetime.now(UTC) + timedelta(seconds=lease_seconds))
             .returning(Document.id)
@@ -841,7 +943,9 @@ def apply_classification(
     ).scalar_one_or_none()
     if doc is None:
         raise KeyError(f"unknown document: {document_id}")
-    if doc.classify_lease_token != lease_token or doc.source_status != "active":
+    if doc.classify_lease_token != lease_token or not is_current_document(
+        doc.source_status, doc.record_status
+    ):
         raise ClassificationLeaseLost(f"classification lease lost: {document_id}")
     doc.tech_directions = cls.tech_directions
     doc.company_models = cls.company_models
@@ -992,7 +1096,7 @@ def count_event_pipeline_backlog(session: Session) -> int:
         .select_from(Document)
         .join(RawItem, RawItem.id == Document.raw_item_id)
         .where(
-            Document.source_status == "active",
+            *current_document_conditions(),
             RawItem.stage == PipelineStage.DONE.value,
             Document.classified_at.is_(None),
         )
@@ -1014,7 +1118,7 @@ def count_dedupe_due(session: Session, *, version: str = DEDUPE_VERSION) -> int:
             select(func.count())
             .select_from(Document)
             .where(
-                Document.source_status == "active",
+                *current_document_conditions(),
                 Document.dedupe_version.is_(None) | (Document.dedupe_version != version),
             )
         ).scalar_one()
@@ -1027,6 +1131,7 @@ def count_cluster_due(session: Session, *, version: str = CLUSTER_VERSION) -> in
             select(func.count())
             .select_from(Document)
             .where(
+                *current_document_conditions(),
                 Document.dedupe_version == DEDUPE_VERSION,
                 Document.cluster_version.is_(None) | (Document.cluster_version != version),
             )
@@ -1040,7 +1145,7 @@ def load_intel_documents(session: Session) -> list[IntelDocument]:
         select(Document, RawItem.fetched_at, SourceEndpoint.source_id, SourceEndpoint.trust_tier)
         .join(RawItem, RawItem.id == Document.raw_item_id)
         .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
-        .where(Document.source_status == "active")
+        .where(*current_document_conditions())
         .order_by(Document.id)
     ).all()
     return [
@@ -1108,7 +1213,7 @@ def load_dedup_decisions(session: Session) -> dict[int, DedupDecision]:
             Document.duplicate_score,
         ).where(
             Document.dedupe_version == DEDUPE_VERSION,
-            Document.source_status == "active",
+            *current_document_conditions(),
         )
     ).all()
     return {

@@ -37,7 +37,8 @@ _PARSERS: dict[str, type[Parser]] = {
     "rss-default-v1": RssDefaultParser,
     "aihot-v1": AIHotParser,
     "cisa-kev-v1": CisaKevParser,
-    "nvd-v1": NvdParser,
+    "nvd-v1": NvdParser,  # legacy config compatibility
+    "nvd-v2": NvdParser,
     "github-releases-v1": GitHubReleasesParser,
     "web-article-v1": WebArticleParser,
     "arxiv-v1": ArxivParser,

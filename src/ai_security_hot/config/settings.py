@@ -48,7 +48,9 @@ class Settings(BaseSettings):
     lease_seconds: int = Field(
         default=900, ge=60, description="Endpoint fetch crash-recovery lease duration"
     )
-    normalize_batch_size: int = Field(default=500, ge=1, le=5000)
+    normalize_interval_seconds: int = Field(default=10, ge=1)
+    fulltext_interval_seconds: int = Field(default=30, ge=5)
+    normalize_batch_size: int = Field(default=2000, ge=1, le=5000)
     fulltext_batch_size: int = Field(default=20, ge=1, le=500)
 
     # --- M1.3 classification / LLM ---
@@ -66,7 +68,7 @@ class Settings(BaseSettings):
     classification_batch_size: int = Field(
         default=25, ge=1, le=500, description="Cost-bounded hybrid model batch"
     )
-    rule_classification_batch_size: int = Field(default=500, ge=1, le=5000)
+    rule_classification_batch_size: int = Field(default=2000, ge=1, le=5000)
     classification_lease_seconds: int = Field(default=300, ge=30)
     llm_provider: str = Field(default="openai-compatible")
     llm_base_url: str = Field(default="https://api.openai.com/v1")

@@ -39,6 +39,9 @@ class EndpointPolicy(BaseModel):
     parser: str | None = None
     url: str
     enabled: bool = True
+    # A disabled endpoint may explicitly name its authoritative replacement.
+    # Registry sync then retires its current documents without deleting evidence.
+    replaced_by: str | None = None
     # Bump when checkpoint semantics change (cursor meaning, bootstrap window,
     # connector protocol). Registry sync resets only this endpoint's state.
     state_version: str = "1"
@@ -91,11 +94,23 @@ class SourceRegistry(BaseModel):
         if len(endpoint_ids) != len(set(endpoint_ids)):
             raise ValueError("duplicate endpoint ids")
         known_sources = set(source_ids)
+        endpoint_map = {endpoint.id: endpoint for endpoint in self.endpoints}
         for endpoint in self.endpoints:
             if endpoint.source_id not in known_sources:
                 raise ValueError(
                     f"endpoint {endpoint.id!r} references unknown source {endpoint.source_id!r}"
                 )
+            if endpoint.replaced_by:
+                replacement = endpoint_map.get(endpoint.replaced_by)
+                if replacement is None:
+                    raise ValueError(
+                        f"endpoint {endpoint.id!r} references unknown replacement "
+                        f"{endpoint.replaced_by!r}"
+                    )
+                if endpoint.enabled:
+                    raise ValueError(f"replaced endpoint {endpoint.id!r} must be disabled")
+                if replacement.source_id != endpoint.source_id:
+                    raise ValueError(f"endpoint replacement must share source_id: {endpoint.id!r}")
             if endpoint.connector is ConnectorKind.AIHOT:
                 changes_url = (endpoint.options.get("aihot") or {}).get("changes_url")
                 if not isinstance(changes_url, str) or not changes_url.startswith(

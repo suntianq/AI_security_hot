@@ -75,6 +75,7 @@ def test_rss_304_not_modified() -> None:
 
 _NVD = """{"vulnerabilities":[
   {"cve":{"id":"CVE-2024-12345","published":"2024-05-01T10:00:00.000",
+    "vulnStatus":"Analyzed",
     "descriptions":[{"lang":"en","value":"A serious flaw in ExampleLib allows RCE."}],
     "weaknesses":[{"description":[{"value":"CWE-77"}]}]}}
 ]}"""
@@ -112,7 +113,19 @@ def test_nvd_nested_rest_parse() -> None:
     assert doc.cve_ids == ["CVE-2024-12345"]
     assert doc.cwe_ids == ["CWE-77"]
     assert "nvd.nist.gov" in doc.canonical_url
+    assert doc.record_status == "published"
+    assert doc.record_status_raw == "Analyzed"
     assert doc.parse_quality == 1.0
+
+    rejected_raw = result.items[0].model_copy(
+        update={
+            "raw_text": '{"id":"CVE-2024-12345","vulnStatus":"Rejected",'
+            '"descriptions":[{"lang":"en","value":"Rejected reason"}]}'
+        }
+    )
+    rejected = NvdParser().parse(rejected_raw)
+    assert rejected.record_status == "rejected"
+    assert rejected.record_status_raw == "Rejected"
 
 
 _ARTICLE_HTML = """<!DOCTYPE html><html><head><title>Full Article Title</title>
@@ -279,9 +292,7 @@ def test_sitemap_connector_and_parser() -> None:
 @respx.mock
 def test_rss_filters_unchanged_but_emits_revision() -> None:
     policy = _policy()
-    respx.get("https://example.com/rss.xml").mock(
-        return_value=httpx.Response(200, text=_RSS)
-    )
+    respx.get("https://example.com/rss.xml").mock(return_value=httpx.Response(200, text=_RSS))
     first = RSSConnector(FetchContext()).poll(policy, Checkpoint())
     assert len(first.items) == 1
     raw = first.items[0]
@@ -345,9 +356,9 @@ def test_rest_connector_drains_nvd_pagination() -> None:
     respx.get("https://example.com/nvd-pages?resultsPerPage=1").mock(
         return_value=httpx.Response(200, json=page_1)
     )
-    respx.get(
-        "https://example.com/nvd-pages?resultsPerPage=1&startIndex=1"
-    ).mock(return_value=httpx.Response(200, json=page_2))
+    respx.get("https://example.com/nvd-pages?resultsPerPage=1&startIndex=1").mock(
+        return_value=httpx.Response(200, json=page_2)
+    )
 
     result = RestApiConnector(FetchContext()).poll(policy, Checkpoint())
     assert [item.native_id for item in result.items] == [
@@ -386,9 +397,7 @@ def test_sitemap_connector_uses_listing_fast_path_without_sitemap() -> None:
         '<html><body><a href="/news/new-release">New</a>'
         '<a href="/careers/job">Ignore</a></body></html>'
     )
-    respx.get("https://example.com/news").mock(
-        return_value=httpx.Response(200, text=listing)
-    )
+    respx.get("https://example.com/news").mock(return_value=httpx.Response(200, text=listing))
     respx.get("https://example.com/news/new-release").mock(
         return_value=httpx.Response(200, text=_ARTICLE_HTML_1)
     )

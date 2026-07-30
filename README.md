@@ -20,14 +20,14 @@
 
 ### M1 增量采集与混合分类
 
-- **不可变历史 + 当前投影**：RawItem 保存全部内容/撤回版本，SourceRecord 保存 active/withdrawn 当前态；Document 支持 active/superseded/withdrawn。
+- **不可变历史 + 双轴当前投影**：RawItem 保存全部内容/撤回版本；Document 同时记录本地来源生命周期（active/superseded/withdrawn/retired）与上游记录状态（published/rejected/withdrawn/unknown），历史可审计、当前视图可统一过滤。
 - **AI HOT 完整镜像**：selected snapshot bootstrap、durable changes cursor、upsert/remove、409 自动重建，不再受 RSS 最新 50 条窗口限制。
-- **NVD modified-time**：120 天 bootstrap/长停机 catch-up 使用动态缩窗和 durable cursor 分批推进；稳态从 `last_success_at - 15min` 重叠抓取。
+- **NVD modified-time**：120 天 bootstrap/长停机 catch-up 使用动态缩窗和 durable cursor 分批推进；稳态从 `last_success_at - 15min` 重叠抓取；Rejected/Withdrawn CVE 保留为历史证据但退出当前视图。
 - **CISA 权威快照**：官方 GitHub 镜像 + ETag/304 + 修订与删除检测。
 - **Anthropic 双通道**：Newsroom 快速发现 + 每日 Sitemap 72 小时重叠对账。
-- **状态版本和配置收敛**：endpoint `state_version` 控制 checkpoint 重建；YAML 删除的 endpoint 自动 paused；长任务用心跳续租和 fencing token 防止旧 worker 越权推进水位。
+- **状态版本和配置收敛**：endpoint `state_version` 控制 checkpoint 重建；`replaced_by` 可声明替代关系并审计式退役旧 endpoint；YAML 删除的 endpoint 自动 paused；长任务用心跳续租和 fencing token 防止旧 worker 越权推进水位。
 - **M1.3 HybridClassifier**：严格 JSON Schema/Pydantic/标签白名单、provider registry、模型缓存、逐次审计、租约、指数退避和规则 fallback；结构化 CVE 永不调用模型。
-- **三节拍调度**：ingest、classify、event 独立运行，慢模型不阻塞采集。
+- **独立阶段调度**：fetch、normalize、fulltext、classify、event 分别运行；NVD 长窗口抓取不会阻塞规范化积压，慢模型也不阻塞采集。
 
 完整契约、环境变量和边界见 [M1 增量采集与混合分类](docs/m1-data-pipeline.md)。
 
@@ -48,19 +48,20 @@
 |---|---|---|---|
 | **RSS** | `rss-2` | `rss-default-v1` | ETag/304 + native ID/content hash 过滤与修订检测 |
 | **REST** | `rest-2` | `cisa-kev-v1` | CISA 权威快照修订/删除与分页完整性保护 |
-| **NVD** | `nvd-modified-v1` | `nvd-v1` | preflight 密度缩窗 + 分片 cursor + 分片完整分页 + 稳态 overlap |
+| **NVD** | `nvd-modified-v1` | `nvd-v2` | preflight 密度缩窗 + 分片 cursor + 分片完整分页 + 上游状态映射 + 稳态 overlap |
 | **AI HOT** | `aihot-selected-v1` | `aihot-v1` | snapshot bootstrap + durable changes cursor + remove + 409 rebuild |
 | **GitHub** | `github-2` | `github-releases-v1` | ETag/304 + native ID/content hash 过滤与修订检测 |
 | **Web** | `web-1` | `web-article-v1` | ETag/304 + content hash（双重去重） |
 | **arXiv** | `arxiv-2` | `arxiv-v1` | native ID/content hash 过滤；ETag/304 作为辅助 |
 | **Sitemap** | `sitemap-2` | `sitemap-article-v1` | Newsroom 快速发现 + Sitemap 重叠对账 + 并发正文抓取 |
 
-### 已接入 18 个真实 endpoint（17 个 source）
+### 已配置 19 个 endpoint（18 个 active、1 个 retired；17 个 source）
 
 | Endpoint | Connector | 增量 |
 |---|---|---|
 | openai-news-rss | RSS | ETag/304 + content hash |
 | aihot-selected-api | AI HOT | snapshot + changes cursor + remove + 409 rebuild |
+| aihot-selected-rss | RSS（retired） | 已由 API 替代；只保留历史与替代关系，不再调度 |
 | cisa-kev | REST | 官方 GitHub 镜像 + ETag/304 + 修订/删除检测 |
 | nvd-recent | NVD | 120d durable 分片 bootstrap/catch-up + 15min 稳态 overlap |
 | anthropic-news | **Newsroom + Sitemap** | 快速发现 + 每日 72h 重叠对账 |
@@ -89,7 +90,7 @@
 - CISA KEV 是权威快照，缺失记录会撤回；GitHub 镜像由 CISA 官方仓库维护。
 - RSS、arXiv 和普通列表仍受上游保留窗口约束；DB 幂等只能防重复，不能恢复上游没有返回的历史。
 - Anthropic 当前每日对账最多处理 50 个、回看 72 小时；达到阈值时应调高配置或引入持久化候选队列。
-- API、导出和 report 默认只显示 active Document；历史版本仍保留且可按 ID 查询。
+- “当前文档”统一定义为：本地 `source_status=active`，且上游 `record_status` 不是 `rejected/withdrawn`。API、导出、M2 和 report 默认使用这一视图；历史版本仍保留且可查询。
 
 更多细节见 [M1 实现说明](docs/m1-data-pipeline.md)。
 
@@ -122,6 +123,15 @@ uv run intel export --format jsonl --min-quality 1 -n 100 # 高质量前 100 条
 uv run intel export --format json                         # 不加 --out 则打到 stdout
 ```
 
+生成可离线打开的当前/历史报告：
+
+```bash
+uv run python scripts/gen_report.py report.html        # 默认最多嵌入 30,000 条明细
+uv run python scripts/gen_report.py report.html 50000  # 可选：调整浏览器内明细上限
+```
+
+报告中的全库统计始终精确；明细按上限保留最新当前记录及最多 5,000 条历史记录，并可按当前/历史、逻辑来源、endpoint、上游状态筛选。
+
 验证 API：
 
 ```bash
@@ -141,7 +151,7 @@ INTEL_RUN_LIVE=1 uv run pytest -m live                  # 真实爬取端到端
 uv run ruff check . && uv run pyright                   # 质量门禁
 ```
 
-当前离线套件覆盖 54 个用例，包括不同 CVE 冲突保护、共享目录 URL、近重复、强键事件、多来源证据和关系膨胀保护；`live` 测试默认跳过，只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
+当前离线套件覆盖 56 个用例，包括不同 CVE 冲突保护、共享目录 URL、近重复、强键事件、多来源证据和关系膨胀保护；`live` 测试默认跳过，只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
 
 ## 部署（Docker Compose）
 
@@ -157,7 +167,7 @@ curl localhost:8000/health        # {"status":"ok"}
 - `worker` 随后 `intel sync` 载入 `sources.yaml`，并按调度持续抓取。
 - 数据持久化在 `pgdata` 卷，网页快照存 `blobdata` 卷。
 
-已有数据库升级到本版本时必须应用到 `c91e7a4d2b60_classification_lease_fencing`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。迁移只增加派生字段、索引和约束，不删除文档；Worker 的下一次 tick 会自动回填去重关系和事件。
+已有数据库升级到本版本时必须应用到 `d7c4b8e1a950_document_visibility_and_retirement`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。迁移增加双轴生命周期、endpoint 替代关系、索引和约束；AI HOT RSS 历史记录被标记为 retired，NVD Rejected/Withdrawn 被标记为非当前证据，均不删除文档。Worker 会自动重建受影响的 M2 派生数据。
 
 > 当前 API 未实现认证，且包含 `/ops/tick` 运维写操作。部署时应只绑定可信内网或在前置网关完成认证与访问控制。
 
@@ -188,7 +198,7 @@ docker compose up -d postgres
 export INTEL_DATABASE_URL=postgresql+psycopg://intel:intel@localhost:5432/intel
 
 uv run alembic upgrade head     # 迁移
-uv run intel sync               # 载入 sources.yaml（18 个 endpoint）
+uv run intel sync               # 载入 sources.yaml（19 个配置项：18 active + 1 retired）
 uv run intel run-once           # 完整增量流水线（含事件化）
 uv run intel eventize           # 只运行 M2 去重 + 事件聚类
 uv run intel stats              # 查看文档/重复/事件/证据数量
@@ -208,11 +218,11 @@ src/ai_security_hot/
   events/       M2 去重、强键事件聚类、证据等级和规则评分
   storage/      BlobStore + repositories（租约/幂等/阶段推进/事件 upsert/导出）
   pipelines/    fetch/normalize/fulltext/classify/dedupe/cluster stages
-  jobs/         独立 ingest/classify/event 调度 + self_check
+  jobs/         独立 fetch/normalize/fulltext/classify/event 调度 + self_check
   api/          FastAPI 只读/运维接口
   cli.py        intel CLI（采集、分类、eventize、查询、导出与运维）
-sources/        sources.yaml（18 个真实 endpoint）+ taxonomy.yaml
-migrations/     Alembic（initial + classification + 内容版本 + M2 + M1 lifecycle/LLM audit）
+sources/        sources.yaml（19 个配置项：18 active + 1 retired）+ taxonomy.yaml
+migrations/     Alembic（initial + classification + 内容版本 + M2 + M1 双轴 lifecycle/endpoint retirement/LLM audit）
 tests/          unit / smoke / event intelligence（离线）+ integration（真实爬取）
 ```
 
@@ -221,5 +231,5 @@ tests/          unit / smoke / event intelligence（离线）+ integration（真
 - **事件聚类增强**：加入模型+版本、公司+事故等实体强键；以离线标注集评估 SimHash/语义候选，不在缺少指标时扩大自动合并范围。
 - **LLM 事件增强**：M1.3 分类已完成；后续增加中文事件摘要、影响分析和不确定性表达，不覆盖权威字段。
 - **日报与投递**：日报冻结/生成/版本化 + 飞书/邮件投递幂等。
-- **更多信源**：在当前 18 个 endpoint 基础上扩展至约 35 个。
+- **更多信源**：在当前 18 个 active endpoint 基础上扩展至约 35 个。
 - Parser 漂移检测、pgvector 可选增强。均由实际指标触发，不提前引入。
