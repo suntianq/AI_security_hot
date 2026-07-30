@@ -681,21 +681,23 @@ def run_dedupe_stage(*, force: bool = False) -> dict:
                 "due": 0,
                 "updated": 0,
             }
-        documents = repo.load_intel_documents(session)
+        documents = repo.load_intel_documents(session, retain_body=False)
         decisions = deduplicate_documents(documents)
+        scanned = len(documents)
+        del documents
         stats = repo.apply_dedup_decisions(session, decisions)
         return {
             "status": "ok",
             "version": DEDUPE_VERSION,
             "due": due,
-            "scanned": len(documents),
+            "scanned": scanned,
             **stats,
         }
 
 
 def run_cluster_stage(*, force: bool = False) -> dict:
     """Materialize explainable events and evidence links from deduped documents."""
-    from ai_security_hot.events.intelligence import CLUSTER_VERSION, build_event_drafts
+    from ai_security_hot.events.intelligence import CLUSTER_VERSION
 
     with session_scope() as session:
         if not repo.try_event_stage_lock(session, "cluster"):
@@ -709,15 +711,10 @@ def run_cluster_stage(*, force: bool = False) -> dict:
                 "events_created": 0,
                 "events_updated": 0,
             }
-        decisions = repo.load_dedup_decisions(session)
-        documents = [doc for doc in repo.load_intel_documents(session) if doc.id in decisions]
-        drafts = build_event_drafts(documents, decisions)
-        stats = repo.apply_event_drafts(session, drafts)
+        stats = repo.rebuild_events_streaming(session)
         return {
             "status": "ok",
             "version": CLUSTER_VERSION,
             "due": due,
-            "documents": len(documents),
-            "events": len(drafts),
             **stats,
         }

@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from itertools import batched
 from secrets import randbelow, token_urlsafe
+from typing import cast
 
-from sqlalchemy import delete, func, select, tuple_, update
+from sqlalchemy import Table, bindparam, delete, func, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -30,7 +32,11 @@ from ai_security_hot.events.intelligence import (
     DEDUPE_VERSION,
     DedupDecision,
     EventDraft,
+    EventKey,
     IntelDocument,
+    build_event_draft,
+    build_event_drafts,
+    content_fingerprint,
 )
 from ai_security_hot.models.tables import (
     Document,
@@ -1157,33 +1163,71 @@ def count_cluster_due(session: Session, *, version: str = CLUSTER_VERSION) -> in
     )
 
 
-def load_intel_documents(session: Session) -> list[IntelDocument]:
-    """Load the normalized evidence needed by both M2 pure functions."""
-    rows = session.execute(
-        select(Document, RawItem.fetched_at, SourceEndpoint.source_id, SourceEndpoint.trust_tier)
+def load_intel_documents(session: Session, *, retain_body: bool = True) -> list[IntelDocument]:
+    """Load M2 evidence with a scalar streaming query.
+
+    Dedupe retains only a normalized content digest and body length. Cluster
+    may opt into body text for summaries, but neither path populates the
+    Session identity map with every Document ORM object.
+    """
+    stmt = (
+        select(
+            Document.id,
+            Document.endpoint_id,
+            SourceEndpoint.source_id,
+            SourceEndpoint.trust_tier,
+            Document.title_original,
+            Document.body_text,
+            Document.canonical_url,
+            Document.published_at_utc,
+            RawItem.fetched_at,
+            Document.identifiers,
+            Document.tech_directions,
+            Document.classified_event_type,
+            Document.parse_quality,
+        )
         .join(RawItem, RawItem.id == Document.raw_item_id)
         .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
         .where(*current_document_conditions())
         .order_by(Document.id)
-    ).all()
-    return [
-        IntelDocument(
-            id=doc.id,
-            endpoint_id=doc.endpoint_id,
-            source_id=source_id,
-            trust_tier=trust_tier,
-            title=doc.title_original,
-            body=doc.body_text,
-            canonical_url=doc.canonical_url,
-            published_at=doc.published_at_utc,
-            fetched_at=fetched_at,
-            identifiers=doc.identifiers or {},
-            tech_directions=list(doc.tech_directions or []),
-            event_type=doc.classified_event_type,
-            parse_quality=doc.parse_quality,
+        .execution_options(yield_per=1000)
+    )
+    documents: list[IntelDocument] = []
+    for (
+        document_id,
+        endpoint_id,
+        source_id,
+        trust_tier,
+        title,
+        body,
+        canonical_url,
+        published_at,
+        fetched_at,
+        identifiers,
+        tech_directions,
+        event_type,
+        parse_quality,
+    ) in session.execute(stmt):
+        documents.append(
+            IntelDocument(
+                id=document_id,
+                endpoint_id=endpoint_id,
+                source_id=source_id,
+                trust_tier=trust_tier,
+                title=title,
+                body=body if retain_body else None,
+                canonical_url=canonical_url,
+                published_at=published_at,
+                fetched_at=fetched_at,
+                identifiers=identifiers or {},
+                tech_directions=list(tech_directions or []),
+                event_type=event_type,
+                parse_quality=parse_quality,
+                content_digest=None if retain_body else content_fingerprint(body),
+                content_length=len(body or ""),
+            )
         )
-        for doc, fetched_at, source_id, trust_tier in rows
-    ]
+    return documents
 
 
 def apply_dedup_decisions(
@@ -1192,33 +1236,63 @@ def apply_dedup_decisions(
     *,
     version: str = DEDUPE_VERSION,
 ) -> dict[str, int]:
-    """Persist a full deterministic decision set and invalidate changed clusters."""
+    """Persist decisions in bounded scalar batches and invalidate changed clusters."""
     now = datetime.now(UTC)
-    rows = {
-        row.id: row
-        for row in session.execute(select(Document).where(Document.id.in_(decisions))).scalars()
-    }
     updated = 0
-    duplicates = 0
-    for document_id, decision in decisions.items():
-        doc = rows[document_id]
-        relationship_changed = (
-            doc.near_dup_of != decision.near_dup_of
-            or doc.duplicate_kind != decision.duplicate_kind
-            or doc.duplicate_score != decision.duplicate_score
+    duplicates = sum(decision.near_dup_of is not None for decision in decisions.values())
+    document_table = cast(Table, Document.__table__)
+    update_stmt = (
+        document_table.update()
+        .where(document_table.c.id == bindparam("_document_id"))
+        .values(
+            near_dup_of=bindparam("_near_dup_of"),
+            duplicate_kind=bindparam("_duplicate_kind"),
+            duplicate_score=bindparam("_duplicate_score"),
+            dedupe_version=bindparam("_dedupe_version"),
+            deduped_at=bindparam("_deduped_at"),
+            cluster_version=None,
+            clustered_at=None,
         )
-        version_changed = doc.dedupe_version != version
-        if relationship_changed or version_changed:
-            doc.near_dup_of = decision.near_dup_of
-            doc.duplicate_kind = decision.duplicate_kind
-            doc.duplicate_score = decision.duplicate_score
-            doc.dedupe_version = version
-            doc.deduped_at = now
-            doc.cluster_version = None
-            doc.clustered_at = None
-            updated += 1
-        if decision.near_dup_of is not None:
-            duplicates += 1
+    )
+    for decision_batch in batched(decisions.values(), 2000, strict=False):
+        ids = [decision.document_id for decision in decision_batch]
+        current = {
+            document_id: (near_dup_of, duplicate_kind, duplicate_score, dedupe_version)
+            for document_id, near_dup_of, duplicate_kind, duplicate_score, dedupe_version in (
+                session.execute(
+                    select(
+                        Document.id,
+                        Document.near_dup_of,
+                        Document.duplicate_kind,
+                        Document.duplicate_score,
+                        Document.dedupe_version,
+                    ).where(Document.id.in_(ids))
+                )
+            )
+        }
+        changes = []
+        for decision in decision_batch:
+            desired = (
+                decision.near_dup_of,
+                decision.duplicate_kind,
+                decision.duplicate_score,
+                version,
+            )
+            if current[decision.document_id] == desired:
+                continue
+            changes.append(
+                {
+                    "_document_id": decision.document_id,
+                    "_near_dup_of": decision.near_dup_of,
+                    "_duplicate_kind": decision.duplicate_kind,
+                    "_duplicate_score": decision.duplicate_score,
+                    "_dedupe_version": version,
+                    "_deduped_at": now,
+                }
+            )
+        if changes:
+            session.execute(update_stmt, changes)
+            updated += len(changes)
     return {"updated": updated, "duplicates": duplicates}
 
 
@@ -1237,6 +1311,458 @@ def load_dedup_decisions(session: Session) -> dict[int, DedupDecision]:
     return {
         document_id: DedupDecision(document_id, near_dup_of, kind, score)
         for document_id, near_dup_of, kind, score in rows
+    }
+
+
+def _iter_dedup_components(
+    session: Session,
+) -> Iterator[tuple[list[IntelDocument], dict[int, DedupDecision]]]:
+    """Stream complete duplicate components without retaining the corpus."""
+    component_id = func.coalesce(Document.near_dup_of, Document.id).label("component_id")
+    stmt = (
+        select(
+            component_id,
+            Document.id,
+            Document.near_dup_of,
+            Document.duplicate_kind,
+            Document.duplicate_score,
+            Document.endpoint_id,
+            SourceEndpoint.source_id,
+            SourceEndpoint.trust_tier,
+            Document.title_original,
+            Document.body_text,
+            Document.canonical_url,
+            Document.published_at_utc,
+            RawItem.fetched_at,
+            Document.identifiers,
+            Document.tech_directions,
+            Document.classified_event_type,
+            Document.parse_quality,
+        )
+        .join(RawItem, RawItem.id == Document.raw_item_id)
+        .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
+        .where(
+            Document.dedupe_version == DEDUPE_VERSION,
+            *current_document_conditions(),
+        )
+        .order_by(component_id, Document.id)
+        .execution_options(yield_per=1000)
+    )
+    active_component: int | None = None
+    documents: list[IntelDocument] = []
+    decisions: dict[int, DedupDecision] = {}
+    result = session.execute(stmt)
+    try:
+        for (
+            row_component_id,
+            document_id,
+            near_dup_of,
+            duplicate_kind,
+            duplicate_score,
+            endpoint_id,
+            source_id,
+            trust_tier,
+            title,
+            body,
+            canonical_url,
+            published_at,
+            fetched_at,
+            identifiers,
+            tech_directions,
+            event_type,
+            parse_quality,
+        ) in result:
+            if active_component is not None and row_component_id != active_component:
+                yield documents, decisions
+                documents = []
+                decisions = {}
+            active_component = row_component_id
+            documents.append(
+                IntelDocument(
+                    id=document_id,
+                    endpoint_id=endpoint_id,
+                    source_id=source_id,
+                    trust_tier=trust_tier,
+                    title=title,
+                    body=body,
+                    canonical_url=canonical_url,
+                    published_at=published_at,
+                    fetched_at=fetched_at,
+                    identifiers=identifiers or {},
+                    tech_directions=list(tech_directions or []),
+                    event_type=event_type,
+                    parse_quality=parse_quality,
+                    content_length=len(body or ""),
+                )
+            )
+            decisions[document_id] = DedupDecision(
+                document_id, near_dup_of, duplicate_kind, duplicate_score
+            )
+        if documents:
+            yield documents, decisions
+    finally:
+        result.close()
+
+
+def _stage_event_memberships(session: Session) -> dict[str, int]:
+    """Write desired event evidence to a transaction-local spill table."""
+    session.execute(
+        text(
+            """
+            CREATE TEMP TABLE m2_event_memberships (
+                fingerprint varchar(160) NOT NULL,
+                document_id bigint NOT NULL,
+                evidence_level varchar(1) NOT NULL,
+                relation_reason varchar(32) NOT NULL,
+                PRIMARY KEY (fingerprint, document_id)
+            ) ON COMMIT DROP
+            """
+        )
+    )
+    insert_stmt = text(
+        """
+        INSERT INTO m2_event_memberships
+            (fingerprint, document_id, evidence_level, relation_reason)
+        VALUES (:fingerprint, :document_id, :evidence_level, :relation_reason)
+        ON CONFLICT (fingerprint, document_id) DO UPDATE SET
+            evidence_level = EXCLUDED.evidence_level,
+            relation_reason = EXCLUDED.relation_reason
+        """
+    )
+    staged: list[dict] = []
+    document_count = 0
+    membership_count = 0
+    for documents, decisions in _iter_dedup_components(session):
+        document_count += len(documents)
+        for draft in build_event_drafts(documents, decisions).values():
+            for membership in draft.memberships:
+                staged.append(
+                    {
+                        "fingerprint": draft.fingerprint,
+                        "document_id": membership.document_id,
+                        "evidence_level": membership.evidence_level,
+                        "relation_reason": membership.relation_reason,
+                    }
+                )
+                membership_count += 1
+        if len(staged) >= 2000:
+            session.execute(insert_stmt, staged)
+            staged.clear()
+    if staged:
+        session.execute(insert_stmt, staged)
+    return {"documents": document_count, "memberships": membership_count}
+
+
+def _iter_staged_event_drafts(session: Session) -> Iterator[EventDraft]:
+    """Stream one complete event group at a time from staged memberships."""
+    stmt = text(
+        """
+        SELECT
+            membership.fingerprint,
+            membership.relation_reason,
+            document.id AS document_id,
+            document.endpoint_id,
+            endpoint.source_id,
+            endpoint.trust_tier,
+            document.title_original AS title,
+            document.body_text AS body,
+            document.canonical_url,
+            document.published_at_utc AS published_at,
+            raw_item.fetched_at,
+            document.identifiers,
+            document.tech_directions,
+            document.classified_event_type AS event_type,
+            document.parse_quality
+        FROM m2_event_memberships AS membership
+        JOIN documents AS document ON document.id = membership.document_id
+        JOIN raw_items AS raw_item ON raw_item.id = document.raw_item_id
+        JOIN source_endpoints AS endpoint ON endpoint.id = document.endpoint_id
+        ORDER BY membership.fingerprint, document.id
+        """
+    ).execution_options(yield_per=1000)
+    active_fingerprint: str | None = None
+    documents: list[IntelDocument] = []
+    reasons: dict[int, str] = {}
+    result = session.execute(stmt).mappings()
+    try:
+        for row in result:
+            fingerprint = row["fingerprint"]
+            if active_fingerprint is not None and fingerprint != active_fingerprint:
+                kind = active_fingerprint.partition(":")[0]
+                yield build_event_draft(EventKey(active_fingerprint, kind), documents, reasons)
+                documents = []
+                reasons = {}
+            active_fingerprint = fingerprint
+            body = row["body"]
+            document_id = row["document_id"]
+            documents.append(
+                IntelDocument(
+                    id=document_id,
+                    endpoint_id=row["endpoint_id"],
+                    source_id=row["source_id"],
+                    trust_tier=row["trust_tier"],
+                    title=row["title"],
+                    body=body,
+                    canonical_url=row["canonical_url"],
+                    published_at=row["published_at"],
+                    fetched_at=row["fetched_at"],
+                    identifiers=row["identifiers"] or {},
+                    tech_directions=list(row["tech_directions"] or []),
+                    event_type=row["event_type"],
+                    parse_quality=row["parse_quality"],
+                    content_length=len(body or ""),
+                )
+            )
+            reasons[document_id] = row["relation_reason"]
+        if active_fingerprint is not None:
+            kind = active_fingerprint.partition(":")[0]
+            yield build_event_draft(EventKey(active_fingerprint, kind), documents, reasons)
+    finally:
+        result.close()
+
+
+def _apply_event_batch(
+    session: Session,
+    drafts: tuple[EventDraft, ...],
+    *,
+    version: str,
+    now: datetime,
+) -> dict[str, int]:
+    """Upsert one bounded batch without retaining Event ORM instances."""
+    fingerprints = [draft.fingerprint for draft in drafts]
+    existing = {}
+    for row in session.execute(
+        select(
+            Event.id,
+            Event.fingerprint,
+            Event.current_version,
+            Event.event_type,
+            Event.topic,
+            Event.title,
+            Event.summary,
+            Event.status,
+            Event.score,
+            Event.evidence_level,
+            Event.cluster_version,
+            Event.first_seen_at,
+            Event.last_seen_at,
+        ).where(Event.fingerprint.in_(fingerprints))
+    ):
+        existing[row.fingerprint] = (
+            row.id,
+            row.current_version,
+            (
+                row.event_type,
+                row.topic,
+                row.title,
+                row.summary,
+                row.status,
+                row.score,
+                row.evidence_level,
+                row.cluster_version,
+                row.first_seen_at,
+                row.last_seen_at,
+            ),
+        )
+
+    created_rows = []
+    changed_rows = []
+    for draft in drafts:
+        desired = (
+            draft.event_type,
+            draft.topic,
+            draft.title,
+            draft.summary,
+            draft.status,
+            draft.score,
+            draft.evidence_level,
+            version,
+            draft.first_seen_at,
+            draft.last_seen_at,
+        )
+        current = existing.get(draft.fingerprint)
+        if current is None:
+            created_rows.append(
+                {
+                    "fingerprint": draft.fingerprint,
+                    "event_type": draft.event_type,
+                    "topic": draft.topic,
+                    "title": draft.title,
+                    "summary": draft.summary,
+                    "status": draft.status,
+                    "score": draft.score,
+                    "evidence_level": draft.evidence_level,
+                    "cluster_version": version,
+                    "first_seen_at": draft.first_seen_at,
+                    "last_seen_at": draft.last_seen_at,
+                    "current_version": 1,
+                    "updated_at": now,
+                }
+            )
+        elif current[2] != desired:
+            changed_rows.append(
+                {
+                    "_event_id": current[0],
+                    "_event_type": draft.event_type,
+                    "_topic": draft.topic,
+                    "_title": draft.title,
+                    "_summary": draft.summary,
+                    "_status": draft.status,
+                    "_score": draft.score,
+                    "_evidence_level": draft.evidence_level,
+                    "_cluster_version": version,
+                    "_first_seen_at": draft.first_seen_at,
+                    "_last_seen_at": draft.last_seen_at,
+                    "_current_version": current[1] + 1,
+                    "_updated_at": now,
+                }
+            )
+
+    if created_rows:
+        session.execute(cast(Table, Event.__table__).insert(), created_rows)
+    if changed_rows:
+        event_table = cast(Table, Event.__table__)
+        session.execute(
+            event_table.update()
+            .where(event_table.c.id == bindparam("_event_id"))
+            .values(
+                event_type=bindparam("_event_type"),
+                topic=bindparam("_topic"),
+                title=bindparam("_title"),
+                summary=bindparam("_summary"),
+                status=bindparam("_status"),
+                score=bindparam("_score"),
+                evidence_level=bindparam("_evidence_level"),
+                cluster_version=bindparam("_cluster_version"),
+                first_seen_at=bindparam("_first_seen_at"),
+                last_seen_at=bindparam("_last_seen_at"),
+                current_version=bindparam("_current_version"),
+                updated_at=bindparam("_updated_at"),
+            ),
+            changed_rows,
+        )
+    return {"created": len(created_rows), "updated": len(changed_rows)}
+
+
+def rebuild_events_streaming(session: Session, *, version: str = CLUSTER_VERSION) -> dict[str, int]:
+    """Rebuild events with database spill and bounded Python memory."""
+    now = datetime.now(UTC)
+    staged = _stage_event_memberships(session)
+    events_created = 0
+    events_updated = 0
+    event_count = 0
+    for draft_batch in batched(_iter_staged_event_drafts(session), 1000, strict=False):
+        batch_stats = _apply_event_batch(session, draft_batch, version=version, now=now)
+        events_created += batch_stats["created"]
+        events_updated += batch_stats["updated"]
+        event_count += len(draft_batch)
+
+    stale_events = int(
+        session.execute(
+            text(
+                """
+                WITH changed AS (
+                    UPDATE events AS event
+                    SET status = 'superseded',
+                        current_version = event.current_version + 1,
+                        updated_at = :now
+                    WHERE event.cluster_version IS NOT NULL
+                      AND event.status <> 'superseded'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM m2_event_memberships AS membership
+                          WHERE membership.fingerprint = event.fingerprint
+                      )
+                    RETURNING event.id
+                )
+                SELECT count(*) FROM changed
+                """
+            ),
+            {"now": now},
+        ).scalar_one()
+    )
+    events_updated += stale_events
+
+    links_removed = int(
+        session.execute(
+            text(
+                """
+                WITH removed AS (
+                    DELETE FROM event_documents AS link
+                    USING events AS event
+                    WHERE event.id = link.event_id
+                      AND EXISTS (
+                          SELECT 1 FROM m2_event_memberships AS desired_event
+                          WHERE desired_event.fingerprint = event.fingerprint
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM m2_event_memberships AS membership
+                          WHERE membership.fingerprint = event.fingerprint
+                            AND membership.document_id = link.document_id
+                      )
+                    RETURNING link.id
+                )
+                SELECT count(*) FROM removed
+                """
+            )
+        ).scalar_one()
+    )
+    links_updated = int(
+        session.execute(
+            text(
+                """
+                WITH changed AS (
+                    UPDATE event_documents AS link
+                    SET stance = 'support',
+                        evidence_level = membership.evidence_level,
+                        relation_reason = membership.relation_reason
+                    FROM events AS event, m2_event_memberships AS membership
+                    WHERE event.id = link.event_id
+                      AND event.fingerprint = membership.fingerprint
+                      AND link.document_id = membership.document_id
+                      AND (link.stance, link.evidence_level, link.relation_reason)
+                          IS DISTINCT FROM
+                          ('support', membership.evidence_level, membership.relation_reason)
+                    RETURNING link.id
+                )
+                SELECT count(*) FROM changed
+                """
+            )
+        ).scalar_one()
+    )
+    links_created = int(
+        session.execute(
+            text(
+                """
+                WITH created AS (
+                    INSERT INTO event_documents
+                        (event_id, document_id, stance, evidence_level, relation_reason)
+                    SELECT event.id, membership.document_id, 'support',
+                           membership.evidence_level, membership.relation_reason
+                    FROM m2_event_memberships AS membership
+                    JOIN events AS event ON event.fingerprint = membership.fingerprint
+                    ON CONFLICT ON CONSTRAINT uq_event_document DO NOTHING
+                    RETURNING id
+                )
+                SELECT count(*) FROM created
+                """
+            )
+        ).scalar_one()
+    )
+
+    session.execute(
+        update(Document)
+        .where(Document.dedupe_version == DEDUPE_VERSION, *current_document_conditions())
+        .values(cluster_version=version, clustered_at=now)
+    )
+    return {
+        "documents": staged["documents"],
+        "events": event_count,
+        "memberships": staged["memberships"],
+        "events_created": events_created,
+        "events_updated": events_updated,
+        "links_created": links_created,
+        "links_updated": links_updated,
+        "links_removed": links_removed,
     }
 
 

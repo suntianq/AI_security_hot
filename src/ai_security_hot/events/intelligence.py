@@ -47,6 +47,11 @@ class IntelDocument:
     tech_directions: list[str]
     event_type: str | None
     parse_quality: float
+    # Dedupe only needs a normalized content fingerprint and body length.  The
+    # repository can therefore stream large bodies, compute these two values,
+    # and discard the text instead of retaining the entire corpus in memory.
+    content_digest: str | None = None
+    content_length: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +147,23 @@ def _content_key(body: str | None) -> str | None:
     return hashlib.sha256(normalized.encode()).hexdigest()
 
 
+def content_fingerprint(body: str | None) -> str | None:
+    """Return the exact-content key used by dedupe loaders and pure rules."""
+    return _content_key(body)
+
+
+def _document_content_key(doc: IntelDocument) -> str | None:
+    if doc.content_digest is not None:
+        return doc.content_digest
+    return _content_key(doc.body)
+
+
+def _document_body_length(doc: IntelDocument) -> int:
+    if doc.content_length is not None:
+        return doc.content_length
+    return len(doc.body or "")
+
+
 def _identifier_values(doc: IntelDocument, kind: str) -> set[str]:
     raw = doc.identifiers.get(kind, [])
     if not isinstance(raw, list):
@@ -182,7 +204,7 @@ def _master_rank(doc: IntelDocument) -> tuple[int, float, int, int, int]:
     return (
         trust_rank,
         -doc.parse_quality,
-        -len(doc.body or ""),
+        -_document_body_length(doc),
         -len(doc.title),
         doc.id,
     )
@@ -209,7 +231,7 @@ def deduplicate_documents(
         compact = _compact_title(doc.title)
         if len(compact) >= 20:
             title_groups[compact].append(doc.id)
-        content_key = _content_key(doc.body)
+        content_key = _document_content_key(doc)
         if content_key:
             content_groups[content_key].append(doc.id)
 
@@ -260,6 +282,11 @@ def deduplicate_documents(
 
     block_index: dict[str, list[int]] = defaultdict(list)
     for doc in documents:
+        # Short titles cannot pass the later fuzzy-candidate length gate.  Do
+        # not index hundreds of thousands of catalogue titles such as CVE IDs
+        # only to reject every generated pair afterwards.
+        if len(_compact_title(doc.title)) < 24:
+            continue
         for key in _blocking_keys(doc.title):
             block_index[key].append(doc.id)
 
@@ -290,27 +317,31 @@ def deduplicate_documents(
         if score >= fuzzy_threshold and ratio >= 88:
             union_find.union(left_id, right_id)
 
-    components: dict[int, list[IntelDocument]] = defaultdict(list)
+    component_masters: dict[int, IntelDocument] = {}
     for doc in documents:
-        components[union_find.find(doc.id)].append(doc)
+        root = union_find.find(doc.id)
+        master = component_masters.get(root)
+        if master is None or _master_rank(doc) < _master_rank(master):
+            component_masters[root] = doc
 
     decisions: dict[int, DedupDecision] = {}
-    for component in components.values():
-        master = min(component, key=_master_rank)
-        for doc in component:
-            if doc.id == master.id:
-                decisions[doc.id] = DedupDecision(doc.id, None, None, None)
-                continue
-            if normalize_url_key(doc.canonical_url) == normalize_url_key(master.canonical_url):
-                kind, score = "exact_url", 1.0
-            elif _compact_title(doc.title) == _compact_title(master.title):
-                kind, score = "exact_title", 1.0
-            elif _content_key(doc.body) and _content_key(doc.body) == _content_key(master.body):
-                kind, score = "exact_content", 1.0
-            else:
-                kind = "near_title"
-                score = title_similarity(doc.title, master.title) / 100
-            decisions[doc.id] = DedupDecision(doc.id, master.id, kind, round(score, 4))
+    for doc in documents:
+        master = component_masters[union_find.find(doc.id)]
+        if doc.id == master.id:
+            decisions[doc.id] = DedupDecision(doc.id, None, None, None)
+            continue
+        if normalize_url_key(doc.canonical_url) == normalize_url_key(master.canonical_url):
+            kind, score = "exact_url", 1.0
+        elif _compact_title(doc.title) == _compact_title(master.title):
+            kind, score = "exact_title", 1.0
+        elif _document_content_key(doc) and _document_content_key(doc) == _document_content_key(
+            master
+        ):
+            kind, score = "exact_content", 1.0
+        else:
+            kind = "near_title"
+            score = title_similarity(doc.title, master.title) / 100
+        decisions[doc.id] = DedupDecision(doc.id, master.id, kind, round(score, 4))
     return decisions
 
 
@@ -367,6 +398,39 @@ def _event_score(documents: list[IntelDocument], *, kind: str, source_count: int
     return min(100, trust_score + identity_score + diversity_score + quality_score)
 
 
+def build_event_draft(
+    key: EventKey,
+    members: list[IntelDocument],
+    reasons: dict[int, str],
+) -> EventDraft:
+    """Build one deterministic event from its complete ordered evidence group."""
+    primary = min(members, key=_master_rank)
+    evidence_level = min(
+        (doc.trust_tier for doc in members),
+        key=lambda tier: {"A": 0, "B": 1, "C": 2}.get(tier, 3),
+    )
+    observed = [doc.published_at or doc.fetched_at for doc in members]
+    observed = [value for value in observed if value is not None]
+    source_count = len({doc.source_id for doc in members})
+    memberships = tuple(
+        EventMembership(doc.id, doc.trust_tier, reasons[doc.id])
+        for doc in sorted(members, key=lambda item: item.id)
+    )
+    return EventDraft(
+        fingerprint=key.fingerprint,
+        event_type=_event_type(members, key.kind),
+        topic=_primary_topic(members, key.kind),
+        title=primary.title.strip()[:240],
+        summary=_summary(primary),
+        status="detected",
+        score=_event_score(members, kind=key.kind, source_count=source_count),
+        evidence_level=evidence_level,
+        first_seen_at=min(observed) if observed else None,
+        last_seen_at=max(observed) if observed else None,
+        memberships=memberships,
+    )
+
+
 def build_event_drafts(
     documents: list[IntelDocument],
     decisions: dict[int, DedupDecision],
@@ -415,30 +479,5 @@ def build_event_drafts(
     drafts: dict[str, EventDraft] = {}
     for key, reasons in event_members.items():
         members = [docs_by_id[document_id] for document_id in reasons]
-        primary = min(members, key=_master_rank)
-        evidence_level = min(
-            (doc.trust_tier for doc in members),
-            key=lambda tier: {"A": 0, "B": 1, "C": 2}.get(tier, 3),
-        )
-        observed = [doc.published_at or doc.fetched_at for doc in members]
-        observed = [value for value in observed if value is not None]
-        source_count = len({doc.source_id for doc in members})
-        title = primary.title.strip()[:240]
-        memberships = tuple(
-            EventMembership(doc.id, doc.trust_tier, reasons[doc.id])
-            for doc in sorted(members, key=lambda item: item.id)
-        )
-        drafts[key.fingerprint] = EventDraft(
-            fingerprint=key.fingerprint,
-            event_type=_event_type(members, key.kind),
-            topic=_primary_topic(members, key.kind),
-            title=title,
-            summary=_summary(primary),
-            status="detected",
-            score=_event_score(members, kind=key.kind, source_count=source_count),
-            evidence_level=evidence_level,
-            first_seen_at=min(observed) if observed else None,
-            last_seen_at=max(observed) if observed else None,
-            memberships=memberships,
-        )
+        drafts[key.fingerprint] = build_event_draft(key, members, reasons)
     return drafts
