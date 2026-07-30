@@ -94,48 +94,41 @@ class RestApiConnector(Connector):
             else policy.url
         )
         page_url = base_url
-        pages: list[tuple[FetchResult, dict | list, str]] = []
-        max_pages = _as_int((pagination or {}).get("max_pages"), 100)
+        max_pages = max(1, _as_int((pagination or {}).get("max_pages"), 100))
+        page_count = 0
+        first_res: FetchResult | None = None
+        items: list[RawItem] = []
+        seen_native_ids: set[str] = set()
 
-        while len(pages) < max_pages:
+        while page_count < max_pages:
             res = self.ctx.get(
                 page_url,
                 policy,
-                etag=checkpoint.etag if not date_params and not pages else None,
+                etag=checkpoint.etag if not date_params and page_count == 0 else None,
                 last_modified=(
-                    checkpoint.last_modified if not date_params and not pages else None
+                    checkpoint.last_modified if not date_params and page_count == 0 else None
                 ),
             )
-            if res.from_cache and not pages:
+            if res.from_cache and page_count == 0:
                 return PollResult([], checkpoint, not_modified=True)
+            if first_res is None:
+                first_res = res
 
             payload = json.loads(res.body)
-            pages.append((res, payload, page_url))
-            if not pagination or not isinstance(payload, dict):
-                break
-
-            records = payload.get(list_key, [])
-            start_key = pagination.get("start_key", "startIndex")
-            total_key = pagination.get("total_key", "totalResults")
-            page_size_key = pagination.get("page_size_key", "resultsPerPage")
-            start_param = pagination.get("start_param", start_key)
-            start = _as_int(payload.get(start_key), 0)
-            page_size = _as_int(payload.get(page_size_key), len(records))
-            total = _as_int(payload.get(total_key), len(records))
-            consumed = max(page_size, len(records))
-            next_start = start + consumed
-            if not records or consumed <= 0 or next_start >= total:
-                break
-            page_url = _set_query_params(base_url, {start_param: next_start})
-
-        items: list[RawItem] = []
-        for res, payload, request_url in pages:
+            page_count += 1
             records = payload.get(list_key, []) if isinstance(payload, dict) else payload
+            if not isinstance(records, list):
+                raise ValueError(f"REST list_key {list_key!r} did not resolve to a list")
             for outer in records:
+                if not isinstance(outer, dict):
+                    continue
                 rec = outer.get(nested_key, outer) if nested_key else outer
+                if not isinstance(rec, dict):
+                    continue
                 native_id = str(rec.get(id_field) or rec.get("id") or "")
                 if not native_id:
                     continue
+                seen_native_ids.add(native_id)
                 raw_text = json.dumps(rec, ensure_ascii=False, sort_keys=True)
                 item_hash = content_sha256(native_id, raw_text)
                 if checkpoint.known_content_hashes.get(native_id) == item_hash:
@@ -145,7 +138,7 @@ class RestApiConnector(Connector):
                         endpoint_id=policy.id,
                         source_id=policy.source_id,
                         native_id=native_id,
-                        request_url=request_url,
+                        request_url=page_url,
                         final_url=res.final_url,
                         http_status=res.status_code,
                         published_at=None,
@@ -159,13 +152,57 @@ class RestApiConnector(Connector):
                     )
                 )
 
-        first_res = pages[0][0]
+            if not pagination or not isinstance(payload, dict):
+                break
+            start_key = pagination.get("start_key", "startIndex")
+            total_key = pagination.get("total_key", "totalResults")
+            page_size_key = pagination.get("page_size_key", "resultsPerPage")
+            start_param = pagination.get("start_param", start_key)
+            start_index = _as_int(payload.get(start_key), 0)
+            page_size = _as_int(payload.get(page_size_key), len(records))
+            total = _as_int(payload.get(total_key), len(records))
+            consumed = max(page_size, len(records))
+            next_start = start_index + consumed
+            if not records or consumed <= 0 or next_start >= total:
+                break
+            if page_count >= max_pages:
+                raise RuntimeError(
+                    f"REST pagination incomplete for {policy.id}: "
+                    f"max_pages={max_pages}, next_start={next_start}, total={total}"
+                )
+            page_url = _set_query_params(base_url, {start_param: next_start})
+
+        if first_res is None:  # defensive; max_pages is clamped to at least one
+            raise RuntimeError(f"REST connector produced no response for {policy.id}")
+        if opts.get("authoritative_snapshot"):
+            for native_id in sorted(checkpoint.active_native_ids - seen_native_ids):
+                raw_text = json.dumps(
+                    {"op": "remove", "id": native_id, "at": first_res.fetched_at.isoformat()},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                items.append(
+                    RawItem(
+                        endpoint_id=policy.id,
+                        source_id=policy.source_id,
+                        native_id=native_id,
+                        request_url=policy.url,
+                        final_url=first_res.final_url,
+                        http_status=first_res.status_code,
+                        fetched_at=first_res.fetched_at,
+                        language=policy.language,
+                        content_hash=content_sha256("withdraw", native_id, raw_text),
+                        raw_text=raw_text,
+                        canonical_url=f"{policy.url}#{native_id}",
+                        connector_kind=ConnectorKind.REST,
+                        connector_version=self.version,
+                        operation="withdraw",
+                    )
+                )
         new_ck = Checkpoint(
             etag=(first_res.etag or checkpoint.etag) if not date_params else None,
             last_modified=(
-                (first_res.last_modified or checkpoint.last_modified)
-                if not date_params
-                else None
+                (first_res.last_modified or checkpoint.last_modified) if not date_params else None
             ),
             cursor=checkpoint.cursor,
             last_published_at=checkpoint.last_published_at,

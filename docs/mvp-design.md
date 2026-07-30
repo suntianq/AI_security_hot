@@ -3,7 +3,7 @@
 > 版本：v0.3
 > 状态：实施基线（M0 + M1 + M2.0 确定性事件情报 已完成）<br>
 > 最后更新：2026-07-30
-> 相关文档：[完整目标蓝图](./system-design.md) · [信源注册表](./source-registry.md) · [M2 事件情报](./event-intelligence.md)
+> 相关文档：[完整目标蓝图](./system-design.md) · [信源注册表](./source-registry.md) · [M1 增量与分类](./m1-data-pipeline.md) · [M2 事件情报](./event-intelligence.md)
 
 ## 1. 已确认的产品与技术决策
 
@@ -157,20 +157,22 @@ Connector：负责请求、分页、限速、游标和响应
 Parser：负责把响应映射成 NormalizedDocument
 ```
 
-第一版实现六类 Connector：
+当前实现八类 Connector：
 
 1. `RSSConnector`
 2. `RestApiConnector`
-3. `GitHubConnector`
-4. `WebListConnector`
-5. `ArxivConnector`
-6. `SitemapConnector`（列表页快速发现 + Sitemap 重叠对账 → 并发抓取原文 → trafilatura 抽正文）
+3. `NvdConnector`（modified-time 动态缩窗 + durable catch-up cursor）
+4. `AIHotConnector`（selected snapshot + changes + remove + 409 rebuild）
+5. `GitHubConnector`
+6. `WebListConnector`
+7. `ArxivConnector`
+8. `SitemapConnector`（列表页快速发现 + Sitemap 重叠对账 → 并发抓取原文 → trafilatura 抽正文）
 
 `playwright` 仅保留枚举和 Compose Profile 运行位；当前没有 `PlaywrightConnector` 或浏览器镜像，不能作为实际抓取能力启用。
 
 Connector 支持两种 poll 模式：
 
-- **同步 `poll()`**：RSS / REST / GitHub / Web / arXiv，在 `run_in_executor` 中调度。
+- **同步 `poll()`**：RSS / REST / AI HOT / GitHub / Web / arXiv，在 `run_in_executor` 中调度。
 - **异步 `apoll()`**：Sitemap，列表页快速路径只抓未知 URL；对账路径使用 `asyncio.gather + Semaphore` 并发抓取候选文章。异步请求复用连接池，但请求启动仍严格服从 endpoint RPM。
 
 ### 5.3 Source Policy
@@ -217,13 +219,13 @@ MVP Source Policy 至少包含：
 
 ### 5.4 当前已接入 18 个 endpoint（17 个 source）
 
-> 4 个 GitHub Releases endpoint（langchain/dify/ollama/vllm）因内容噪音过大已删除；2026-07-30 新增 AI HOT、Apple ML Research、NVIDIA Blog、Wiz Blog 四个官方 RSS，目前为 18 个 endpoint。
+> 4 个 GitHub Releases endpoint（langchain/dify/ollama/vllm）因内容噪音过大已删除；AI HOT 已从 50 条 RSS 升级为 selected snapshot/changes 专用连接器。目前为 18 个 endpoint。
 
 | # | Endpoint | Connector | Parser | 增量机制 |
 |---|---|---|---|---|
 | 1 | openai-news-rss | RSS | rss-default-v1 | ETag/304 + native ID/content hash |
-| 2 | cisa-kev | REST | cisa-kev-v1 | ETag/304 + 同 CVE 内容修订检测 |
-| 3 | nvd-recent | REST | nvd-v1 | 15min 重叠时间窗 + 完整分页 + content hash |
+| 2 | cisa-kev | REST | cisa-kev-v1 | 官方镜像 + ETag/304 + 修订/删除检测 |
+| 3 | nvd-recent | NVD | nvd-v1 | 120d durable 分片 bootstrap/catch-up + 15min 稳态 overlap |
 | 4 | anthropic-news | **Newsroom + Sitemap** | sitemap-article-v1 | 快速发现 + 每日 72h 重叠对账 |
 | 5 | huggingface-blog-rss | RSS + fulltext | rss-default-v1 | ETag/304 + content hash |
 | 6 | google-security-rss | RSS | rss-default-v1 | native ID/content hash（无稳定 HTTP validator） |
@@ -235,14 +237,14 @@ MVP Source Policy 至少包含：
 | 12 | ithome-rss | RSS | rss-default-v1 | ETag/304 + content hash |
 | 13 | google-blog-ai-rss | RSS | rss-default-v1 | ETag/304 + content hash |
 | 14 | github-trending-rss | RSS | rss-default-v1 | ETag/304 + content hash |
-| 15 | aihot-selected-rss | RSS | rss-default-v1 | ETag/304 + 最新 50 条精选窗口 + content hash |
+| 15 | aihot-selected-api | AI HOT | aihot-v1 | snapshot + changes + remove + 409 rebuild |
 | 16 | apple-ml-research-rss | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash |
 | 17 | nvidia-blog-rss | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash |
 | 18 | wiz-blog-rss | RSS | rss-default-v1 | ETag/Last-Modified/304 + content hash |
 
-四个新增站点都有官方 RSS，可直接复用 `rss-2` 与 `rss-default-v1`。AI HOT 的 RSS 是官方推荐的最新 50 条精选窗口；完整历史镜像还需要实现其 `snapshot + changes` opaque cursor、409 重建和撤选语义，当前通用 REST Connector 不能完整表达，因此本轮不新增一个名不副实的 REST endpoint。
+Apple、NVIDIA、Wiz 直接复用官方 RSS。AI HOT 已实现专用 `aihot-selected-v1` Connector：首次完整 snapshot，之后消费 opaque changes cursor，并支持 remove 与 409 自动重建；它不能用通用 REST/RSS 代替。
 
-第一批的目标是验证六类 Connector、中文/英文处理和四条内容主线，不代表最终内容覆盖完整。
+第一批的目标是验证八类 Connector、中文/英文处理和四条内容主线，不代表最终内容覆盖完整。
 
 ## 6. 采集与处理流程
 
@@ -259,11 +261,11 @@ MVP Source Policy 至少包含：
 - `content_hash`
 - `consecutive_failures`
 - `next_run_at`
-- `lease_until`
+- `lease_until`、`lease_token`（心跳续租 + fencing）
 
 增量过滤优先级：
 
-1. **API/水位增量**：NVD 从 `last_success_at - overlap` 开始并完整分页；Sitemap 使用独立内容水位和 72 小时重叠窗口，避免粗粒度 `lastmod` 漏数。
+1. **API/水位增量**：NVD 用 durable 分片 cursor 完成 bootstrap/catch-up，稳态从 `last_success_at - overlap` 开始；Sitemap 使用独立内容水位和 72 小时重叠窗口。
 2. **known content 过滤**：Checkpoint 携带最近的 `native_id → content_hash`；未变化内容在 Connector 层过滤，已有 ID 的内容变化会生成新 RawItem 版本。
 3. **HTTP 级增量**：ETag/304，部分源有效（CISA），部分源几乎不返回 304（arXiv）。
 4. **DB 级幂等兜底**：`ON CONFLICT DO NOTHING` 保护内容版本唯一键；完全相同的 `(endpoint_id, native_id, content_hash)` 不重复写入。
@@ -271,22 +273,23 @@ MVP Source Policy 至少包含：
 处理顺序：
 
 ```text
-领取 endpoint 租约
+领取 endpoint 租约与 fencing token
+→ 长任务周期心跳续租
 → 带 checkpoint 请求
-→ 写入 Raw Item
+→ 校验 token 后写入 Raw Item
 → 提交事务
-→ 推进 checkpoint
-→ 释放租约
+→ 再次校验 token 后推进 checkpoint 并释放租约
 ```
 
 必须先保存 Raw Item，再推进 checkpoint，避免进程崩溃造成数据永久遗漏。
 
 当前实现边界：
 
-- Checkpoint 的 known-content 映射只读取每个 endpoint 最近 5,000 个 RawItem 版本；DB 唯一约束继续对全历史兜底。
+- known-content 映射默认读取每个 endpoint 最近 5,000 个 SourceRecord；AI HOT 配置为 10,000。DB 唯一约束继续对全历史兜底。
 - RSS/arXiv 的覆盖范围受上游 feed/API 返回窗口限制，超过保留期的停机无法仅靠 content hash 补回。
-- NVD 当前按发布时间窗口同步；窗口内会完整分页并识别内容变化，但窗口外旧 CVE 的修改要等后续 modified-time 对账能力。
-- Anthropic 每 2 小时检查 Newsroom，每 24 小时执行一次最多 50 URL、72 小时重叠的 Sitemap 对账；单篇抓取失败会记录日志并在仍处于发现/对账窗口时重试。
+- NVD 使用 120 天 durable 分片 bootstrap；120 天以前的首次全历史需要独立 backfill。
+- Anthropic 每 2 小时检查 Newsroom，每 24 小时执行一次最多 50 URL、72 小时重叠的 Sitemap 对账。
+- AI HOT 和 CISA 支持撤回；普通窗口型 feed 无法可靠推断删除。详见 [M1 实现说明](./m1-data-pipeline.md)。
 
 ### 6.2 原始证据
 
@@ -625,7 +628,7 @@ tests/
 ├── test_smoke.py         集成冒烟
 └── integration/          真实爬取（INTEL_RUN_LIVE=1）
 
-migrations/               Alembic（initial + classification + RawItem 内容版本 + M2 event intelligence）
+migrations/               Alembic（initial + classification + 内容版本 + M2 + M1 lifecycle/LLM audit）
 compose.yaml
 Dockerfile
 pyproject.toml
@@ -718,7 +721,7 @@ docker compose up
 - Worker 中断后重新启动。
 - SSRF、重定向、超大响应和恶意 HTML。
 
-当前离线套件有 40 个用例，除 M1.2 路径外，已覆盖 M2 的不同 CVE 冲突保护、共享目录 URL、近重复、arXiv 强键、多来源证据和异常组件关系膨胀保护；LLM 与投递相关条目属于后续里程碑。
+当前离线套件有 54 个用例，覆盖 AI HOT snapshot/changes/remove/409、CISA 权威快照撤回、NVD 参数、HTTP 重试、M1.3 Schema/白名单/CVE bypass，以及 M2 的冲突保护、近重复、强键、多来源证据和关系膨胀保护；投递仍属于后续里程碑。
 
 ### 16.2 最小指标
 
@@ -761,7 +764,7 @@ MVP 使用结构化日志、`/health`、`/stats` 和 self-check；self-check 已
 - **新增并升级 SitemapConnector**：Anthropic 从 Web 适配器迁移为 Newsroom 快速发现 + Sitemap 定期对账。
 - **新增 ArxivConnector**：arXiv API 搜索。
 - **新增并发 fetch pipeline**：`asyncio.gather` 最多 5 个 endpoint 同时抓取。
-- **NVD 滚动时间窗 + 增量**：`last_success_at - 15min` 重叠窗口 + `totalResults/startIndex` 完整分页。
+- **NVD modified-time 增量**：120 天 durable 分片 bootstrap/catch-up + 密度缩窗 + 15 分钟稳态 overlap。
 - 18 个 endpoint 真实可跑。
 
 ### M1.1：规则分类 ✅
@@ -771,13 +774,21 @@ MVP 使用结构化日志、`/health`、`/stats` 和 self-check；self-check 已
 - 事件类型优先级（source_id → connector → CVE/GHSA → 关键词 → 默认）。
 - Classification 溯源（method / rule_version / input_hash）。
 
-### M1.2：增量优化 ✅
+### M1.2.x：增量优化 ✅
 
-- Checkpoint 传递最近的 native ID/content hash，RSS、REST、GitHub、arXiv、Sitemap 在 Connector 层过滤未变化内容。
-- 同一 native ID 的内容修订保存为新的不可变 RawItem 版本。
-- NVD 使用 15 分钟重叠窗口和完整分页。
-- Anthropic 使用 Newsroom 快速发现 + 每日 Sitemap 重叠对账。
-- 已知内容缓存、feed 保留窗口和 NVD 旧记录 modified-time 对账的边界见 §6.1；这些是后续完整性优化项，不影响 DB 全历史幂等。
+- RawItem 不可变内容/撤回版本 + SourceRecord 当前投影 + Document active/superseded/withdrawn。
+- AI HOT snapshot/changes/remove/409 重建；CISA 权威快照删除检测。
+- NVD 120 天 durable 分片 bootstrap/catch-up、密度缩窗和 15 分钟稳态 overlap。
+- Anthropic Newsroom 快速发现 + 每日 Sitemap 重叠对账。
+- endpoint state_version、YAML 删除自动暂停、正确的 4xx/429/5xx 重试语义。
+
+### M1.3：混合分类 ✅
+
+- provider registry、严格 JSON Schema/Pydantic/taxonomy 白名单。
+- model_cache、model_runs、分类租约、缓存命中、指数退避与规则 fallback。
+- 结构化 CVE 不调用 LLM；ingest/classify/event 三个 job 相互独立。
+
+完整实现与非保证边界见 [M1 增量与分类](./m1-data-pipeline.md)。
 
 ### M2：事件情报 ✅（M2.0 确定性基线）
 

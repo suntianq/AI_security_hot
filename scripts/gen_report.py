@@ -31,7 +31,15 @@ TECH_LABELS = {
 
 def collect() -> tuple[list[dict], dict]:
     with session_scope() as session:
-        rows = session.execute(select(Document).order_by(Document.id.desc())).scalars().all()
+        rows = (
+            session.execute(
+                select(Document)
+                .where(Document.source_status == "active")
+                .order_by(Document.id.desc())
+            )
+            .scalars()
+            .all()
+        )
         docs = []
         tech_c: Counter = Counter()
         etype_c: Counter = Counter()

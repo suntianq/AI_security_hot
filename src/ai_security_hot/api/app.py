@@ -18,6 +18,7 @@ from ai_security_hot.models.tables import (
     Document,
     Event,
     EventDocument,
+    ModelRun,
     RawItem,
     SourceEndpoint,
 )
@@ -51,6 +52,7 @@ def list_sources() -> list[dict]:
                 "connector": ep.connector,
                 "enabled": ep.enabled,
                 "status": ep.status,
+                "state_version": ep.state_version,
                 "egress_route": ep.egress_route,
                 "consecutive_failures": ep.consecutive_failures,
                 "last_success_at": ep.last_success_at.isoformat() if ep.last_success_at else None,
@@ -70,9 +72,12 @@ def list_documents(
     ),
     company_model: str | None = Query(None, description="e.g. anthropic, openai"),
     event_type: str | None = Query(None),
+    include_inactive: bool = Query(False),
 ) -> list[dict]:
     with session_scope() as session:
         stmt = select(Document).where(Document.parse_quality >= min_quality)
+        if not include_inactive:
+            stmt = stmt.where(Document.source_status == "active")
         if tech_direction:
             stmt = stmt.where(Document.tech_directions.contains([tech_direction]))
         if company_model:
@@ -95,6 +100,7 @@ def list_documents(
                 "company_models": d.company_models,
                 "event_type": d.classified_event_type,
                 "classify_method": d.classify_method,
+                "source_status": d.source_status,
             }
             for d in rows
         ]
@@ -143,7 +149,11 @@ def list_events(
             .join(EventDocument, EventDocument.event_id == Event.id)
             .join(Document, Document.id == EventDocument.document_id)
             .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
-            .where(Event.status == "detected", Event.score >= min_score)
+            .where(
+                Event.status == "detected",
+                Event.score >= min_score,
+                Document.source_status == "active",
+            )
         )
         if topic:
             stmt = stmt.where(Event.topic == topic)
@@ -197,6 +207,7 @@ def get_event(event_id: int) -> dict:
                     doc.published_at_utc.isoformat() if doc.published_at_utc else None
                 ),
                 "parse_quality": doc.parse_quality,
+                "source_status": doc.source_status,
             }
             for link, doc, endpoint in rows
         ]
@@ -209,6 +220,12 @@ def stats() -> dict:
         rows = session.execute(select(RawItem.stage, func.count()).group_by(RawItem.stage)).all()
         by_stage = {stage: count for stage, count in rows}
         doc_count = session.execute(select(func.count()).select_from(Document)).scalar_one()
+        doc_status_rows = session.execute(
+            select(Document.source_status, func.count()).group_by(Document.source_status)
+        ).all()
+        model_status_rows = session.execute(
+            select(ModelRun.status, func.count()).group_by(ModelRun.status)
+        ).all()
         duplicate_count = session.execute(
             select(func.count()).select_from(Document).where(Document.near_dup_of.is_not(None))
         ).scalar_one()
@@ -221,6 +238,8 @@ def stats() -> dict:
     return {
         "raw_items_by_stage": {str(k): int(v) for k, v in by_stage.items()},
         "documents": int(doc_count),
+        "documents_by_source_status": {str(k): int(v) for k, v in doc_status_rows},
+        "model_runs_by_status": {str(k): int(v) for k, v in model_status_rows},
         "near_duplicates": int(duplicate_count),
         "events": int(event_count),
         "event_documents": int(evidence_count),
@@ -268,4 +287,7 @@ def get_document(document_id: int) -> dict:
             "identifiers": d.identifiers,
             "entities": d.entities,
             "parse_quality": d.parse_quality,
+            "source_status": d.source_status,
+            "withdrawn_at": d.withdrawn_at.isoformat() if d.withdrawn_at else None,
+            "classify_error": d.classify_error,
         }

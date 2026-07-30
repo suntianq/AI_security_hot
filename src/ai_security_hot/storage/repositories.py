@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from secrets import randbelow
+from secrets import randbelow, token_urlsafe
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -31,14 +31,17 @@ from ai_security_hot.models.tables import (
     Event,
     EventDocument,
     FetchRun,
+    ModelCache,
+    ModelRun,
     RawItem,
     Source,
     SourceEndpoint,
+    SourceRecord,
 )
 
 
 def _reset_endpoint_state_for_url_change(row: SourceEndpoint, *, now: datetime) -> None:
-    """Start a fresh HTTP/health checkpoint when an endpoint URL changes."""
+    """Start a fresh checkpoint after a URL or protocol-state version change."""
     row.etag = None
     row.last_modified = None
     row.cursor = None
@@ -51,14 +54,21 @@ def _reset_endpoint_state_for_url_change(row: SourceEndpoint, *, now: datetime) 
     row.last_error = None
     row.next_run_at = now
     row.lease_until = None
+    row.lease_token = None
 
 
 def sync_registry(session: Session, registry: SourceRegistry) -> None:
-    """Upsert sources + endpoints from sources.yaml into the DB."""
+    """Upsert the registry, reset changed protocols and pause removed endpoints."""
+    now = datetime.now(UTC)
+    configured_ids = {ep.id for ep in registry.endpoints}
     for s in registry.sources:
         session.merge(
             Source(
-                id=s.id, name=s.name, trust_tier=s.trust_tier.value, language=s.language, org=s.org
+                id=s.id,
+                name=s.name,
+                trust_tier=s.trust_tier.value,
+                language=s.language,
+                org=s.org,
             )
         )
     for ep in registry.endpoints:
@@ -67,6 +77,7 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
             "schedule": ep.schedule.model_dump(),
             "fetch": ep.fetch.model_dump(),
             "topics": ep.topics,
+            "fulltext": ep.fulltext,
             "options": ep.options,
         }
         if row is None:
@@ -78,16 +89,17 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
                     parser=ep.parser,
                     url=ep.url,
                     enabled=ep.enabled,
+                    state_version=ep.state_version,
                     priority=ep.priority.value,
                     trust_tier=ep.trust_tier.value,
                     language=ep.language,
                     egress_route=ep.egress.route.value,
                     policy=policy_json,
-                    next_run_at=datetime.now(UTC),
+                    next_run_at=now,
                 )
             )
         else:
-            url_changed = row.url != ep.url
+            state_changed = row.url != ep.url or row.state_version != ep.state_version
             row.source_id = ep.source_id
             row.priority = ep.priority.value
             row.trust_tier = ep.trust_tier.value
@@ -96,18 +108,50 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
             row.parser = ep.parser
             row.url = ep.url
             row.enabled = ep.enabled
+            row.state_version = ep.state_version
             row.egress_route = ep.egress.route.value
             row.policy = policy_json
-            if url_changed:
-                _reset_endpoint_state_for_url_change(row, now=datetime.now(UTC))
+            if state_changed:
+                _reset_endpoint_state_for_url_change(row, now=now)
+
+    # YAML is authoritative. Keeping removed endpoints active in PostgreSQL
+    # creates ghost fetches and makes connector renames unsafe.
+    missing = session.execute(
+        select(SourceEndpoint).where(SourceEndpoint.id.not_in(configured_ids))
+    ).scalars()
+    for row in missing:
+        row.enabled = False
+        row.status = "paused"
+        row.lease_until = None
+        row.lease_token = None
+
+    # NORMALIZED means "waiting for fulltext". Endpoints that do not need a
+    # second fetch can immediately enter the classification-ready DONE state.
+    non_fulltext_ids = [ep.id for ep in registry.endpoints if not ep.fulltext]
+    if non_fulltext_ids:
+        session.execute(
+            update(RawItem)
+            .where(
+                RawItem.endpoint_id.in_(non_fulltext_ids),
+                RawItem.stage == PipelineStage.NORMALIZED.value,
+            )
+            .values(stage=PipelineStage.DONE.value, stage_lease_until=None)
+        )
     session.commit()
 
 
-def claim_due_endpoints(session: Session, limit: int, lease_seconds: int = 300) -> list[str]:
-    """Atomically lease endpoints whose next_run_at is due (plan 修正 5).
+class EndpointLeaseLost(RuntimeError):
+    """A stale worker no longer owns the endpoint checkpoint."""
 
-    Uses SELECT ... FOR UPDATE SKIP LOCKED so multiple workers never grab the
-    same endpoint.
+
+def claim_due_endpoints(
+    session: Session, limit: int, lease_seconds: int = 300
+) -> list[tuple[str, str]]:
+    """Atomically lease due endpoints and return fencing tokens.
+
+    ``FOR UPDATE SKIP LOCKED`` prevents simultaneous claims. The opaque token
+    prevents a worker that outlived its lease from persisting or advancing a
+    checkpoint after another worker has taken ownership.
     """
     now = datetime.now(UTC)
     stmt = (
@@ -121,15 +165,54 @@ def claim_due_endpoints(session: Session, limit: int, lease_seconds: int = 300) 
         .limit(limit)
         .with_for_update(skip_locked=True)
     )
-    ids = list(session.execute(stmt).scalars().all())
-    if ids:
-        session.execute(
-            update(SourceEndpoint)
-            .where(SourceEndpoint.id.in_(ids))
-            .values(lease_until=now + timedelta(seconds=lease_seconds))
+    ids = [str(value) for value in session.execute(stmt).scalars()]
+    if not ids:
+        session.commit()
+        return []
+    token = token_urlsafe(32)
+    session.execute(
+        update(SourceEndpoint)
+        .where(SourceEndpoint.id.in_(ids))
+        .values(
+            lease_until=now + timedelta(seconds=lease_seconds),
+            lease_token=token,
         )
+    )
     session.commit()
-    return ids
+    return [(endpoint_id, token) for endpoint_id in ids]
+
+
+def extend_endpoint_lease(
+    session: Session,
+    endpoint_id: str,
+    lease_token: str,
+    *,
+    lease_seconds: int,
+) -> bool:
+    """Heartbeat a lease only while this worker still owns its fencing token."""
+    endpoint = session.execute(
+        update(SourceEndpoint)
+        .where(
+            SourceEndpoint.id == endpoint_id,
+            SourceEndpoint.lease_token == lease_token,
+            SourceEndpoint.lease_until.is_not(None),
+        )
+        .values(lease_until=datetime.now(UTC) + timedelta(seconds=lease_seconds))
+        .returning(SourceEndpoint.id)
+    ).scalar_one_or_none()
+    session.commit()
+    return endpoint is not None
+
+
+def ensure_endpoint_lease(session: Session, endpoint_id: str, lease_token: str) -> None:
+    """Fence evidence persistence behind the current endpoint ownership token."""
+    row = session.execute(
+        select(SourceEndpoint).where(SourceEndpoint.id == endpoint_id).with_for_update()
+    ).scalar_one_or_none()
+    if row is None:
+        raise KeyError(f"unknown endpoint: {endpoint_id}")
+    if row.lease_token != lease_token:
+        raise EndpointLeaseLost(f"endpoint lease lost: {endpoint_id}")
 
 
 def load_checkpoint(
@@ -137,67 +220,235 @@ def load_checkpoint(
     endpoint_id: str,
     *,
     known_limit: int = 5000,
+    include_active_ids: bool = False,
 ) -> Checkpoint:
     row = session.get(SourceEndpoint, endpoint_id)
     if row is None:
         raise KeyError(f"unknown endpoint: {endpoint_id}")
 
-    # Descending order makes the first row for a native id its newest version.
+    # SourceRecord is the current projection; RawItem remains immutable history.
     known_rows = session.execute(
-        select(RawItem.native_id, RawItem.content_hash)
-        .where(RawItem.endpoint_id == endpoint_id)
-        .order_by(RawItem.id.desc())
+        select(SourceRecord.native_id, SourceRecord.content_hash)
+        .where(SourceRecord.endpoint_id == endpoint_id)
+        .order_by(SourceRecord.last_seen_at.desc())
         .limit(known_limit)
     ).all()
-    known_content_hashes: dict[str, str] = {}
-    for native_id, content_hash in known_rows:
-        known_content_hashes.setdefault(native_id, content_hash)
-
+    active_ids: set[str] = set()
+    if include_active_ids:
+        active_ids = set(
+            session.execute(
+                select(SourceRecord.native_id).where(
+                    SourceRecord.endpoint_id == endpoint_id,
+                    SourceRecord.status == "active",
+                )
+            ).scalars()
+        )
     return Checkpoint(
         etag=row.etag,
         last_modified=row.last_modified,
         cursor=row.cursor,
         last_success_at=row.last_success_at,
         last_published_at=row.last_published_at,
-        known_content_hashes=known_content_hashes,
+        known_content_hashes={
+            str(native_id): str(content_hash) for native_id, content_hash in known_rows
+        },
+        active_native_ids=active_ids,
     )
 
 
-def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
-    """Idempotent insert of raw items; returns count of newly inserted rows.
+def _chunks[T](values: list[T], size: int = 500) -> Iterator[list[T]]:
+    for start in range(0, len(values), size):
+        yield values[start : start + size]
 
-    ON CONFLICT DO NOTHING on (endpoint_id, native_id, content_hash), so an
-    unchanged re-poll is a no-op while a source-side revision creates a new
-    immutable RawItem version.
+
+def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
+    """Bulk-insert immutable evidence and atomically update current projections.
+
+    Large REST bootstraps can contain tens of thousands of records. Fixed-size
+    chunks stay below PostgreSQL parameter limits while reducing database round
+    trips from O(items) to O(chunks). Lifecycle corrections are intentionally
+    row-wise because withdrawals/reactivations are rare and timestamp-specific.
     """
-    new = 0
-    for it in items:
-        stmt = (
+    if not items:
+        return 0
+
+    # Exact duplicate evidence within one connector response only needs one row.
+    unique_items: dict[tuple[str, str, str], RawItemDTO] = {}
+    for item in items:
+        unique_items[(item.endpoint_id, item.native_id, item.content_hash)] = item
+
+    raw_values = [
+        {
+            "endpoint_id": item.endpoint_id,
+            "source_id": item.source_id,
+            "native_id": item.native_id,
+            "request_url": item.request_url,
+            "final_url": item.final_url,
+            "http_status": item.http_status,
+            "published_at": item.published_at,
+            "fetched_at": item.fetched_at,
+            "language": item.language,
+            "content_hash": item.content_hash,
+            "blob_ref": item.blob_ref,
+            "raw_text": item.raw_text,
+            "canonical_url": item.canonical_url,
+            "connector_version": item.connector_version,
+            "parser_version": item.parser_version,
+            "operation": item.operation,
+            "stage": (
+                PipelineStage.DONE.value
+                if item.operation == "withdraw"
+                else PipelineStage.FETCHED.value
+            ),
+        }
+        for item in unique_items.values()
+    ]
+    raw_ids: dict[tuple[str, str, str], int] = {}
+    inserted_keys: set[tuple[str, str, str]] = set()
+    for batch in _chunks(raw_values):
+        rows = session.execute(
             pg_insert(RawItem)
-            .values(
-                endpoint_id=it.endpoint_id,
-                source_id=it.source_id,
-                native_id=it.native_id,
-                request_url=it.request_url,
-                final_url=it.final_url,
-                http_status=it.http_status,
-                published_at=it.published_at,
-                fetched_at=it.fetched_at,
-                language=it.language,
-                content_hash=it.content_hash,
-                blob_ref=it.blob_ref,
-                raw_text=it.raw_text,
-                canonical_url=it.canonical_url,
-                connector_version=it.connector_version,
-                stage=PipelineStage.FETCHED.value,
-            )
+            .values(batch)
             .on_conflict_do_nothing()
-            .returning(RawItem.id)
+            .returning(
+                RawItem.id,
+                RawItem.endpoint_id,
+                RawItem.native_id,
+                RawItem.content_hash,
+            )
+        ).all()
+        for raw_id, endpoint_id, native_id, content_hash in rows:
+            key = (str(endpoint_id), str(native_id), str(content_hash))
+            raw_ids[key] = int(raw_id)
+            inserted_keys.add(key)
+
+    # Resolve conflicts so an unchanged historical item can reactivate its old
+    # immutable evidence. Tuple predicates preserve the exact native/hash pair.
+    unresolved_by_endpoint: dict[str, list[tuple[str, str]]] = {}
+    for endpoint_id, native_id, content_hash in unique_items:
+        key = (endpoint_id, native_id, content_hash)
+        if key not in raw_ids:
+            unresolved_by_endpoint.setdefault(endpoint_id, []).append((native_id, content_hash))
+    for endpoint_id, pairs in unresolved_by_endpoint.items():
+        for batch in _chunks(pairs):
+            rows = session.execute(
+                select(RawItem.id, RawItem.native_id, RawItem.content_hash).where(
+                    RawItem.endpoint_id == endpoint_id,
+                    tuple_(RawItem.native_id, RawItem.content_hash).in_(batch),
+                )
+            ).all()
+            for raw_id, native_id, content_hash in rows:
+                raw_ids[(endpoint_id, str(native_id), str(content_hash))] = int(raw_id)
+
+    unresolved = set(unique_items) - set(raw_ids)
+    if unresolved:
+        sample = sorted(unresolved)[:3]
+        raise RuntimeError(
+            f"raw evidence conflict left {len(unresolved)} unresolved keys; sample={sample}"
         )
-        if session.execute(stmt).first() is not None:
-            new += 1
+
+    # A connector page can contain multiple changes to one native ID. The final
+    # source operation wins the current projection; every distinct RawItem above
+    # remains preserved as history.
+    final_items: dict[tuple[str, str], RawItemDTO] = {}
+    for item in items:
+        final_items[(item.endpoint_id, item.native_id)] = item
+
+    projection_values: list[dict] = []
+    resolved_finals: list[tuple[RawItemDTO, int, bool]] = []
+    for item in final_items.values():
+        evidence_key = (item.endpoint_id, item.native_id, item.content_hash)
+        raw_id = raw_ids.get(evidence_key)
+        if raw_id is None:  # guarded by the unresolved check above
+            raise RuntimeError(f"raw evidence id missing for {evidence_key}")
+        status = "withdrawn" if item.operation == "withdraw" else "active"
+        projection_values.append(
+            {
+                "endpoint_id": item.endpoint_id,
+                "native_id": item.native_id,
+                "current_raw_item_id": raw_id,
+                "content_hash": item.content_hash,
+                "status": status,
+                "first_seen_at": item.fetched_at,
+                "last_seen_at": item.fetched_at,
+                "withdrawn_at": item.fetched_at if status == "withdrawn" else None,
+            }
+        )
+        resolved_finals.append((item, raw_id, evidence_key in inserted_keys))
+
+    for batch in _chunks(projection_values):
+        insert_stmt = pg_insert(SourceRecord).values(batch)
+        session.execute(
+            insert_stmt.on_conflict_do_update(
+                constraint="uq_source_record_native",
+                set_={
+                    "current_raw_item_id": insert_stmt.excluded.current_raw_item_id,
+                    "content_hash": insert_stmt.excluded.content_hash,
+                    "status": insert_stmt.excluded.status,
+                    "last_seen_at": insert_stmt.excluded.last_seen_at,
+                    "withdrawn_at": insert_stmt.excluded.withdrawn_at,
+                },
+            )
+        )
+
+    for item, raw_id, inserted in resolved_finals:
+        native_raw_ids = select(RawItem.id).where(
+            RawItem.endpoint_id == item.endpoint_id,
+            RawItem.native_id == item.native_id,
+            RawItem.operation == "upsert",
+        )
+        if item.operation == "withdraw":
+            session.execute(
+                update(Document)
+                .where(
+                    Document.raw_item_id.in_(native_raw_ids),
+                    Document.source_status == "active",
+                )
+                .values(
+                    source_status="withdrawn",
+                    withdrawn_at=item.fetched_at,
+                    classify_lease_until=None,
+                    classify_lease_token=None,
+                    near_dup_of=None,
+                    duplicate_kind=None,
+                    duplicate_score=None,
+                    dedupe_version=DEDUPE_VERSION,
+                    cluster_version=None,
+                )
+            )
+        elif not inserted:
+            session.execute(
+                update(Document)
+                .where(Document.raw_item_id == raw_id)
+                .values(
+                    source_status="active",
+                    withdrawn_at=None,
+                    dedupe_version=None,
+                    cluster_version=None,
+                )
+            )
+            session.execute(
+                update(Document)
+                .where(
+                    Document.raw_item_id.in_(native_raw_ids),
+                    Document.raw_item_id != raw_id,
+                    Document.source_status == "active",
+                )
+                .values(
+                    source_status="superseded",
+                    withdrawn_at=item.fetched_at,
+                    classify_lease_until=None,
+                    classify_lease_token=None,
+                    near_dup_of=None,
+                    duplicate_kind=None,
+                    duplicate_score=None,
+                    dedupe_version=DEDUPE_VERSION,
+                    cluster_version=None,
+                )
+            )
+
     session.commit()
-    return new
+    return len(inserted_keys)
 
 
 def advance_checkpoint(
@@ -205,6 +456,7 @@ def advance_checkpoint(
     endpoint_id: str,
     checkpoint: Checkpoint,
     *,
+    lease_token: str,
     success: bool,
     error: str | None,
     interval_minutes: int,
@@ -212,9 +464,13 @@ def advance_checkpoint(
 ) -> None:
     """Persist checkpoint + reschedule + clear the lease (after raw items saved)."""
     now = datetime.now(UTC)
-    row = session.get(SourceEndpoint, endpoint_id)
+    row = session.execute(
+        select(SourceEndpoint).where(SourceEndpoint.id == endpoint_id).with_for_update()
+    ).scalar_one_or_none()
     if row is None:
         raise KeyError(f"unknown endpoint: {endpoint_id}")
+    if row.lease_token != lease_token:
+        raise EndpointLeaseLost(f"endpoint lease lost before checkpoint: {endpoint_id}")
     row.etag = checkpoint.etag
     row.last_modified = checkpoint.last_modified
     row.cursor = checkpoint.cursor
@@ -222,6 +478,7 @@ def advance_checkpoint(
         row.last_published_at = checkpoint.last_published_at
     row.last_fetched_at = now
     row.lease_until = None
+    row.lease_token = None
     jitter = randbelow(jitter_seconds + 1) if jitter_seconds > 0 else 0
     if success:
         row.last_success_at = now
@@ -286,8 +543,67 @@ def claim_stage_items(
     return rows
 
 
+def retry_failed_stage_items(
+    session: Session,
+    *,
+    limit: int = 500,
+    endpoint_id: str | None = None,
+) -> int:
+    """Return deterministic parse failures to FETCHED after an operator fix."""
+    ids_stmt = (
+        select(RawItem.id)
+        .where(RawItem.stage == PipelineStage.FAILED.value)
+        .order_by(RawItem.id)
+        .limit(limit)
+    )
+    if endpoint_id:
+        ids_stmt = ids_stmt.where(RawItem.endpoint_id == endpoint_id)
+    ids = list(session.execute(ids_stmt).scalars())
+    if not ids:
+        return 0
+    session.execute(
+        update(RawItem)
+        .where(RawItem.id.in_(ids))
+        .values(
+            stage=PipelineStage.FETCHED.value,
+            stage_error=None,
+            stage_lease_until=None,
+            parser_version=None,
+        )
+    )
+    session.commit()
+    return len(ids)
+
+
 def persist_document(session: Session, raw_item_id: int, doc, next_stage: PipelineStage) -> None:
-    """Store a normalized document and advance the raw item's stage."""
+    """Store a parsed revision, then supersede the previously active revision."""
+    raw = session.get(RawItem, raw_item_id)
+    if raw is None:
+        raise KeyError(f"unknown raw_item: {raw_item_id}")
+    prior_raw_ids = select(RawItem.id).where(
+        RawItem.endpoint_id == raw.endpoint_id,
+        RawItem.native_id == raw.native_id,
+        RawItem.id != raw_item_id,
+        RawItem.operation == "upsert",
+    )
+    session.execute(
+        update(Document)
+        .where(
+            Document.raw_item_id.in_(prior_raw_ids),
+            Document.source_status == "active",
+        )
+        .values(
+            source_status="superseded",
+            withdrawn_at=raw.fetched_at,
+            classify_lease_until=None,
+            classify_lease_token=None,
+            near_dup_of=None,
+            duplicate_kind=None,
+            duplicate_score=None,
+            dedupe_version=DEDUPE_VERSION,
+            cluster_version=None,
+        )
+    )
     session.add(
         Document(
             raw_item_id=raw_item_id,
@@ -308,15 +624,13 @@ def persist_document(session: Session, raw_item_id: int, doc, next_stage: Pipeli
             },
             entities=doc.entities,
             parse_quality=doc.parse_quality,
+            source_status="active",
         )
     )
-    raw = session.get(RawItem, raw_item_id)
-    if raw is None:
-        raise KeyError(f"unknown raw_item: {raw_item_id}")
     raw.stage = next_stage.value
     raw.stage_lease_until = None
     raw.parser_version = doc.__class__.__name__
-    session.commit()
+    session.flush()
 
 
 def claim_fulltext_candidates(
@@ -365,6 +679,9 @@ def apply_fulltext(
         doc.body_text = body_text
         if parse_quality is not None:
             doc.parse_quality = parse_quality
+        doc.classified_at = None
+        doc.classify_lease_until = None
+        doc.classify_lease_token = None
         doc.dedupe_version = None
         doc.cluster_version = None
     raw.stage = PipelineStage.DONE.value
@@ -385,7 +702,10 @@ def iter_documents_for_export(
     """
     stmt = (
         select(Document)
-        .where(Document.parse_quality >= min_quality)
+        .where(
+            Document.source_status == "active",
+            Document.parse_quality >= min_quality,
+        )
         .order_by(Document.id)
         .execution_options(yield_per=500)
     )
@@ -417,27 +737,112 @@ def claim_unclassified_documents(
     session: Session,
     limit: int,
     *,
-    rule_version: str | None = None,
+    mode: str,
+    rule_version: str,
+    model_version: str | None = None,
+    prompt_version: str | None = None,
+    lease_seconds: int = 300,
 ) -> list[Document]:
-    """Fetch new documents and rule-classified documents on an older taxonomy."""
-    needs_classification = Document.classified_at.is_(None)
-    if rule_version:
-        needs_classification = needs_classification | (
+    """Lease classification work with version-aware rule/hybrid semantics."""
+    now = datetime.now(UTC)
+    lease_available = Document.classify_lease_until.is_(None) | (
+        Document.classify_lease_until < now
+    )
+    if mode == "rule":
+        due = Document.classified_at.is_(None) | (
             (Document.classify_method == "rule")
             & (
                 Document.classify_rule_version.is_(None)
                 | (Document.classify_rule_version != rule_version)
             )
         )
-    stmt = select(Document).where(needs_classification).order_by(Document.id).limit(limit)
-    return list(session.execute(stmt).scalars().all())
+    elif mode == "hybrid":
+        retry_due = Document.classify_next_retry_at.is_(None) | (
+            Document.classify_next_retry_at <= now
+        )
+        hybrid_current = (
+            (Document.classify_method == "hybrid")
+            & (Document.classify_model_version == model_version)
+            & (Document.classify_prompt_version == prompt_version)
+            & (Document.classify_rule_version == rule_version)
+        )
+        # Structured CVE rows intentionally remain rule-classified forever.
+        non_cve = Document.tech_directions != ["cve"]
+        due = Document.classified_at.is_(None) | (non_cve & ~hybrid_current & retry_due)
+    else:
+        raise ValueError(f"unknown classification mode: {mode}")
+
+    stmt = (
+        select(Document)
+        .join(RawItem, RawItem.id == Document.raw_item_id)
+        .where(
+            Document.source_status == "active",
+            RawItem.stage == PipelineStage.DONE.value,
+            lease_available,
+            due,
+        )
+        .order_by(Document.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    rows = list(session.execute(stmt).scalars())
+    lease_token = token_urlsafe(32)
+    for doc in rows:
+        doc.classify_lease_until = now + timedelta(seconds=lease_seconds)
+        doc.classify_lease_token = lease_token
+        doc.classify_attempts = (doc.classify_attempts or 0) + 1
+    session.commit()
+    return rows
 
 
-def apply_classification(session: Session, document_id: int, cls) -> None:
-    """Write a Classification back to the document row (+ provenance)."""
-    doc = session.get(Document, document_id)
+class ClassificationLeaseLost(RuntimeError):
+    """A stale classifier may not write or audit a model result."""
+
+
+def extend_classification_leases(
+    session: Session,
+    document_ids: list[int],
+    lease_token: str,
+    *,
+    lease_seconds: int,
+) -> set[int]:
+    """Heartbeat only documents still owned by this classifier batch."""
+    if not document_ids:
+        return set()
+    owned = set(
+        session.execute(
+            update(Document)
+            .where(
+                Document.id.in_(document_ids),
+                Document.classify_lease_token == lease_token,
+                Document.classify_lease_until.is_not(None),
+                Document.source_status == "active",
+            )
+            .values(classify_lease_until=datetime.now(UTC) + timedelta(seconds=lease_seconds))
+            .returning(Document.id)
+        ).scalars()
+    )
+    session.commit()
+    return {int(document_id) for document_id in owned}
+
+
+def apply_classification(
+    session: Session,
+    document_id: int,
+    cls,
+    *,
+    lease_token: str,
+    error: str | None = None,
+    retry_after_seconds: int | None = None,
+) -> None:
+    """Write a result only while its classifier still owns the fenced lease."""
+    doc = session.execute(
+        select(Document).where(Document.id == document_id).with_for_update()
+    ).scalar_one_or_none()
     if doc is None:
         raise KeyError(f"unknown document: {document_id}")
+    if doc.classify_lease_token != lease_token or doc.source_status != "active":
+        raise ClassificationLeaseLost(f"classification lease lost: {document_id}")
     doc.tech_directions = cls.tech_directions
     doc.company_models = cls.company_models
     doc.classified_event_type = cls.event_type
@@ -448,13 +853,151 @@ def apply_classification(session: Session, document_id: int, cls) -> None:
     doc.classify_rule_version = cls.rule_version
     doc.classify_input_hash = cls.input_hash
     doc.classified_at = datetime.now(UTC)
+    doc.classify_lease_until = None
+    doc.classify_lease_token = None
+    doc.classify_error = error[:2000] if error else None
+    doc.classify_next_retry_at = (
+        datetime.now(UTC) + timedelta(seconds=retry_after_seconds) if retry_after_seconds else None
+    )
     doc.cluster_version = None
-    session.commit()
+    session.flush()
+
+
+def get_model_cache(
+    session: Session,
+    *,
+    task: str,
+    provider: str,
+    model: str,
+    prompt_version: str,
+    input_hash: str,
+) -> dict | None:
+    row = session.execute(
+        select(ModelCache).where(
+            ModelCache.task == task,
+            ModelCache.provider == provider,
+            ModelCache.model == model,
+            ModelCache.prompt_version == prompt_version,
+            ModelCache.input_hash == input_hash,
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    row.last_used_at = datetime.now(UTC)
+    return dict(row.output)
+
+
+def delete_model_cache(
+    session: Session,
+    *,
+    task: str,
+    provider: str,
+    model: str,
+    prompt_version: str,
+    input_hash: str,
+) -> None:
+    session.execute(
+        delete(ModelCache).where(
+            ModelCache.task == task,
+            ModelCache.provider == provider,
+            ModelCache.model == model,
+            ModelCache.prompt_version == prompt_version,
+            ModelCache.input_hash == input_hash,
+        )
+    )
+    session.flush()
+
+
+def put_model_cache(
+    session: Session,
+    *,
+    task: str,
+    provider: str,
+    model: str,
+    prompt_version: str,
+    input_hash: str,
+    output: dict,
+) -> None:
+    now = datetime.now(UTC)
+    session.execute(
+        pg_insert(ModelCache)
+        .values(
+            task=task,
+            provider=provider,
+            model=model,
+            prompt_version=prompt_version,
+            input_hash=input_hash,
+            output=output,
+            last_used_at=now,
+        )
+        .on_conflict_do_update(
+            constraint="uq_model_cache_key",
+            set_={"last_used_at": now},
+        )
+    )
+    session.flush()
+
+
+def record_model_run(
+    session: Session,
+    *,
+    document_id: int,
+    task: str,
+    provider: str,
+    model: str,
+    prompt_version: str,
+    input_hash: str,
+    status: str,
+    latency_ms: int | None = None,
+    usage: dict | None = None,
+    error: str | None = None,
+) -> None:
+    session.add(
+        ModelRun(
+            document_id=document_id,
+            task=task,
+            provider=provider,
+            model=model,
+            prompt_version=prompt_version,
+            input_hash=input_hash,
+            status=status,
+            latency_ms=latency_ms,
+            usage=usage or {},
+            error=error[:2000] if error else None,
+        )
+    )
+    session.flush()
 
 
 # Stable PostgreSQL advisory-lock keys for M2 derived-data stages.
 _DEDUPE_LOCK_KEY = 0x41495348000201
 _CLUSTER_LOCK_KEY = 0x41495348000202
+
+
+def count_event_pipeline_backlog(session: Session) -> int:
+    """Count M1 work whose absence would make a scheduled M2 rebuild premature.
+
+    Raw FETCHED/NORMALIZED rows have not reached their final normalized form.
+    Active DONE documents without a classification have not reached their
+    final M1.3 labels. FAILED rows and retryable hybrid fallbacks are excluded:
+    neither should block event intelligence indefinitely.
+    """
+    raw_pending = session.execute(
+        select(func.count())
+        .select_from(RawItem)
+        .where(RawItem.stage.in_([PipelineStage.FETCHED.value, PipelineStage.NORMALIZED.value]))
+    ).scalar_one()
+    classification_pending = session.execute(
+        select(func.count())
+        .select_from(Document)
+        .join(RawItem, RawItem.id == Document.raw_item_id)
+        .where(
+            Document.source_status == "active",
+            RawItem.stage == PipelineStage.DONE.value,
+            Document.classified_at.is_(None),
+        )
+    ).scalar_one()
+    return int(raw_pending) + int(classification_pending)
 
 
 def try_event_stage_lock(session: Session, stage: str) -> bool:
@@ -470,7 +1013,10 @@ def count_dedupe_due(session: Session, *, version: str = DEDUPE_VERSION) -> int:
         session.execute(
             select(func.count())
             .select_from(Document)
-            .where(Document.dedupe_version.is_(None) | (Document.dedupe_version != version))
+            .where(
+                Document.source_status == "active",
+                Document.dedupe_version.is_(None) | (Document.dedupe_version != version),
+            )
         ).scalar_one()
     )
 
@@ -494,6 +1040,7 @@ def load_intel_documents(session: Session) -> list[IntelDocument]:
         select(Document, RawItem.fetched_at, SourceEndpoint.source_id, SourceEndpoint.trust_tier)
         .join(RawItem, RawItem.id == Document.raw_item_id)
         .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
+        .where(Document.source_status == "active")
         .order_by(Document.id)
     ).all()
     return [
@@ -559,7 +1106,10 @@ def load_dedup_decisions(session: Session) -> dict[int, DedupDecision]:
             Document.near_dup_of,
             Document.duplicate_kind,
             Document.duplicate_score,
-        ).where(Document.dedupe_version == DEDUPE_VERSION)
+        ).where(
+            Document.dedupe_version == DEDUPE_VERSION,
+            Document.source_status == "active",
+        )
     ).all()
     return {
         document_id: DedupDecision(document_id, near_dup_of, kind, score)

@@ -3,6 +3,7 @@
 intel sync              # load sources.yaml into the DB
 intel fetch [--limit N] # run one fetch stage pass
 intel normalize         # run one normalize stage pass
+intel retry-failed      # requeue deterministic parse failures after a fix
 intel run-once          # fetch + normalize once (used by e2e test)
 intel dedupe            # build versioned duplicate relationships
 intel cluster           # materialize events and evidence links
@@ -94,6 +95,20 @@ def run_once(limit: int = 5) -> None:
     )
 
 
+@app.command("retry-failed")
+def retry_failed(
+    limit: int = typer.Option(500, min=1),
+    endpoint_id: str | None = typer.Option(None, "--endpoint"),
+) -> None:
+    """Requeue failed normalization rows after fixing their parser/config."""
+    _setup_logging()
+    with session_scope() as session:
+        retried = repo.retry_failed_stage_items(
+            session, limit=limit, endpoint_id=endpoint_id
+        )
+    typer.echo(json.dumps({"retried": retried, "endpoint": endpoint_id}))
+
+
 @app.command()
 def fulltext(limit: int = 20) -> None:
     """Second-fetch full text for fulltext-enabled endpoints."""
@@ -105,7 +120,7 @@ def fulltext(limit: int = 20) -> None:
 
 @app.command()
 def classify(limit: int = 500) -> None:
-    """Classify documents (M1.1 rule-based): tech_direction / company_model / event_type."""
+    """Classify documents in configured rule or cached hybrid mode (M1.3)."""
     from ai_security_hot.pipelines.stages import run_classify_stage
 
     _setup_logging()

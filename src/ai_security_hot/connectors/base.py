@@ -30,6 +30,7 @@ class Checkpoint:
         last_success_at: datetime | None = None,
         last_published_at: datetime | None = None,
         known_content_hashes: dict[str, str] | None = None,
+        active_native_ids: set[str] | None = None,
     ) -> None:
         self.etag = etag
         self.last_modified = last_modified
@@ -43,6 +44,9 @@ class Checkpoint:
         # avoid emitting unchanged records while still emitting a new immutable
         # RawItem version when an existing source record is revised.
         self.known_content_hashes = known_content_hashes or {}
+        # Current source-side membership, maintained separately from immutable
+        # RawItem history. Snapshot connectors use it to detect withdrawals.
+        self.active_native_ids = active_native_ids or set()
 
     @property
     def known_native_ids(self) -> set[str]:
@@ -50,10 +54,19 @@ class Checkpoint:
 
 
 class PollResult:
-    def __init__(self, items: list[RawItem], checkpoint: Checkpoint, not_modified: bool = False):
+    def __init__(
+        self,
+        items: list[RawItem],
+        checkpoint: Checkpoint,
+        not_modified: bool = False,
+        next_poll_minutes: int | None = None,
+    ) -> None:
         self.items = items
         self.checkpoint = checkpoint
         self.not_modified = not_modified
+        # Connectors with durable multi-run bootstrap/catch-up cursors may ask
+        # for a faster next poll without changing their steady-state schedule.
+        self.next_poll_minutes = next_poll_minutes
 
 
 class Connector(ABC):

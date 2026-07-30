@@ -32,29 +32,44 @@ def test_ssrf_allows_public_https() -> None:
     validate_url("https://openai.com/news/rss.xml")  # no raise
 
 
-def test_source_registry_rss_endpoints() -> None:
+def test_source_registry_key_endpoints() -> None:
     from ai_security_hot.config.sources import load_registry
 
     registry = load_registry()
     expected = {
-        "aihot-selected-rss": "https://aihot.virxact.com/feed.xml",
-        "apple-ml-research-rss": "https://machinelearning.apple.com/rss.xml",
-        "nvidia-blog-rss": "https://blogs.nvidia.com/feed/",
-        "wiz-blog-rss": "https://www.wiz.io/feed/rss.xml",
-        "hackernews-rss": "https://hnrss.org/frontpage",
-        "huggingface-blog-rss": "https://huggingface.co/blog/feed.xml",
-        "google-security-rss": "https://blog.google/security/rss/",
+        "aihot-selected-api": (
+            "https://aihot.virxact.com/api/v1/selected/snapshot",
+            "aihot",
+            "aihot-v1",
+        ),
+        "apple-ml-research-rss": (
+            "https://machinelearning.apple.com/rss.xml",
+            "rss",
+            "rss-default-v1",
+        ),
+        "nvidia-blog-rss": ("https://blogs.nvidia.com/feed/", "rss", "rss-default-v1"),
+        "wiz-blog-rss": ("https://www.wiz.io/feed/rss.xml", "rss", "rss-default-v1"),
+        "hackernews-rss": ("https://hnrss.org/frontpage", "rss", "rss-default-v1"),
+        "huggingface-blog-rss": ("https://huggingface.co/blog/feed.xml", "rss", "rss-default-v1"),
+        "google-security-rss": ("https://blog.google/security/rss/", "rss", "rss-default-v1"),
     }
 
     assert len(registry.sources) == 17
     assert len(registry.endpoints) == 18
     assert len({source.id for source in registry.sources}) == len(registry.sources)
     assert len({endpoint.id for endpoint in registry.endpoints}) == len(registry.endpoints)
-    for endpoint_id, url in expected.items():
+    for endpoint_id, (url, connector, parser) in expected.items():
         endpoint = registry.endpoint(endpoint_id)
         assert endpoint.url == url
-        assert endpoint.connector.value == "rss"
-        assert endpoint.parser == "rss-default-v1"
+        assert endpoint.connector.value == connector
+        assert endpoint.parser == parser
+
+    nvd = registry.endpoint("nvd-recent")
+    assert nvd.connector.value == "nvd"
+    assert nvd.state_version == "3"
+    assert nvd.options["nvd"]["bootstrap_days"] == 120
+    assert nvd.options["nvd"]["segment_days"] == 7
+    assert nvd.options["nvd"]["target_results"] == 20000
 
 
 def test_url_change_resets_endpoint_checkpoint_and_health() -> None:
@@ -125,18 +140,19 @@ def test_rule_classifier_basic() -> None:
 
     rc = RuleClassifier()
     doc = NormalizedDocument(
-        raw_item_native_id="x", endpoint_id="e",
+        raw_item_native_id="x",
+        endpoint_id="e",
         title_original="Prompt injection in LangChain agents",
         body_text="A jailbreak of the MCP tool-calling agent from Anthropic Claude.",
         canonical_url="http://x",
     )
     c = rc.classify(doc, source_id="arxiv", connector="arxiv")
     assert "security_for_ai" in c.tech_directions  # prompt injection / jailbreak
-    assert "agent" in c.tech_directions            # MCP / agent
-    assert "anthropic" in c.company_models         # Claude
-    assert c.event_type == "research"              # source=arxiv
+    assert "agent" in c.tech_directions  # MCP / agent
+    assert "anthropic" in c.company_models  # Claude
+    assert c.event_type == "research"  # source=arxiv
     assert c.method == "rule"
-    assert c.rule_version and c.input_hash         # provenance recorded
+    assert c.rule_version and c.input_hash  # provenance recorded
 
 
 def test_rule_classifier_cve_is_vulnerability() -> None:
@@ -145,10 +161,12 @@ def test_rule_classifier_cve_is_vulnerability() -> None:
 
     rc = RuleClassifier()
     doc = NormalizedDocument(
-        raw_item_native_id="x", endpoint_id="nvd-recent",
+        raw_item_native_id="x",
+        endpoint_id="nvd-recent",
         title_original="CVE-2025-1: RCE in an LLM agent",
         body_text="Remote code execution in an agentic language model.",
-        canonical_url="http://x", cve_ids=["CVE-2025-1"],
+        canonical_url="http://x",
+        cve_ids=["CVE-2025-1"],
     )
     c = rc.classify(doc, source_id="nvd", connector="rest")
     assert c.event_type == "vulnerability"  # hard signal: CVE present
@@ -161,7 +179,8 @@ def test_rule_classifier_news_and_papers_get_topic_labels() -> None:
 
     rc = RuleClassifier()
     doc = NormalizedDocument(
-        raw_item_native_id="x", endpoint_id="arxiv-ai-llm",
+        raw_item_native_id="x",
+        endpoint_id="arxiv-ai-llm",
         title_original="A new large language model for tool-using agents",
         body_text="We study an LLM agent and its tool calling workflow.",
         canonical_url="http://x",
@@ -178,11 +197,14 @@ def test_rule_classifier_no_match_is_empty() -> None:
 
     rc = RuleClassifier()
     doc = NormalizedDocument(
-        raw_item_native_id="x", endpoint_id="e", title_original="A nice sunny day",
-        body_text="nothing technical here", canonical_url="http://x",
+        raw_item_native_id="x",
+        endpoint_id="e",
+        title_original="A nice sunny day",
+        body_text="nothing technical here",
+        canonical_url="http://x",
     )
     c = rc.classify(doc)
-    assert c.tech_directions == []     # general content, not force-tagged
+    assert c.tech_directions == []  # general content, not force-tagged
     assert c.company_models == []
 
 
@@ -217,8 +239,10 @@ def test_inject_date_params_incremental() -> None:
     last_success = datetime(2026, 7, 15, 10, 0, 0, tzinfo=UTC)
     result = _inject_date_params(base, cfg, last_success_at=last_success)
     # incremental: start should use last_success_at, not now-30d
-    assert "pubStartDate=2026-07-15T10%3A00%3A00.000" in result or \
-           "pubStartDate=2026-07-15T10:00:00.000" in unquote(result)
+    assert (
+        "pubStartDate=2026-07-15T10%3A00%3A00.000" in result
+        or "pubStartDate=2026-07-15T10:00:00.000" in unquote(result)
+    )
     assert "pubEndDate=" in result
 
 

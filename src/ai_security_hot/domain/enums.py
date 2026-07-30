@@ -31,6 +31,8 @@ class Priority(StrEnum):
 class ConnectorKind(StrEnum):
     RSS = "rss"
     REST = "rest"
+    NVD = "nvd"  # modified-time windows + durable segmented catch-up cursor
+    AIHOT = "aihot"  # selected snapshot + durable changes ledger
     GITHUB = "github"
     WEB = "web"
     ARXIV = "arxiv"  # official arXiv API (Atom response) — API-tier
@@ -60,6 +62,11 @@ class PipelineStage(StrEnum):
     ENRICHED = "enriched"
     DONE = "done"
     FAILED = "failed"
+
+
+class SourceRecordStatus(StrEnum):
+    ACTIVE = "active"
+    WITHDRAWN = "withdrawn"
 
 
 class SourceStatus(StrEnum):

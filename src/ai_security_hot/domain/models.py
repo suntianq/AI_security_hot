@@ -63,6 +63,9 @@ class RawItem(BaseModel):
     parser_version: str | None = None
     raw_text: str | None = None  # small inline payload; large snapshots go to blob_ref
     canonical_url: str | None = None
+    # Source-ledger operation. A withdrawal is immutable evidence too, but it
+    # does not produce a new Document.
+    operation: str = "upsert"
 
 
 class NormalizedDocument(BaseModel):

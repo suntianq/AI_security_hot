@@ -1,18 +1,15 @@
-"""Stateless scheduler (plan 修正 5).
-
-APScheduler only fires a stateless ``tick`` on an interval; the real due-time,
-lease and results live in PostgreSQL. Restart has no window, and a second
-instance is safe because claiming uses FOR UPDATE SKIP LOCKED.
-"""
+"""Independent stateless schedules backed by PostgreSQL leases."""
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 from ai_security_hot.config.settings import get_settings
 from ai_security_hot.jobs.self_check import run_self_check
+from ai_security_hot.models.base import session_scope
 from ai_security_hot.pipelines.stages import (
     run_classify_stage,
     run_cluster_stage,
@@ -21,42 +18,90 @@ from ai_security_hot.pipelines.stages import (
     run_fulltext_stage,
     run_normalize_stage,
 )
+from ai_security_hot.storage import repositories as repo
 
 log = logging.getLogger("intel.scheduler")
 
 
-def tick() -> None:
-    """One scheduler tick: run each stage runner once over its due work."""
+def ingest_tick() -> None:
+    """Network and parsing stages; never wait for an LLM or event rebuild."""
     try:
-        fetch_stats = run_fetch_stage()
-        norm_stats = run_normalize_stage()
-        ft_stats = run_fulltext_stage()
-        cls_stats = run_classify_stage()
-        dedupe_stats = run_dedupe_stage()
-        cluster_stats = run_cluster_stage()
-        log.info(
-            "tick: fetch=%s normalize=%s fulltext=%s classify=%s dedupe=%s cluster=%s",
-            fetch_stats,
-            norm_stats,
-            ft_stats,
-            cls_stats,
-            dedupe_stats,
-            cluster_stats,
-        )
+        settings = get_settings()
+        stats = {
+            "fetch": run_fetch_stage(),
+            "normalize": run_normalize_stage(limit=settings.normalize_batch_size),
+            "fulltext": run_fulltext_stage(limit=settings.fulltext_batch_size),
+        }
+        log.info("ingest_tick: %s", stats)
     except Exception:
-        log.exception("tick failed")
+        log.exception("ingest_tick failed")
+
+
+def classify_tick() -> None:
+    """Bounded slow-model work with its own lease and scheduler instance."""
+    try:
+        log.info("classify_tick: %s", run_classify_stage())
+    except Exception:
+        log.exception("classify_tick failed")
+
+
+def event_tick() -> None:
+    """Versioned derived-data stages, independent from fetch and classification."""
+    try:
+        settings = get_settings()
+        with session_scope() as session:
+            backlog = repo.count_event_pipeline_backlog(session)
+        threshold = settings.event_backlog_threshold
+        if threshold > 0 and backlog > threshold:
+            log.info(
+                "event_tick deferred: m1_backlog=%d threshold=%d",
+                backlog,
+                threshold,
+            )
+            return
+        stats = {"dedupe": run_dedupe_stage(), "cluster": run_cluster_stage()}
+        log.info("event_tick: %s", stats)
+    except Exception:
+        log.exception("event_tick failed")
+
+
+def tick() -> None:
+    """Backward-compatible manual all-stage pass; worker uses split jobs."""
+    ingest_tick()
+    classify_tick()
+    event_tick()
 
 
 def run_worker() -> None:
     settings = get_settings()
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
+    first_run = datetime.now(UTC)
     scheduler.add_job(
-        tick,
+        ingest_tick,
         "interval",
         seconds=settings.tick_interval_seconds,
-        id="tick",
+        id="ingest",
         max_instances=1,
         coalesce=True,
+        next_run_time=first_run,
+    )
+    scheduler.add_job(
+        classify_tick,
+        "interval",
+        seconds=settings.classification_interval_seconds,
+        id="classify",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=first_run,
+    )
+    scheduler.add_job(
+        event_tick,
+        "interval",
+        seconds=settings.event_interval_seconds,
+        id="event",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=first_run,
     )
     scheduler.add_job(
         run_self_check,
@@ -67,9 +112,10 @@ def run_worker() -> None:
         coalesce=True,
     )
     log.info(
-        "worker started: tick=%ds self_check=%ds",
+        "worker started: ingest=%ds classify=%ds event=%ds self_check=%ds",
         settings.tick_interval_seconds,
+        settings.classification_interval_seconds,
+        settings.event_interval_seconds,
         settings.self_check_interval_seconds,
     )
-    tick()  # run once immediately on startup
     scheduler.start()

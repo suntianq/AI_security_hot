@@ -118,21 +118,30 @@ endpoints:
       requests_per_minute: 2
     topics: [ai, security_for_ai]
 
-  # AI HOT recommended selected feed. It contains the latest 50 curated
-  # summaries and keeps both the AI HOT reading page and the original link.
-  # The publisher supports ETag/304 and recommends polling every 30 minutes or slower.
-  - id: aihot-selected-rss
+  # AI HOT exact selected-set mirror. Bootstrap all selected items once,
+  # then consume its durable change ledger (upsert/remove). A 409 automatically
+  # rebuilds the authoritative snapshot. This is not the 50-item RSS window.
+  - id: aihot-selected-api
     source_id: aihot
-    connector: rss
-    parser: rss-default-v1
-    url: https://aihot.virxact.com/feed.xml
+    connector: aihot
+    parser: aihot-v1
+    url: https://aihot.virxact.com/api/v1/selected/snapshot
     enabled: true
+    state_version: "1"
     trust_tier: B
     priority: P0
     language: zh
     egress: { route: proxy_pool_global }
     schedule: { interval_minutes: 30, jitter_seconds: 120 }
-    fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    fetch: { timeout_seconds: 30, max_response_bytes: 10485760, max_redirects: 3, requests_per_minute: 12 }
+    options:
+      checkpoint_known_limit: 10000
+      aihot:
+        fields: default
+        snapshot_limit: 500
+        changes_limit: 100
+        max_pages: 100
+        changes_url: https://aihot.virxact.com/api/v1/selected/changes
     topics: [ai, security_for_ai, ai_for_security]
 
   # --- REST API (JSON vuln feed) ---
@@ -140,7 +149,7 @@ endpoints:
     source_id: cisa
     connector: rest
     parser: cisa-kev-v1
-    url: https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+    url: https://raw.githubusercontent.com/cisagov/kev-data/develop/known_exploited_vulnerabilities.json
     enabled: true
     trust_tier: A
     priority: P0
@@ -155,6 +164,11 @@ endpoints:
       max_response_bytes: 20971520
       max_redirects: 3
       requests_per_minute: 4
+    options:
+      rest:
+        list_key: vulnerabilities
+        id_field: cveID
+        authoritative_snapshot: true
     topics: [ai_for_security, security_for_ai]
 
   # --- Sitemap adapter: Anthropic Newsroom + Research ---
@@ -199,16 +213,16 @@ endpoints:
     topics: [ai, security_for_ai]
 
   # --- REST: NVD (nested JSON: vulnerabilities[].cve, id under .cve.id) ---
-  # First poll reads 30 days; later polls start at last_success_at - 15min
-  # and drain every NVD page. ETag is skipped because the URL changes each
-  # tick; unchanged content is filtered and DB idempotency includes its hash.
-  # This is a publication window, not yet an old-CVE modified-time reconcile.
+  # Official modified-time reconciliation catches both new CVEs and any old CVE
+  # whose analysis/status/content changes. Bootstrap/catch-up is persisted as
+  # bounded modified-time windows; steady polls overlap by 15 minutes.
   - id: nvd-recent
     source_id: nvd
-    connector: rest
+    connector: nvd
     parser: nvd-v1
     url: https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=2000
     enabled: true
+    state_version: "3"
     trust_tier: A
     priority: P0
     language: en
@@ -221,28 +235,26 @@ endpoints:
       timeout_seconds: 40
       max_response_bytes: 20971520
       max_redirects: 3
-      requests_per_minute: 2
+      # Below NVD public limit; shortens 120-day bootstrap without bursts.
+      requests_per_minute: 6
     options:
+      nvd:
+        bootstrap_days: 120
+        segment_days: 7
+        overlap_minutes: 15
+        target_results: 20000
+        minimum_window_minutes: 60
+        catchup_interval_minutes: 1
       rest:
         list_key: vulnerabilities
         nested_key: cve
         id_field: id
-        date_params:
-          # Re-read a small overlap to catch delayed/out-of-order publication.
-          overlap_minutes: 15
-          start:
-            param: pubStartDate
-            offset_days: 30
-          end:
-            param: pubEndDate
-            offset_days: 0
-          format: "%Y-%m-%dT%H:%M:%S.000"
         pagination:
           start_param: startIndex
           start_key: startIndex
           page_size_key: resultsPerPage
           total_key: totalResults
-          max_pages: 100
+          max_pages: 50
     topics: [ai_for_security, security_for_ai]
 
   # --- RSS: Security for AI / research feeds ---

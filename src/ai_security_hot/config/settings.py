@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -44,11 +45,38 @@ class Settings(BaseSettings):
     # --- scheduler ---
     tick_interval_seconds: int = Field(default=60)
     self_check_interval_seconds: int = Field(default=600)
-    lease_seconds: int = Field(default=300, description="Endpoint fetch lease duration")
+    lease_seconds: int = Field(
+        default=900, ge=60, description="Endpoint fetch crash-recovery lease duration"
+    )
+    normalize_batch_size: int = Field(default=500, ge=1, le=5000)
+    fulltext_batch_size: int = Field(default=20, ge=1, le=500)
 
-    # --- LLM / delivery (placeholders for M0) ---
-    llm_provider: str | None = Field(default=None)
+    # --- M1.3 classification / LLM ---
+    classification_mode: Literal["rule", "hybrid"] = Field(default="rule")
+    classification_interval_seconds: int = Field(default=30, ge=5)
+    event_interval_seconds: int = Field(default=60, ge=5)
+    event_backlog_threshold: int = Field(
+        default=1000,
+        ge=0,
+        description=(
+            "Defer scheduled global event rebuilds while M1 processing backlog "
+            "exceeds this count; 0 disables the guard"
+        ),
+    )
+    classification_batch_size: int = Field(
+        default=25, ge=1, le=500, description="Cost-bounded hybrid model batch"
+    )
+    rule_classification_batch_size: int = Field(default=500, ge=1, le=5000)
+    classification_lease_seconds: int = Field(default=300, ge=30)
+    llm_provider: str = Field(default="openai-compatible")
+    llm_base_url: str = Field(default="https://api.openai.com/v1")
     llm_api_key: str | None = Field(default=None)
+    llm_model: str | None = Field(default=None)
+    llm_timeout_seconds: float = Field(default=30.0, ge=1, le=120)
+    llm_max_input_chars: int = Field(default=12000, ge=1000, le=100000)
+    llm_max_output_tokens: int = Field(default=500, ge=100, le=4000)
+
+    # --- delivery ---
     feishu_webhook_url: str | None = Field(default=None)
     smtp_url: str | None = Field(default=None)
     admin_alert_target: str | None = Field(default=None)

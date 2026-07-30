@@ -4,7 +4,7 @@
 > 最后更新：2026-07-30
 > 算法版本：`dedupe-v1` / `cluster-v1`
 
-M2.0 的目标是把 `Document` 转成可查询、可追溯、可增量重放的 `Event`，同时保持保守合并：宁可暂时拆成两个事件，也不把两个不同漏洞错误合并。该阶段不依赖 LLM，模型不可用不会阻塞采集和事件化。
+M2.0 的目标是把 active `Document` 转成可查询、可追溯、可增量重放的 `Event`，同时保持保守合并：宁可暂时拆成两个事件，也不把两个不同漏洞错误合并。该阶段不依赖 LLM，模型不可用不会阻塞采集和事件化。
 
 ## 1. 数据流
 
@@ -22,7 +22,7 @@ RawItem → Document → RuleClassifier
          GET /events + GET /events/{id}
 ```
 
-`raw_items.stage` 仍只表达采集和正文处理状态。M2 使用 `Document.dedupe_version` 与 `Document.cluster_version` 作为独立状态，避免已分类文档因为旧 stage 值被重复处理或漏处理。
+`raw_items.stage` 只表达采集、解析和全文完成状态；只有 DONE 文档进入分类。M2 使用 `Document.dedupe_version` 与 `Document.cluster_version` 作为独立状态，并且只消费 `source_status=active` 的 Document。
 
 ## 2. 非破坏式去重
 
@@ -91,7 +91,7 @@ RawItem → Document → RuleClassifier
 ## 5. 增量、幂等与并发
 
 - 新 `Document` 的版本字段为空，下一次 Worker tick 自动处理。
-- 正文更新会清空去重和聚类版本；分类变化会清空聚类版本。
+- 正文更新会清空分类、去重和聚类版本；分类变化会清空聚类版本；source revision/withdraw 会 supersede/withdraw 旧证据并触发事件重建。
 - 去重主记录或算法版本变化会使受影响文档的聚类版本失效。
 - 没有待处理文档时，两个阶段直接返回 `status=current`，不会扫描全文。只要出现过期文档，M2.0 会全局重算组件/事件以保证新旧证据能重新选主，但只写入变化记录；持久化候选索引和局部组件重算属于规模增长后的 M2.1 优化。
 - 算法版本升级时可全量重放；派生数据以事件 fingerprint 和 `(event_id, document_id)` 唯一约束保持幂等。
@@ -102,7 +102,7 @@ RawItem → Document → RuleClassifier
 ## 6. 运维命令
 
 ```bash
-uv run alembic upgrade head  # 升级到 e71a2c9d4f10
+uv run alembic upgrade head  # 升级到当前 head（含 M1 lifecycle/LLM audit）
 uv run intel eventize        # dedupe + cluster
 uv run intel dedupe          # 只处理版本过期文档
 uv run intel cluster         # 只处理版本过期文档

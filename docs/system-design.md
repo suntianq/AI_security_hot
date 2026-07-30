@@ -4,8 +4,8 @@
 > 最后更新：2026-07-30
 > 定位：完整目标蓝图；不是第一版的全部实施范围  
 > 当前实施基线：[后端 MVP 设计方案](./mvp-design.md)  
-> 配套文档：[信源注册表](./source-registry.md) · [M2 事件情报](./event-intelligence.md)
-> 当前已完成：M0 骨架 + M1 结构化采集 + M2.0 确定性事件情报（18 endpoint，17 source，6 类 Connector）
+> 配套文档：[信源注册表](./source-registry.md) · [M1 增量与分类](./m1-data-pipeline.md) · [M2 事件情报](./event-intelligence.md)
+> 当前已完成：M0 骨架 + M1.1/M1.2.x/M1.3 + M2.0 确定性事件情报（18 endpoint，17 source，8 类 Connector）
 
 第一版实现以《后端 MVP 设计方案》为准。本文保留网站、Agent、完整证据模型、团队版和长期扩展设计，用于约束后续演进方向。
 
@@ -107,7 +107,7 @@
 
 ```mermaid
 flowchart LR
-    S["信源层<br/>API / RSS / GitHub / Web / arXiv / Sitemap"] --> C["采集层<br/>调度、限速、增量、并发、快照"]
+    S["信源层<br/>API / RSS / AI HOT / GitHub / Web / arXiv / Sitemap"] --> C["采集层<br/>调度、限速、增量、并发、快照"]
     C --> R["原始证据库<br/>不可变元数据与内容快照"]
     R --> N["标准化与安全清洗<br/>正文抽取、语言、URL、时间"]
     N --> D["去重与事件聚类<br/>文章 → 事件"]
@@ -144,14 +144,16 @@ normalize(raw_item) -> NormalizedDocument
 health() -> SourceHealth
 ```
 
-已实现六类 Connector：
+已实现八类 Connector：
 
 1. `RSSConnector`（sync `poll`）
-2. `RestApiConnector`（sync `poll`，支持重叠时间窗、通用分页和同 ID 内容修订检测）
-3. `GitHubConnector`（sync `poll`）
-4. `WebListConnector`（sync `poll`）
-5. `ArxivConnector`（sync `poll`）
-6. `SitemapConnector`（async `apoll`，列表页快速发现 + Sitemap 重叠对账 → 并发抓取原文）
+2. `RestApiConnector`（sync `poll`，通用分页、修订与权威快照删除）
+3. `NvdConnector`（sync `poll`，modified-time 密度缩窗 + durable catch-up cursor）
+4. `AIHotConnector`（sync `poll`，snapshot/changes/remove/409 rebuild）
+5. `GitHubConnector`（sync `poll`）
+6. `WebListConnector`（sync `poll`）
+7. `ArxivConnector`（sync `poll`）
+8. `SitemapConnector`（async `apoll`，列表页快速发现 + Sitemap 重叠对账 → 并发抓取原文）
 
 `playwright` 目前只保留枚举和 Compose Profile 运行位；尚无 `PlaywrightConnector` 与浏览器镜像，属于未来动态网页兜底能力。
 
@@ -210,7 +212,7 @@ rate_limit:
 
 增量过滤优先级：
 
-1. **API/水位增量**：NVD 使用重叠时间窗和完整分页；Sitemap 使用独立内容水位与重叠对账。
+1. **API/水位增量**：NVD 使用 durable 分片 cursor、密度缩窗和稳态 overlap；Sitemap 使用独立内容水位与重叠对账。
 2. **known content 过滤**：Checkpoint 携带 `native_id → content_hash`；未变化内容在 Connector 层跳过，修订内容生成新版本。
 3. **HTTP 级增量**：ETag/304，部分源有效（CISA），部分源几乎不返回 304（arXiv）。
 4. **DB 级幂等兜底**：`ON CONFLICT DO NOTHING` on `(endpoint_id, native_id, content_hash)`；同 ID 内容变化保留新版本。
@@ -221,7 +223,7 @@ rate_limit:
 2. Canonical URL + 发布时间 + 内容指纹。
 3. 标准化 URL。
 
-当前实现使用最近 5,000 个 RawItem 版本构造 Connector 级 known-content 映射，DB 唯一约束仍覆盖全历史。RSS/arXiv 受上游返回窗口限制；Anthropic 用 Newsroom + 每日 72 小时 Sitemap 对账缓解；NVD 当前是发布时间窗口，尚未加入针对窗口外旧 CVE 更新的 modified-time 对账。因此，内容修订检测只保证本轮被上游重新返回或对账命中的记录。
+当前实现用 SourceRecord 保存源端当前投影，并从其中构造有界 known-content 映射；DB 唯一约束覆盖全历史。AI HOT 使用完整 snapshot + durable changes 并支持撤回/409 重建；CISA 作为权威快照检测删除；NVD 使用 120 天 durable 分片 bootstrap/catch-up 与 15 分钟稳态重叠；Anthropic 使用 Newsroom + 每日 72 小时 Sitemap 对账。RSS/arXiv 仍受上游窗口限制。完整契约见 [M1 增量与分类](./m1-data-pipeline.md)。
 
 ## 5. 原始内容与安全边界
 
@@ -421,7 +423,11 @@ published -> retracted
 
 ## 9. 分类与评分
 
-### 9.1 重要性分数
+### 9.1 当前 M1.3 分类实现
+
+M1.3 已实现规则/模型硬边界、provider registry、严格 JSON Schema + Pydantic/taxonomy 白名单、模型缓存与逐次审计、分类租约 heartbeat/fencing、指数退避和规则 fallback。结构化 CVE 只走规则；模型只处理新闻/论文语义。ingest、classify、event 使用独立调度，慢模型不阻塞采集。详见 [M1 实现说明](./m1-data-pipeline.md)。
+
+### 9.2 重要性分数
 
 总分 0～100：
 
@@ -442,7 +448,7 @@ actionability   0-10  是否有明确可执行动作
 
 这三个维度不能被总分替代。
 
-### 9.2 告警硬规则
+### 9.3 告警硬规则
 
 满足任一条件进入紧急告警候选：
 
@@ -459,7 +465,7 @@ actionability   0-10  是否有明确可执行动作
 - 单纯 CVSS 高，但不命中资产且没有利用证据。
 - 社区热度高但事实不明。
 
-### 9.3 个性化
+### 9.4 个性化
 
 用户 Profile：
 

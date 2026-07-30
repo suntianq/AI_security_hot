@@ -51,6 +51,7 @@ class SourceEndpoint(Base):
     parser: Mapped[str | None] = mapped_column(String(64), nullable=True)
     url: Mapped[str] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(default=True)
+    state_version: Mapped[str] = mapped_column(String(32), default="1")
     priority: Mapped[str] = mapped_column(String(4), default="P1")
     trust_tier: Mapped[str] = mapped_column(String(1), default="B")
     language: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -70,8 +71,9 @@ class SourceEndpoint(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # scheduling — DB is the single source of truth (plan 修正 5)
-    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     source: Mapped[Source] = relationship(back_populates="endpoints")
 
@@ -101,7 +103,10 @@ class RawItem(Base):
             name="uq_raw_endpoint_native_content",
         ),
         UniqueConstraint(
-            "endpoint_id", "canonical_url", "published_at", "content_hash",
+            "endpoint_id",
+            "canonical_url",
+            "published_at",
+            "content_hash",
             name="uq_raw_endpoint_url_pub_content",
         ),
     )
@@ -122,11 +127,29 @@ class RawItem(Base):
     canonical_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     connector_version: Mapped[str] = mapped_column(String(32), default="")
     parser_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    operation: Mapped[str] = mapped_column(String(16), default="upsert")
 
     # stage state machine (plan 修正 1)
     stage: Mapped[str] = mapped_column(String(16), default=PipelineStage.FETCHED.value, index=True)
     stage_lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     stage_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SourceRecord(Base):
+    """Current membership of a mutable source record; RawItem remains history."""
+
+    __tablename__ = "source_records"
+    __table_args__ = (UniqueConstraint("endpoint_id", "native_id", name="uq_source_record_native"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    endpoint_id: Mapped[str] = mapped_column(ForeignKey("source_endpoints.id"), index=True)
+    native_id: Mapped[str] = mapped_column(String(512))
+    current_raw_item_id: Mapped[int] = mapped_column(ForeignKey("raw_items.id"))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Document(Base):
@@ -146,6 +169,8 @@ class Document(Base):
     identifiers: Mapped[dict] = mapped_column(JSONB, default=dict)  # cve/ghsa/cnvd/cwe
     entities: Mapped[dict] = mapped_column(JSONB, default=dict)
     parse_quality: Mapped[float] = mapped_column(Float, default=0.0)  # plan 修正 4
+    source_status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # --- M1.1 classification (multi-label) + provenance ---
     tech_directions: Mapped[list] = mapped_column(
@@ -162,6 +187,15 @@ class Document(Base):
     classify_rule_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     classify_input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     classified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    classify_lease_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    classify_lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    classify_next_retry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    classify_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    classify_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # --- M2 event intelligence: versioned, non-destructive dedup ---
     near_dup_of: Mapped[int | None] = mapped_column(
         ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
@@ -206,6 +240,53 @@ class EventDocument(Base):
     stance: Mapped[str] = mapped_column(String(16), default="support")
     evidence_level: Mapped[str | None] = mapped_column(String(1), nullable=True)
     relation_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class ModelCache(Base):
+    """Reusable validated model output. Secrets and raw HTTP are never stored."""
+
+    __tablename__ = "model_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "task",
+            "provider",
+            "model",
+            "prompt_version",
+            "input_hash",
+            name="uq_model_cache_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    task: Mapped[str] = mapped_column(String(32))
+    provider: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(128))
+    prompt_version: Mapped[str] = mapped_column(String(64))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    output: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class ModelRun(Base):
+    """Per-document model audit row, including cache hits and fallbacks."""
+
+    __tablename__ = "model_runs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
+    task: Mapped[str] = mapped_column(String(32))
+    provider: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(128))
+    prompt_version: Mapped[str] = mapped_column(String(64))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    usage: Mapped[dict] = mapped_column(JSONB, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class DeliveryRun(Base):

@@ -1,8 +1,8 @@
 # AI × Security 信源注册表（Seed List）
 
-> 状态：初稿 → 实施中
+> 状态：持续维护（M1 接入基线已完成）
 > 最后核验：2026-07-30
-> 当前已接入：18 个 endpoint（17 个 source），6 类 Connector（RSS/REST/GitHub/Web/arXiv/Sitemap）
+> 当前已接入：18 个 endpoint（17 个 source），8 类 Connector（RSS/REST/NVD/AI HOT/GitHub/Web/arXiv/Sitemap）
 > 目标：为 `AI`、`AI for Security`、`AI-enabled Threats`、`Security for AI` 四条内容主线提供可追溯、可扩展的信源池。
 
 ## 1. 使用说明
@@ -32,9 +32,9 @@
 | Endpoint | Source | Connector | Parser | 增量机制 | 状态 |
 |---|---|---|---|---|---|
 | openai-news-rss | OpenAI | RSS | rss-default-v1 | ETag/304 + content hash | ✅ |
-| aihot-selected-rss | AI HOT | RSS | rss-default-v1 | ETag/304 + 最新 50 条精选窗口 + content hash | ✅ |
-| cisa-kev | CISA | REST | cisa-kev-v1 | ETag/304 + 同 CVE 内容修订检测 | ✅ |
-| nvd-recent | NVD | REST | nvd-v1 | 15min 发布窗口重叠 + 完整分页 + content hash | ✅ |
+| aihot-selected-api | AI HOT | AI HOT | aihot-v1 | snapshot + changes cursor + remove + 409 rebuild | ✅ |
+| cisa-kev | CISA | REST | cisa-kev-v1 | 官方 GitHub 镜像 + ETag/304 + 修订/删除检测 | ✅ |
+| nvd-recent | NVD | NVD | nvd-v1 | 120d durable 分片 bootstrap/catch-up + 15min 稳态 overlap | ✅ |
 | anthropic-news | Anthropic | **Newsroom + Sitemap** | sitemap-article-v1 | 快速发现 + 每日 72h 重叠对账 | ✅ |
 | huggingface-blog-rss | HuggingFace | RSS + fulltext | rss-default-v1 | ETag/304 + content hash | ✅ |
 | google-security-rss | Google Security | RSS | rss-default-v1 | native ID/content hash（无稳定 HTTP validator） | ✅ |
@@ -52,15 +52,15 @@
 
 > 4 个 GitHub Releases endpoint（langchain/dify/ollama/vllm-releases）因内容噪音过大已删除（2026-07-29）。
 
-> 表中的“内容修订检测”只针对本轮被上游重新返回的记录：NVD 当前按发布时间窗口同步，尚未启用 modified-time 对账；Anthropic 则通过 Newsroom 快速发现和每日 Sitemap 对账扩大覆盖。Connector 预过滤使用最近 5,000 个 RawItem 版本，DB 唯一约束对全历史兜底。
+> M1.2.x 已启用 SourceRecord 当前投影与 Document lifecycle。AI HOT 和 CISA 能表达撤回；NVD 使用 modified-time 对账；普通 RSS/arXiv 仍只能处理上游当前窗口返回的记录。完整保证与边界见 [M1 实现说明](./m1-data-pipeline.md)。
 >
-> 本轮四个新增站点均有官方 RSS，直接复用 `rss-2`/`rss-default-v1` 即可，无需新增 Connector/Parser 类。真实验证中四个源的第二次条件请求均返回 304。AI HOT 当前采用官方推荐的最新 50 条精选 RSS；完整镜像仍需专门支持 `snapshot + changes` opaque cursor、409 重建和撤选语义。
+> AI HOT 因为有 snapshot/changes/409/remove 专用协议，使用独立 Connector/Parser；Apple、NVIDIA、Wiz 继续复用 RSS。CISA 的 cisa.gov 下载在部分运行环境返回 403，现使用 CISA 官方 `cisagov/kev-data` GitHub 镜像。
 
 ## 2. P0：结构化权威源与聚合入口
 
 | 优先级 | 可信度 | 信源 | 主线 | 推荐接入 | 入口 | 主要用途 |
 |---|---:|---|---|---|---|---|
-| P0 | B | AI HOT | AI | **RSS（已接入）**；REST snapshot/changes（完整镜像候选） | [Agent/API/RSS](https://aihot.virxact.com/agent) | 通用 AI 中文精选的启动上游；必须保留 AI HOT 署名及原文入口 |
+| P0 | B | AI HOT | AI | **selected snapshot/changes（已接入）** | [Agent/API](https://aihot.virxact.com/agent) | 通用 AI 中文精选的启动上游；必须保留 AI HOT 署名及原文入口 |
 | P0 | A | OpenAI News RSS | AI / Security for AI | RSS | [RSS](https://openai.com/news/rss.xml) | OpenAI 模型、产品、安全、工程、政策和安全事件 |
 | P0 | A | arXiv | 全部 | API | [API 文档](https://info.arxiv.org/help/api/index.html) | `cs.AI`、`cs.CL`、`cs.LG`、`cs.CR`、`cs.SE`、`stat.ML`；按关键词二次筛选 |
 | P0 | B | Hugging Face Daily Papers | AI / Security for AI | 网页或社区数据接口 | [Daily Papers](https://huggingface.co/papers) | 社区热度论文发现；必须回链 arXiv/论文主页 |
@@ -262,7 +262,7 @@
 
 ### 通用 AI
 
-- AI HOT RSS（已接入）；REST snapshot/changes 完整镜像模式待实现
+- AI HOT selected snapshot/changes 完整镜像（已接入）
 - OpenAI RSS
 - Anthropic News + Research
 - Google DeepMind

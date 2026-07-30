@@ -11,12 +11,12 @@ cmd="${1:-api}"; shift || true
 # default (RUN_MIGRATIONS=1); the api waits for the schema instead.
 if [ "${RUN_MIGRATIONS:-0}" = "1" ]; then
   echo "[entrypoint] running migrations..."
-  uv run alembic upgrade head
+  uv run --no-sync alembic upgrade head
   echo "[entrypoint] syncing source registry..."
-  uv run intel sync || echo "[entrypoint] sync failed (non-fatal on first boot)"
+  uv run --no-sync intel sync || echo "[entrypoint] sync failed (non-fatal on first boot)"
 else
   echo "[entrypoint] waiting for schema (migrations owned by another container)..."
-  until uv run alembic current 2>/dev/null | grep -q '(head)'; do
+  until uv run --no-sync alembic current 2>/dev/null | grep -q '(head)'; do
     echo "[entrypoint] schema not ready yet, waiting 2s..."
     sleep 2
   done
@@ -25,15 +25,15 @@ fi
 
 case "$cmd" in
   api)
-    exec uv run intel serve --host 0.0.0.0 --port 8000
+    exec uv run --no-sync intel serve --host 0.0.0.0 --port 8000
     ;;
   worker)
-    exec uv run intel worker
+    exec uv run --no-sync intel worker
     ;;
   cli)
-    exec uv run intel "$@"
+    exec uv run --no-sync intel "$@"
     ;;
   *)
-    exec uv run intel "$cmd" "$@"
+    exec uv run --no-sync intel "$cmd" "$@"
     ;;
 esac

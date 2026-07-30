@@ -8,22 +8,22 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ai_security_hot.config.settings import get_settings
 from ai_security_hot.domain.enums import ConnectorKind, EgressRoute, Priority, TrustTier
 
 
 class SchedulePolicy(BaseModel):
-    interval_minutes: int = 60
-    jitter_seconds: int = 60
+    interval_minutes: int = Field(default=60, ge=1)
+    jitter_seconds: int = Field(default=60, ge=0)
 
 
 class FetchPolicy(BaseModel):
-    timeout_seconds: float = 20.0
-    max_response_bytes: int = 5 * 1024 * 1024
-    max_redirects: int = 3
-    requests_per_minute: float = 2.0
+    timeout_seconds: float = Field(default=20.0, gt=0, le=300)
+    max_response_bytes: int = Field(default=5 * 1024 * 1024, ge=1)
+    max_redirects: int = Field(default=3, ge=0, le=20)
+    requests_per_minute: float = Field(default=2.0, ge=0)
 
 
 class EgressPolicy(BaseModel):
@@ -39,6 +39,9 @@ class EndpointPolicy(BaseModel):
     parser: str | None = None
     url: str
     enabled: bool = True
+    # Bump when checkpoint semantics change (cursor meaning, bootstrap window,
+    # connector protocol). Registry sync resets only this endpoint's state.
+    state_version: str = "1"
     trust_tier: TrustTier = TrustTier.B
     priority: Priority = Priority.P1
     language: str | None = None
@@ -51,6 +54,13 @@ class EndpointPolicy(BaseModel):
     fulltext: bool = False
     # optional per-connector options, e.g. rest: {list_key, id_field, nested_key}
     options: dict = Field(default_factory=dict)
+
+    @field_validator("state_version")
+    @classmethod
+    def _state_version_must_not_be_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("state_version must not be empty")
+        return v
 
     @field_validator("url")
     @classmethod
@@ -71,6 +81,28 @@ class SourceDef(BaseModel):
 class SourceRegistry(BaseModel):
     sources: list[SourceDef]
     endpoints: list[EndpointPolicy]
+
+    @model_validator(mode="after")
+    def _validate_registry(self) -> SourceRegistry:
+        source_ids = [source.id for source in self.sources]
+        endpoint_ids = [endpoint.id for endpoint in self.endpoints]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("duplicate source ids")
+        if len(endpoint_ids) != len(set(endpoint_ids)):
+            raise ValueError("duplicate endpoint ids")
+        known_sources = set(source_ids)
+        for endpoint in self.endpoints:
+            if endpoint.source_id not in known_sources:
+                raise ValueError(
+                    f"endpoint {endpoint.id!r} references unknown source {endpoint.source_id!r}"
+                )
+            if endpoint.connector is ConnectorKind.AIHOT:
+                changes_url = (endpoint.options.get("aihot") or {}).get("changes_url")
+                if not isinstance(changes_url, str) or not changes_url.startswith(
+                    ("http://", "https://")
+                ):
+                    raise ValueError(f"AI HOT endpoint {endpoint.id!r} requires changes_url")
+        return self
 
     def endpoint(self, endpoint_id: str) -> EndpointPolicy:
         for e in self.endpoints:
