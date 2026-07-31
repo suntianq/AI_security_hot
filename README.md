@@ -170,6 +170,7 @@ curl localhost:8000/sources
 uv run pytest -m "not live" -q                       # 离线 + PostgreSQL 集成测试
 INTEL_RUN_LIVE=1 uv run pytest -m live                  # 真实爬取端到端
 uv run ruff check . && uv run pyright                   # 质量门禁
+uv run alembic upgrade head && uv run alembic check     # 迁移 + ORM 元数据漂移门禁
 ```
 
 当前测试共 74 项，其中 73 项非 live；覆盖 M1 增量语义、不同强身份冲突、持久化签名、高频候选桶保护、SimHash/MinHash 候选、人工批准、reviewed 评测范围、局部退役重选主、EventVersion 和 Claim 支持/反驳证据，以及语义 Schema、原子事件、实体/Claim 证据定位和 PostgreSQL 事务落库。数据库集成测试需要已迁移的 `INTEL_DATABASE_URL`；`live` 只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
@@ -188,7 +189,7 @@ curl localhost:8000/health        # {"status":"ok"}
 - `worker` 随后 `intel sync` 载入 `sources.yaml`，并按调度持续抓取。
 - 数据持久化在 `pgdata` 卷，网页快照存 `blobdata` 卷。
 
-已有数据库升级到本版本时必须应用到 head `2b6d8f4a1c90`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。M2.1 迁移回填稳定组件 ID，并新增签名/身份/token 及 token 桶计数索引、局部 work/run、人工复核、EventVersion、Claim 和 ClaimEvidence 表；M2.2 仅新增默认关闭的影子语义工作队列、富化、实体、原子事件和抽取 Claim 表；M2.0 遗留事件会保存 `baseline_import` 快照并明确更早历史不可还原，不删除文档或旧事件。大库首次升级后应执行 `m2-index --all` 和 `replay-m2`，并观察 self-check 直至 v2 积压归零。
+已有数据库升级到本版本时必须应用到 head `d2c5d53a7a76`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。M2.1 迁移回填稳定组件 ID，并新增签名/身份/token 及 token 桶计数索引、局部 work/run、人工复核、EventVersion、Claim 和 ClaimEvidence 表；M2.2 仅新增默认关闭的影子语义工作队列、富化、实体、原子事件和抽取 Claim 表；当前 head 还会收紧 M2.1 审计时间列的非空约束、补齐候选复核索引，并使 ORM 与数据库的复合/部分索引定义保持一致。M2.0 遗留事件会保存 `baseline_import` 快照并明确更早历史不可还原，不删除文档或旧事件。大库首次升级后应执行 `m2-index --all` 和 `replay-m2`，并观察 self-check 直至 v2 积压归零。
 
 > 当前 API 未实现认证，且包含 `/ops/tick` 运维写操作。部署时应只绑定可信内网或在前置网关完成认证与访问控制。
 

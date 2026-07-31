@@ -45,6 +45,9 @@ jobs:
       - name: Migrate
         run: uv run alembic upgrade head
 
+      - name: Check Alembic metadata drift
+        run: uv run alembic check
+
       - name: Offline + database integration tests
         run: uv run pytest -m "not live" -v
 

@@ -15,6 +15,7 @@ from datetime import datetime
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -24,6 +25,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -218,7 +220,14 @@ class Document(Base):
     cluster_version: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     clustered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     dedupe_component_id: Mapped[int | None] = mapped_column(
-        ForeignKey("duplicate_components.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey(
+            "duplicate_components.id",
+            name="fk_documents_dedupe_component",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        nullable=True,
+        index=True,
     )
 
 
@@ -256,6 +265,12 @@ class DocumentIdentity(Base):
     __tablename__ = "document_identities"
     __table_args__ = (
         UniqueConstraint("document_id", "kind", "fingerprint", name="uq_document_identity"),
+        Index(
+            "ix_document_identities_lookup",
+            "kind",
+            "fingerprint",
+            "document_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -271,15 +286,19 @@ class DocumentIdentity(Base):
 
 class DocumentBlockToken(Base):
     __tablename__ = "document_block_tokens"
+    __table_args__ = (Index("ix_document_block_tokens_token", "token", "document_id"),)
 
     document_id: Mapped[int] = mapped_column(
         ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True
     )
-    token: Mapped[str] = mapped_column(String(96), primary_key=True, index=True)
+    token: Mapped[str] = mapped_column(String(96), primary_key=True)
 
 
 class DocumentBlockTokenStat(Base):
     __tablename__ = "document_block_token_stats"
+    __table_args__ = (
+        CheckConstraint("active_document_count > 0", name="ck_block_token_positive_count"),
+    )
 
     token: Mapped[str] = mapped_column(String(96), primary_key=True)
     active_document_count: Mapped[int] = mapped_column(Integer)
@@ -306,6 +325,15 @@ class M2Run(Base):
 
 class M2WorkItem(Base):
     __tablename__ = "m2_work_items"
+    __table_args__ = (
+        Index(
+            "uq_m2_work_items_pending",
+            "document_id",
+            "stage",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     document_id: Mapped[int | None] = mapped_column(
@@ -327,6 +355,7 @@ class M2WorkItem(Base):
 class CandidateReview(Base):
     __tablename__ = "candidate_reviews"
     __table_args__ = (
+        CheckConstraint("left_document_id < right_document_id", name="ck_candidate_pair_order"),
         UniqueConstraint(
             "left_document_id",
             "right_document_id",
