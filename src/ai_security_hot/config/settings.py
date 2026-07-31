@@ -87,6 +87,17 @@ class Settings(BaseSettings):
     llm_max_input_chars: int = Field(default=12000, ge=1000, le=100000)
     llm_max_output_tokens: int = Field(default=500, ge=100, le=4000)
 
+    # --- M2.2 shadow semantic enrichment ---
+    semantic_enrichment_enabled: bool = Field(
+        default=False,
+        description="Explicit cost gate; disabled means no semantic model calls",
+    )
+    semantic_enrichment_mode: Literal["shadow"] = Field(default="shadow")
+    semantic_enrichment_interval_seconds: int = Field(default=120, ge=10)
+    semantic_enrichment_batch_size: int = Field(default=5, ge=1, le=100)
+    semantic_enrichment_lease_seconds: int = Field(default=600, ge=60)
+    semantic_llm_max_output_tokens: int = Field(default=2500, ge=500, le=8000)
+
     # --- delivery ---
     feishu_webhook_url: str | None = Field(default=None)
     smtp_url: str | None = Field(default=None)

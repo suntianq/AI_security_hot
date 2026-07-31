@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -55,6 +56,8 @@ class OpenAICompatibleProvider:
         max_output_tokens: int,
     ) -> ModelResponse:
         headers = {"Authorization": f"Bearer {self.api_key}"}
+        raw_schema_name = str(output_schema.get("title") or "model_output")
+        schema_name = re.sub(r"[^A-Za-z0-9_-]", "_", raw_schema_name)[:64]
         payload = {
             "model": self.model,
             "messages": [
@@ -66,7 +69,7 @@ class OpenAICompatibleProvider:
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "document_classification",
+                    "name": schema_name,
                     "strict": True,
                     "schema": output_schema,
                 },

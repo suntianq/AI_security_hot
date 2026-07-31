@@ -2,8 +2,8 @@
 
 把 AI/安全情报的采集能力融为一个稳定、可扩展的后端。基于 `docs/` 设计文档
 （[MVP 设计](docs/mvp-design.md) · [整体蓝图](docs/system-design.md) ·
-[信源注册表](docs/source-registry.md) · [M1 增量与分类](docs/m1-data-pipeline.md) · [M2 事件情报](docs/event-intelligence.md)）实现的
-**M0 工程骨架 + M1 结构化采集 + M2.1 可扩展事件情报底座**。
+[信源注册表](docs/source-registry.md) · [M1 增量与分类](docs/m1-data-pipeline.md) · [M2 事件情报](docs/event-intelligence.md) · [M2.2 语义富化](docs/semantic-enrichment.md)）实现的
+**M0 工程骨架 + M1 结构化采集 + M2.1 可扩展事件情报底座 + M2.2 影子语义富化基础**。
 
 ## 已实现
 
@@ -45,6 +45,16 @@
 - **事件 API**：`GET /events` 支持主题、类型、证据等级和最低分过滤；`GET /events/{id}` 返回完整证据链。
 
 算法、运维命令、评分公式和当前边界详见 [M2 事件情报](docs/event-intelligence.md)。
+
+### M2.2 影子语义富化基础
+
+- **严格语义契约**：相关性、通用实体、0～N 个原子事件和 Claim 均通过严格 JSON Schema/Pydantic 校验。
+- **证据可追溯**：实体与 Claim 必须携带原文逐字摘录；只记录精确定位，无法定位时明确标记 unknown。
+- **版本化派生数据**：Document 保持不可变；富化结果、实体提及、原子事件和抽取 Claim 存入独立表。
+- **成本与并发隔离**：只处理 current non-CVE duplicate master；复用模型缓存/审计，使用独立 durable queue、租约和退避。
+- **默认关闭且仅影子模式**：升级不会自动调用模型，也不会改变现有 Event/聚类。
+
+实现、配置和上线门槛见 [M2.2 语义富化](docs/semantic-enrichment.md)。
 
 ### 八类 Connector + Parser
 
@@ -117,6 +127,7 @@ uv run intel m2-token-stats                            # 修复/核对 blocking 
 uv run intel replay-m2 --max-batches 10000             # 显式完整算法重放
 uv run intel replay-m2 --resume --max-batches 10000    # 失败修复后从已有积压续跑，不重置已完成批次
 uv run intel evaluate-m2 --dataset evaluation/m2_quality_seed.jsonl
+uv run intel semantic-enrich --limit 5 --force            # 显式运行一批影子语义富化（会调用已配置模型）
 uv run intel m2-reviews --status pending --limit 50    # 查看低置信候选
 uv run intel stats       # 文档、近重复、事件和证据数量
 uv run intel serve       # 起 API（:8000）
@@ -161,7 +172,7 @@ INTEL_RUN_LIVE=1 uv run pytest -m live                  # 真实爬取端到端
 uv run ruff check . && uv run pyright                   # 质量门禁
 ```
 
-当前测试共 68 项，其中 67 项非 live；覆盖 M1 增量语义、不同强身份冲突、持久化签名、高频候选桶保护、SimHash/MinHash 候选、人工批准、reviewed 评测范围、局部退役重选主、EventVersion 和 Claim 支持/反驳证据。数据库集成测试需要已迁移的 `INTEL_DATABASE_URL`；`live` 只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
+当前测试共 74 项，其中 73 项非 live；覆盖 M1 增量语义、不同强身份冲突、持久化签名、高频候选桶保护、SimHash/MinHash 候选、人工批准、reviewed 评测范围、局部退役重选主、EventVersion 和 Claim 支持/反驳证据，以及语义 Schema、原子事件、实体/Claim 证据定位和 PostgreSQL 事务落库。数据库集成测试需要已迁移的 `INTEL_DATABASE_URL`；`live` 只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
 
 ## 部署（Docker Compose）
 
@@ -177,7 +188,7 @@ curl localhost:8000/health        # {"status":"ok"}
 - `worker` 随后 `intel sync` 载入 `sources.yaml`，并按调度持续抓取。
 - 数据持久化在 `pgdata` 卷，网页快照存 `blobdata` 卷。
 
-已有数据库升级到本版本时必须应用到 head `9c4e7a2b1d60`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。M2.1 迁移回填稳定组件 ID，并新增签名/身份/token 及 token 桶计数索引、局部 work/run、人工复核、EventVersion、Claim 和 ClaimEvidence 表；M2.0 遗留事件会保存 `baseline_import` 快照并明确更早历史不可还原，不删除文档或旧事件。大库首次升级后应执行 `m2-index --all` 和 `replay-m2`，并观察 self-check 直至 v2 积压归零。
+已有数据库升级到本版本时必须应用到 head `2b6d8f4a1c90`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。M2.1 迁移回填稳定组件 ID，并新增签名/身份/token 及 token 桶计数索引、局部 work/run、人工复核、EventVersion、Claim 和 ClaimEvidence 表；M2.2 仅新增默认关闭的影子语义工作队列、富化、实体、原子事件和抽取 Claim 表；M2.0 遗留事件会保存 `baseline_import` 快照并明确更早历史不可还原，不删除文档或旧事件。大库首次升级后应执行 `m2-index --all` 和 `replay-m2`，并观察 self-check 直至 v2 积压归零。
 
 > 当前 API 未实现认证，且包含 `/ops/tick` 运维写操作。部署时应只绑定可信内网或在前置网关完成认证与访问控制。
 
@@ -239,14 +250,15 @@ src/ai_security_hot/
   parsers/      各源 Parser（rss/cisa_kev/nvd/github_releases/web_article/arxiv/sitemap_article）+ normalize
   classify/     RuleClassifier + HybridClassifier + 严格 Schema + taxonomy.yaml
   events/       M2 去重/事件规则、持久化签名、质量评测和候选判断
+  semantic/     严格语义任务、实体与原子事件抽取契约
   storage/      BlobStore + repositories（租约/幂等/局部组件与事件重算/版本事实/导出）
-  pipelines/    fetch/normalize/fulltext/classify/dedupe/cluster stages
+  pipelines/    fetch/normalize/fulltext/classify/semantic/dedupe/cluster stages
   jobs/         独立 fetch/normalize/fulltext/classify/event 调度 + self_check
   api/          FastAPI 只读/运维接口
   cli.py        intel CLI（采集、分类、eventize、查询、导出与运维）
 sources/        sources.yaml（19 个配置项：18 active + 1 retired）+ taxonomy.yaml
-migrations/     Alembic（initial + M1 lifecycle/classification + M2.0/M2.1）
-evaluation/     M2 人工标注种子 JSONL、标注约定与离线质量指标
+migrations/     Alembic（initial + M1 lifecycle/classification + M2.0/M2.1/M2.2）
+evaluation/     M2 去重与语义人工标注模板、标注约定及离线质量指标
 tests/          unit / smoke / event intelligence + PostgreSQL integration + opt-in live crawl
 ```
 
@@ -254,7 +266,8 @@ tests/          unit / smoke / event intelligence + PostgreSQL integration + opt
 
 - **日期事件 API**：按指定自然日返回经过局部增量、去重和聚类后的热点事件，补齐分页、时区、as-of/version 和证据展开契约。
 - **评测集扩充**：对真实误合并/漏合并进行双人标注和裁决，再决定是否引入 embedding/pgvector；当前 SimHash/MinHash 仅用于候选召回。
-- **LLM 事件增强**：M1.3 分类已完成；后续增加中文事件摘要、影响分析和不确定性表达，不覆盖权威字段。
+- **语义影子评测**：完成真实数据双人标注，测量实体、原子事件、证据忠实度、成本和延迟，再决定是否允许语义结果参与事件候选。
+- **Embedding + 关系裁决**：只对规则/时间/实体/向量召回的候选判断 same/related/different，不覆盖强标识冲突。
 - **日报与投递**：日报冻结/生成/版本化 + 飞书/邮件投递幂等。
 - **更多信源**：在当前 18 个 active endpoint 基础上扩展至约 35 个。
 - Parser 漂移检测、pgvector 可选增强。均由实际指标触发，不提前引入。

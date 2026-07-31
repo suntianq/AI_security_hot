@@ -70,6 +70,16 @@ def classify_tick() -> None:
         log.exception("classify_tick failed")
 
 
+def semantic_tick() -> None:
+    """Cost-bounded semantic extraction; always shadow-only in M2.2."""
+    try:
+        from ai_security_hot.pipelines.semantic_stage import run_semantic_enrichment_stage
+
+        log.info("semantic_tick: %s", run_semantic_enrichment_stage())
+    except Exception:
+        log.exception("semantic_tick failed")
+
+
 def event_tick() -> None:
     """Versioned derived-data stages, independent from fetch and classification."""
     try:
@@ -137,6 +147,16 @@ def run_worker() -> None:
         coalesce=True,
         next_run_time=first_run,
     )
+    if settings.semantic_enrichment_enabled:
+        scheduler.add_job(
+            semantic_tick,
+            "interval",
+            seconds=settings.semantic_enrichment_interval_seconds,
+            id="semantic_enrichment",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=first_run,
+        )
     scheduler.add_job(
         event_tick,
         "interval",

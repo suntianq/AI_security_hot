@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -461,12 +462,25 @@ class ModelCache(Base):
 
 
 class ModelRun(Base):
-    """Per-document model audit row, including cache hits and fallbacks."""
+    """Generic model-task audit row, including cache hits and fallbacks."""
 
     __tablename__ = "model_runs"
+    __table_args__ = (
+        Index(
+            "ix_model_runs_subject_task_created",
+            "subject_type",
+            "subject_id",
+            "task",
+            "created_at",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
+    subject_type: Mapped[str] = mapped_column(
+        String(32), default="document", server_default="document"
+    )
+    subject_id: Mapped[int] = mapped_column(BigInteger)
     task: Mapped[str] = mapped_column(String(32))
     provider: Mapped[str] = mapped_column(String(64))
     model: Mapped[str] = mapped_column(String(128))

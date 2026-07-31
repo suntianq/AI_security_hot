@@ -11,7 +11,7 @@ from ai_security_hot.config.settings import get_settings
 from ai_security_hot.models.base import Base
 
 # import all tables so they register on Base.metadata
-from ai_security_hot.models import tables  # noqa: F401
+from ai_security_hot.models import semantic_tables, tables  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

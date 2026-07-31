@@ -1143,10 +1143,15 @@ def record_model_run(
     latency_ms: int | None = None,
     usage: dict | None = None,
     error: str | None = None,
+    subject_type: str = "document",
+    subject_id: int | None = None,
 ) -> None:
+    resolved_subject_id = subject_id if subject_id is not None else document_id
     session.add(
         ModelRun(
             document_id=document_id,
+            subject_type=subject_type,
+            subject_id=resolved_subject_id,
             task=task,
             provider=provider,
             model=model,

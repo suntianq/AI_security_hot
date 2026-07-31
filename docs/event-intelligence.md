@@ -1,6 +1,6 @@
 # M2.1 可扩展事件情报实现说明
 
-> 状态：M2.1 基础能力已实现；按日期返回热点的业务 API 尚未开始<br>
+> 状态：M2.1 基础能力已实现；M2.2 影子语义富化基础已实现；按日期返回热点的业务 API 尚未开始<br>
 > 最后更新：2026-07-31<br>
 > 算法版本：`signature-v3` / `dedupe-v2` / `cluster-v2`
 
@@ -150,7 +150,7 @@ Self-check 的 `m2_incremental` 报告 signature_due、各阶段 work_pending、
 
 ## 8. 迁移、测试与部署
 
-迁移 head 为 `9c4e7a2b1d60`。迁移创建上述索引、队列、版本、事实表和持久 token 桶计数，并从 M2.0 的 `near_dup_of/id` 回填稳定 component ID；不删除 Document、Event 或旧证据。迁移已验证：全新数据库 upgrade、downgrade 到上一版本、再次 upgrade 均成功。
+迁移 head 为 `2b6d8f4a1c90`。迁移创建上述索引、队列、版本、事实表和持久 token 桶计数，并从 M2.0 的 `near_dup_of/id` 回填稳定 component ID；不删除 Document、Event 或旧证据。迁移已验证：全新数据库 upgrade、downgrade 到上一版本、再次 upgrade 均成功。
 
 GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签名确定性、相似候选、人工批准、强冲突不可越过、新强身份、质量指标、局部退役重选主、未受影响事件不改版本、EventVersion 和 Claim 支持/反驳证据。
 
@@ -169,7 +169,8 @@ GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签�
 - 结构化 model/package/incident/campaign 强键已经可用，但召回率取决于上游 Parser/实体抽取是否提供对应 `entities`；后续应以漏合并样本驱动实体抽取扩充。
 - pgvector/embedding 未启用。评测集证明有收益后可作为候选层加入，但仍不能自动绕过强冲突。
 - 自动 Claim 目前只覆盖事件摘要和强身份；影响范围、已利用状态、修复版本等领域 Claim 需要在后续抽取/管理接口中逐项增加。
-- M2.1 本次只完成事件情报底座。按指定日期返回去重、聚类后热点的 API 是紧接着的 M2.2 工作，不在本次实现中混入。
+- M2.2 已增加默认关闭的影子语义富化、实体、原子事件和抽取 Claim 表，但尚未影响生产 Event；详见 [`semantic-enrichment.md`](semantic-enrichment.md)。
+- 按指定日期返回去重、聚类后热点的 API 仍未实现；应在原子事件输出契约和查询版本语义稳定后接入。
 
 ## 10. M2.0 历史基线快照
 

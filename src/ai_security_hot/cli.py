@@ -125,6 +125,27 @@ def classify(limit: int = 500) -> None:
     typer.echo(json.dumps(run_classify_stage(limit=limit)))
 
 
+@app.command("semantic-enrich")
+def semantic_enrich(
+    limit: int = typer.Option(5, min=1, max=100),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="run one shadow batch even when scheduled enrichment is disabled",
+    ),
+) -> None:
+    """Run a cost-bounded shadow semantic-enrichment batch."""
+    from ai_security_hot.pipelines.semantic_stage import run_semantic_enrichment_stage
+
+    _setup_logging()
+    typer.echo(
+        json.dumps(
+            run_semantic_enrichment_stage(limit=limit, force=force),
+            ensure_ascii=False,
+        )
+    )
+
+
 @app.command("evaluate-m2")
 def evaluate_m2(
     dataset: str = typer.Option(
