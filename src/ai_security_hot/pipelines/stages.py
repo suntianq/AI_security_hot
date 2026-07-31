@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from functools import wraps
 
 from ai_security_hot.config.sources import EndpointPolicy, load_registry
 from ai_security_hot.connectors.fetch import FetchContext
@@ -666,44 +667,103 @@ def run_classify_stage(limit: int | None = None) -> dict:
     return stats
 
 
-def run_dedupe_stage(*, force: bool = False) -> dict:
-    """Recompute deterministic duplicate components when the rule version is stale."""
-    from ai_security_hot.events.intelligence import DEDUPE_VERSION, deduplicate_documents
+def _audit_m2_failures(stage: str, version: str):
+    def decorator(function):
+        @wraps(function)
+        def wrapped(*args, **kwargs):
+            try:
+                return function(*args, **kwargs)
+            except Exception as exc:
+                from ai_security_hot.storage import event_repository
+
+                with session_scope() as audit_session:
+                    event_repository.record_failed_run(
+                        audit_session,
+                        stage=stage,
+                        algorithm_version=version,
+                        trigger=str(kwargs.get("trigger", "scheduler")),
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                raise
+
+        return wrapped
+
+    return decorator
+
+
+@_audit_m2_failures("dedupe", "dedupe-v2")
+def run_dedupe_stage(*, force: bool = False, trigger: str = "scheduler") -> dict:
+    """Refresh persistent candidates and recompute only affected components."""
+    from ai_security_hot.config.settings import get_settings
+    from ai_security_hot.events.intelligence import DEDUPE_VERSION
+    from ai_security_hot.events.signatures import SIGNATURE_VERSION
+    from ai_security_hot.storage import event_repository
 
     with session_scope() as session:
         if not repo.try_event_stage_lock(session, "dedupe"):
             return {"status": "locked", "version": DEDUPE_VERSION}
+        settings = get_settings()
+        if force:
+            event_repository.queue_full_replay(session, reason="force_dedupe")
+        index_stats = event_repository.backfill_signature_batch(
+            session, limit=settings.m2_signature_batch_size
+        )
+        if index_stats["remaining"]:
+            return {
+                "status": "indexing",
+                "version": DEDUPE_VERSION,
+                "signature_version": SIGNATURE_VERSION,
+                **index_stats,
+            }
         due = repo.count_dedupe_due(session)
-        if due == 0 and not force:
+        pending = event_repository.count_pending_work(session, stage="dedupe")
+        if due == 0 and pending == 0 and not force:
             return {
                 "status": "current",
                 "version": DEDUPE_VERSION,
                 "due": 0,
                 "updated": 0,
             }
-        documents = repo.load_intel_documents(session, retain_body=False)
-        decisions = deduplicate_documents(documents)
-        scanned = len(documents)
-        del documents
-        stats = repo.apply_dedup_decisions(session, decisions)
-        return {
-            "status": "ok",
-            "version": DEDUPE_VERSION,
-            "due": due,
-            "scanned": scanned,
-            **stats,
-        }
+        result = event_repository.run_local_dedupe(
+            session,
+            limit=settings.m2_dedupe_batch_size,
+            max_candidates=settings.m2_max_local_documents,
+            trigger=trigger,
+        )
+        remaining_due = max(0, repo.count_dedupe_due(session))
+        pending = event_repository.count_pending_work(session, stage="dedupe")
+        result["remaining_due"] = remaining_due
+        result["pending_work"] = pending
+        result["remaining"] = remaining_due + pending
+        return result
 
 
-def run_cluster_stage(*, force: bool = False) -> dict:
-    """Materialize explainable events and evidence links from deduped documents."""
+@_audit_m2_failures("cluster", "cluster-v2")
+def run_cluster_stage(*, force: bool = False, trigger: str = "scheduler") -> dict:
+    """Rebuild only events reachable from changed duplicate components."""
+    from sqlalchemy import update
+
+    from ai_security_hot.config.settings import get_settings
     from ai_security_hot.events.intelligence import CLUSTER_VERSION
+    from ai_security_hot.models.tables import Document
+    from ai_security_hot.storage import event_repository
 
     with session_scope() as session:
         if not repo.try_event_stage_lock(session, "cluster"):
             return {"status": "locked", "version": CLUSTER_VERSION}
+        settings = get_settings()
+        if force:
+            session.execute(
+                update(Document)
+                .where(
+                    *repo.current_document_conditions(),
+                    Document.dedupe_version == "dedupe-v2",
+                )
+                .values(cluster_version=None)
+            )
         due = repo.count_cluster_due(session)
-        if due == 0 and not force:
+        pending = event_repository.count_pending_work(session, stage="cluster")
+        if due == 0 and pending == 0 and not force:
             return {
                 "status": "current",
                 "version": CLUSTER_VERSION,
@@ -711,10 +771,15 @@ def run_cluster_stage(*, force: bool = False) -> dict:
                 "events_created": 0,
                 "events_updated": 0,
             }
-        stats = repo.rebuild_events_streaming(session)
-        return {
-            "status": "ok",
-            "version": CLUSTER_VERSION,
-            "due": due,
-            **stats,
-        }
+        result = event_repository.run_local_cluster(
+            session,
+            limit=settings.m2_cluster_batch_size,
+            max_documents=settings.m2_max_local_documents,
+            trigger=trigger,
+        )
+        remaining_due = max(0, repo.count_cluster_due(session))
+        pending = event_repository.count_pending_work(session, stage="cluster")
+        result["remaining_due"] = remaining_due
+        result["pending_work"] = pending
+        result["remaining"] = remaining_due + pending
+        return result

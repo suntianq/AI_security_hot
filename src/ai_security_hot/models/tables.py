@@ -14,6 +14,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -215,6 +216,137 @@ class Document(Base):
     deduped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cluster_version: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     clustered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dedupe_component_id: Mapped[int | None] = mapped_column(
+        ForeignKey("duplicate_components.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+
+class DuplicateComponent(Base):
+    """Stable identity for a duplicate component even when its master changes."""
+
+    __tablename__ = "duplicate_components"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    master_document_id: Mapped[int | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    algorithm_version: Mapped[str] = mapped_column(String(32), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DocumentSignature(Base):
+    __tablename__ = "document_signatures"
+
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True
+    )
+    signature_version: Mapped[str] = mapped_column(String(32), index=True)
+    url_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    title_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    simhash: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    minhash: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", index=True)
+    indexed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DocumentIdentity(Base):
+    __tablename__ = "document_identities"
+    __table_args__ = (
+        UniqueConstraint("document_id", "kind", "fingerprint", name="uq_document_identity"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32))
+    value: Mapped[str] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(String(256))
+    event_key: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DocumentBlockToken(Base):
+    __tablename__ = "document_block_tokens"
+
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True
+    )
+    token: Mapped[str] = mapped_column(String(96), primary_key=True, index=True)
+
+
+class DocumentBlockTokenStat(Base):
+    __tablename__ = "document_block_token_stats"
+
+    token: Mapped[str] = mapped_column(String(96), primary_key=True)
+    active_document_count: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class M2Run(Base):
+    __tablename__ = "m2_runs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    stage: Mapped[str] = mapped_column(String(16), index=True)
+    mode: Mapped[str] = mapped_column(String(16))
+    algorithm_version: Mapped[str] = mapped_column(String(32))
+    trigger: Mapped[str] = mapped_column(String(32), default="scheduler")
+    status: Mapped[str] = mapped_column(String(16), default="running", index=True)
+    input_count: Mapped[int] = mapped_column(Integer, default=0)
+    candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    affected_count: Mapped[int] = mapped_column(Integer, default=0)
+    stats: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class M2WorkItem(Base):
+    __tablename__ = "m2_work_items"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    document_id: Mapped[int | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    component_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    stage: Mapped[str] = mapped_column(String(16), index=True)
+    reason: Mapped[str] = mapped_column(String(64))
+    algorithm_version: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("m2_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class CandidateReview(Base):
+    __tablename__ = "candidate_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "left_document_id",
+            "right_document_id",
+            "algorithm_version",
+            name="uq_candidate_review_pair_version",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    left_document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
+    right_document_id: Mapped[int] = mapped_column(ForeignKey("documents.id"), index=True)
+    candidate_kind: Mapped[str] = mapped_column(String(32))
+    score: Mapped[float] = mapped_column(Float)
+    features: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    conflict_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    algorithm_version: Mapped[str] = mapped_column(String(32), index=True)
+    reviewer: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Event(Base):
@@ -249,6 +381,55 @@ class EventDocument(Base):
     stance: Mapped[str] = mapped_column(String(16), default="support")
     evidence_level: Mapped[str | None] = mapped_column(String(1), nullable=True)
     relation_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class EventVersion(Base):
+    """Immutable event snapshot emitted for every material state change."""
+
+    __tablename__ = "event_versions"
+    __table_args__ = (UniqueConstraint("event_id", "version", name="uq_event_version"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    change_type: Mapped[str] = mapped_column(String(32))
+    algorithm_version: Mapped[str] = mapped_column(String(32))
+    snapshot: Mapped[dict] = mapped_column(JSONB)
+    diff: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Claim(Base):
+    __tablename__ = "claims"
+    __table_args__ = (UniqueConstraint("event_id", "claim_key", name="uq_event_claim"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    claim_key: Mapped[str] = mapped_column(String(160))
+    claim_type: Mapped[str] = mapped_column(String(32), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    normalized_value: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    status: Mapped[str] = mapped_column(String(16), default="unverified", index=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ClaimEvidence(Base):
+    __tablename__ = "claim_evidence"
+    __table_args__ = (
+        UniqueConstraint("claim_id", "document_id", "stance", name="uq_claim_document_stance"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    claim_id: Mapped[int] = mapped_column(ForeignKey("claims.id", ondelete="CASCADE"), index=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    stance: Mapped[str] = mapped_column(String(16), default="support")
+    evidence_level: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    excerpt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ModelCache(Base):

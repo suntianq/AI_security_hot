@@ -17,7 +17,20 @@ from ai_security_hot.domain.enums import PipelineStage
 from ai_security_hot.events.intelligence import CLUSTER_VERSION, DEDUPE_VERSION
 from ai_security_hot.llm.registry import provider_names
 from ai_security_hot.models.base import session_scope
-from ai_security_hot.models.tables import Document, Event, ModelRun, RawItem, SourceEndpoint
+from ai_security_hot.models.tables import (
+    CandidateReview,
+    Claim,
+    Document,
+    DocumentBlockTokenStat,
+    Event,
+    EventVersion,
+    M2Run,
+    M2WorkItem,
+    ModelRun,
+    RawItem,
+    SourceEndpoint,
+)
+from ai_security_hot.storage import event_repository
 from ai_security_hot.storage import repositories as repo
 
 log = logging.getLogger("intel.self_check")
@@ -31,6 +44,7 @@ def run_self_check() -> dict:
         "stuck_items": 0,
         "failed_items": 0,
         "event_pipeline": {},
+        "m2_incremental": {},
         "classification": {},
         "data_quality": {},
     }
@@ -79,6 +93,37 @@ def run_self_check() -> dict:
             "dedupe_due": int(dedupe_due),
             "cluster_due": int(cluster_due),
             "events": int(events),
+        }
+        work_rows = session.execute(
+            select(M2WorkItem.stage, func.count())
+            .where(M2WorkItem.status == "pending")
+            .group_by(M2WorkItem.stage)
+        ).all()
+        pending_reviews = session.execute(
+            select(func.count())
+            .select_from(CandidateReview)
+            .where(CandidateReview.status == "pending")
+        ).scalar_one()
+        event_versions = session.execute(
+            select(func.count()).select_from(EventVersion)
+        ).scalar_one()
+        claims = session.execute(select(func.count()).select_from(Claim)).scalar_one()
+        block_token_buckets = session.execute(
+            select(func.count()).select_from(DocumentBlockTokenStat)
+        ).scalar_one()
+        failed_m2_runs = session.execute(
+            select(func.count())
+            .select_from(M2Run)
+            .where(M2Run.status == "failed", M2Run.started_at >= now - timedelta(days=1))
+        ).scalar_one()
+        report["m2_incremental"] = {
+            "signature_due": event_repository.count_signature_due(session),
+            "work_pending": {str(stage): int(count) for stage, count in work_rows},
+            "reviews_pending": int(pending_reviews),
+            "event_versions": int(event_versions),
+            "claims": int(claims),
+            "block_token_buckets": int(block_token_buckets),
+            "failed_runs_24h": int(failed_m2_runs),
         }
         record_status_rows = session.execute(
             select(Document.record_status, func.count()).group_by(Document.record_status)
@@ -135,6 +180,7 @@ def run_self_check() -> dict:
         or report["stuck_items"]
         or report["failed_items"]
         or report["classification"]["config_errors"]
+        or report["m2_incremental"]["failed_runs_24h"]
     ):
         log.warning("self_check found issues: %s", report)
     else:

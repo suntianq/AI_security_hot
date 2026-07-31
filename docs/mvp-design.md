@@ -1,8 +1,8 @@
 # AI × Security 情报后端 MVP 设计方案
 
 > 版本：v0.3
-> 状态：实施基线（M0 + M1 + M2.0 确定性事件情报 已完成）<br>
-> 最后更新：2026-07-30
+> 状态：实施基线（M0 + M1 + M2.1 可扩展事件情报底座 已完成）<br>
+> 最后更新：2026-07-31
 > 相关文档：[完整目标蓝图](./system-design.md) · [信源注册表](./source-registry.md) · [M1 增量与分类](./m1-data-pipeline.md) · [M2 事件情报](./event-intelligence.md)
 
 ## 1. 已确认的产品与技术决策
@@ -424,8 +424,12 @@ actionability   0-10
 | `fetch_runs` | 开始结束时间、状态、数量、错误、租约 |
 | `raw_items` | 原始证据、哈希、请求元数据、版本 |
 | `documents` | 标准化正文、标题、时间、标识符、本地 source_status、上游 record_status、分类，以及 M2 去重主记录/原因/分数/算法版本 |
+| `document_signatures / document_identities / document_block_tokens / document_block_token_stats` | URL/title/content hash、强身份、SimHash/MinHash 候选索引及可增量维护的桶计数 |
+| `duplicate_components / m2_work_items / m2_runs` | 稳定组件、局部失效待办、算法版本与 replay 审计 |
 | `events` | 稳定 fingerprint、类型、主线、确定性摘要、证据等级、评分、观测时间、聚类版本和当前版本 |
 | `event_documents` | 事件与文档关系、支持/反对、来源等级、关联原因 |
+| `event_versions / claims / claim_evidence` | 不可变事件快照、确认/争议事实、支持/反驳证据 |
+| `candidate_reviews` | 低置信候选、强冲突留痕、人工裁决和算法版本 |
 | `digests` | 日期、状态、生成版本和目标 Profile |
 | `digest_items` | 排序、栏目、事件、摘要版本 |
 | `delivery_runs` | 渠道、目标、幂等键、状态、错误和时间 |
@@ -457,7 +461,7 @@ GET /v1/alerts
 GET /v1/sources/health
 ```
 
-M2.0 当前代码先提供同语义的 `GET /events`、`GET /events/{event_id}` 和 `/stats`；统一 `/v1` 前缀在认证与公开 API 定稿时补齐。
+M2.1 当前代码提供同语义的 `GET /events`、`GET /events/{event_id}` 和 `/stats`；按指定日期返回完整热点的接口和统一 `/v1` 前缀在 M2.2 API 契约中补齐。
 
 查询条件至少支持：
 
@@ -724,7 +728,7 @@ docker compose up
 - Worker 中断后重新启动。
 - SSRF、重定向、超大响应和恶意 HTML。
 
-当前离线套件有 56 个用例，覆盖 AI HOT snapshot/changes/remove/409、CISA 权威快照撤回、NVD 参数、HTTP 重试、M1.3 Schema/白名单/CVE bypass，以及 M2 的冲突保护、近重复、强键、多来源证据和关系膨胀保护；投递仍属于后续里程碑。
+当前测试共 68 项，其中 67 项非 live，覆盖 AI HOT snapshot/changes/remove/409、CISA 权威快照撤回、NVD 参数、HTTP 重试、M1.3 Schema/白名单/CVE bypass，以及 M2.1 的持久化签名、高频候选桶保护、强冲突、人工批准、reviewed 评测范围、局部退役重选主、EventVersion 和争议 Claim 证据；投递仍属于后续里程碑。
 
 ### 16.2 最小指标
 
@@ -793,16 +797,18 @@ MVP 使用结构化日志、`/health`、`/stats` 和 self-check；self-check 已
 
 完整实现与非保证边界见 [M1 增量与分类](./m1-data-pipeline.md)。
 
-### M2：事件情报 ✅（M2.0 确定性基线）
+### M2：事件情报 ✅（M2.1 可扩展底座）
 
 - 非破坏式硬去重和 RapidFuzz 近重复，记录主文档、关系原因、相似分和算法版本。
-- CVE/GHSA/CNVD/arXiv 稳定强键；无强键内容按重复组件生成 fallback event。
-- 不同漏洞强标识冲突保护、共享目录 URL 保护和异常组件关系膨胀保护。
-- EventDocument 保存来源等级与关联原因；事件保存证据等级、确定性摘要、时间范围、规则分和版本。
-- 去重/聚类独立增量版本、PostgreSQL advisory lock、正文/分类变化下游失效和幂等重放。
+- 持久化 URL/title/content hash、强身份、SimHash/MinHash blocking 和稳定重复组件。
+- CVE/GHSA/CNVD/arXiv、GitHub release、模型/包发布、事故和 campaign 强键；无强键内容生成 fallback event。
+- lifecycle/classification 变化写 durable work；去重只重算 seed、一跳候选及其完整旧组件，事件聚类只闭合受影响的强身份证据图；显式 replay 才遍历全库。
+- 不同强身份硬冲突不可被语义或人工批准越过；低置信候选进入可裁决复核队列。
+- EventVersion 保存完整事件/证据/Claim 快照和 diff；ClaimEvidence 支持 support/contradict/context。
+- JSONL 评测器和 `M2Run` 审计已接通；PostgreSQL advisory lock 保证阶段单写。
 - Worker、`intel eventize`、`/events` 列表/详情、`/stats` 和 self-check 已接通。
 
-完成标准已达到：API 能获得带完整证据链的事件列表。M2.1 再增加实体强键、标注集驱动的语义候选、完整 EventVersion/Claim 模型和人工复核；更多信源接入保持为独立持续任务。详见 [M2 事件情报实现说明](./event-intelligence.md)。
+M2.1 基础完成标准已达到。下一步 M2.2 实现按日期返回去重、聚类后热点的 API；真实双人金标集、领域 Claim 抽取和可选 embedding 继续按评测数据推进。详见 [M2 事件情报实现说明](./event-intelligence.md)。
 
 ### M3：日报与推送
 

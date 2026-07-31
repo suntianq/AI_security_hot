@@ -61,9 +61,18 @@ class Settings(BaseSettings):
         default=1000,
         ge=0,
         description=(
-            "Defer scheduled global event rebuilds while M1 processing backlog "
+            "Defer scheduled event updates while M1 processing backlog "
             "exceeds this count; 0 disables the guard"
         ),
+    )
+    m2_signature_batch_size: int = Field(default=5000, ge=100, le=20000)
+    m2_dedupe_batch_size: int = Field(default=1000, ge=1, le=5000)
+    m2_cluster_batch_size: int = Field(default=1000, ge=1, le=5000)
+    m2_max_local_documents: int = Field(
+        default=20000,
+        ge=1000,
+        le=100000,
+        description="Safety bound for one local candidate/component closure",
     )
     classification_batch_size: int = Field(
         default=25, ge=1, le=500, description="Cost-bounded hybrid model batch"

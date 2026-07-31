@@ -1,11 +1,11 @@
 # AI × Security 情报系统整体框架设计
 
 > 状态：完整目标蓝图 / 后续演进参考  
-> 最后更新：2026-07-30
+> 最后更新：2026-07-31
 > 定位：完整目标蓝图；不是第一版的全部实施范围  
 > 当前实施基线：[后端 MVP 设计方案](./mvp-design.md)  
 > 配套文档：[信源注册表](./source-registry.md) · [M1 增量与分类](./m1-data-pipeline.md) · [M2 事件情报](./event-intelligence.md)
-> 当前已完成：M0 骨架 + M1.1/M1.2.x/M1.3 + M2.0 确定性事件情报（19 个 endpoint 配置：18 active + 1 retired；17 source，8 类 Connector）
+> 当前已完成：M0 骨架 + M1.1/M1.2.x/M1.3 + M2.1 可扩展事件情报底座（19 个 endpoint 配置：18 active + 1 retired；17 source，8 类 Connector）
 
 第一版实现以《后端 MVP 设计方案》为准。本文保留网站、Agent、完整证据模型、团队版和长期扩展设计，用于约束后续演进方向。
 
@@ -296,7 +296,7 @@ rate_limit:
 
 模型只提出“合并建议”；当事件类型、版本或时间明显冲突时由规则拒绝。高风险事件的错误合并和错误拆分都进入人工复核队列。
 
-当前 M2.0 已实现其中的保守确定性子集：URL/标题/正文硬去重、RapidFuzz 高阈值近重复、CVE/GHSA/CNVD/arXiv 强键、fallback event、证据等级和规则分。SimHash/向量/LLM 候选、模型+版本强键与人工复核队列属于 M2.1，详见 [M2 事件情报](./event-intelligence.md)。
+当前 M2.1 已实现持久化 URL/标题/正文 hash、RapidFuzz 自动规则、SimHash/MinHash 候选、稳定重复组件、局部候选/事件图重算，以及 CVE/GHSA/CNVD/arXiv/GitHub release/模型或包发布/事故/campaign 强键。低置信候选可人工裁决，强身份冲突不能被相似度或人工批准越过；EventVersion、Claim 和支持/反驳 Evidence 已落库。Embedding/pgvector 仍需真实金标集证明收益后再启用，详见 [M2 事件情报](./event-intelligence.md)。
 
 ### 6.3 事件更新而非重复发布
 

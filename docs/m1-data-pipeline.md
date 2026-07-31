@@ -182,7 +182,7 @@ Worker 将各个速度域拆成互相独立的 APScheduler job：
 | event | 60 秒 | dedupe → cluster |
 | self-check | 600 秒 | 健康、积压与双轴生命周期分布 |
 
-每个 job `max_instances=1`，但不同 job 可以并行。NVD 公共 API 的长分页不会再饿死 normalize/fulltext；慢 LLM、模型超时或事件全局重算也不会阻塞采集。`ingest_tick()` 仅作为手工兼容入口，顺序调用前三个阶段，不再作为常驻 Worker 的调度单元。Normalize 对一批记录使用外层事务并以 savepoint 隔离坏记录；默认规则分类也按批提交，避免大批回填时逐条事务的开销。
+每个 job `max_instances=1`，但不同 job 可以并行。NVD 公共 API 的长分页不会再饿死 normalize/fulltext；慢 LLM、模型超时或 M2 局部更新/显式 replay 也不会阻塞采集。`ingest_tick()` 仅作为手工兼容入口，顺序调用前三个阶段，不再作为常驻 Worker 的调度单元。Normalize 对一批记录使用外层事务并以 savepoint 隔离坏记录；默认规则分类也按批提交，避免大批回填时逐条事务的开销。
 
 定时 `event` 在 M1 待 normalize/fulltext/classify 的总积压超过
 `INTEL_EVENT_BACKLOG_THRESHOLD`（默认 1000）时主动延后，避免 NVD 大批回填期间

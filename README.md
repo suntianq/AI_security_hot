@@ -3,7 +3,7 @@
 把 AI/安全情报的采集能力融为一个稳定、可扩展的后端。基于 `docs/` 设计文档
 （[MVP 设计](docs/mvp-design.md) · [整体蓝图](docs/system-design.md) ·
 [信源注册表](docs/source-registry.md) · [M1 增量与分类](docs/m1-data-pipeline.md) · [M2 事件情报](docs/event-intelligence.md)）实现的
-**M0 工程骨架 + M1 结构化采集 + M2.0 事件情报基线**。
+**M0 工程骨架 + M1 结构化采集 + M2.1 可扩展事件情报底座**。
 
 ## 已实现
 
@@ -31,14 +31,17 @@
 
 完整契约、环境变量和边界见 [M1 增量采集与混合分类](docs/m1-data-pipeline.md)。
 
-### M2.0 事件情报基线
+### M2.1 可扩展事件情报
 
 - **非破坏式去重**：保留每份原始文档，只写入 `near_dup_of / duplicate_kind / duplicate_score`；同 URL、同标题、同正文和近似标题均可解释。
 - **强标识冲突保护**：不同 CVE/GHSA/CNVD 不因共享目录 URL或相似标题被误合并；异常大组件有关系数量熔断保护。
-- **稳定事件指纹**：优先使用 `CVE / GHSA / CNVD / arXiv` 强键；无强键时按重复组件主文档生成 fallback event。
+- **稳定组件与事件身份**：持久化 `DuplicateComponent`；事件强键覆盖 `CVE / GHSA / CNVD / arXiv / GitHub release / 模型或包版本 / 事故 / campaign`，无强键时生成 fallback event。
 - **证据与评分**：`EventDocument` 保留来源等级和关联原因；规则分由来源可信度、强标识、独立来源数和解析质量组成。
-- **版本化增量触发**：无过期版本时零扫描；有新增或下游失效时做全局一致性重算，但只写入变化记录。正文、分类或重复主记录变化会自动触发事件重算。
-- **可控全量重放**：dedupe 只保留正文指纹/长度并分批更新；cluster 以事务级临时表承接成员关系、按指纹流式聚合和分批 upsert，36 万文档回填时 Python 峰值约 116 MiB（cluster）。
+- **真正局部增量**：URL/title/content hash、强身份和 SimHash/MinHash blocking 持久化；正文、分类、撤回、退役只写 durable work queue，去重仅重算 seed、一跳候选及其完整旧组件，事件聚类再沿强事件身份局部闭合。
+- **候选安全边界**：SimHash/MinHash 只生成候选；不同漏洞、发布版本、事故等强身份冲突硬阻断。低置信 pair 进入人工复核队列，裁决触发局部重算，但批准也不能越过硬冲突。
+- **事件事实与时间线**：物化 `EventVersion / Claim / ClaimEvidence`；版本快照记录事件、证据、事实及 diff，Claim 可表达 confirmed/disputed 状态和 support/contradict/context 证据。
+- **质量评测与审计**：JSONL 评测器输出 dedupe/cluster precision、recall、错误合并率、Top-N 相关率和一手来源覆盖率；`M2Run` 记录增量/replay 的版本、候选量、影响量和错误。
+- **可控全量重放**：正常路径不再全局重算；算法升级或灾难恢复时显式 `replay-m2`，仍按有界局部批次遍历全库。
 - **事件 API**：`GET /events` 支持主题、类型、证据等级和最低分过滤；`GET /events/{id}` 返回完整证据链。
 
 算法、运维命令、评分公式和当前边界详见 [M2 事件情报](docs/event-intelligence.md)。
@@ -109,6 +112,12 @@ uv run intel retry-failed --endpoint <endpoint-id> --limit 500  # 修复 parser 
 uv run intel eventize    # 只跑 M2：dedupe + cluster
 uv run intel dedupe      # 单独重算去重（--force 可强制）
 uv run intel cluster     # 单独重算事件（--force 可强制）
+uv run intel m2-index --all                            # 回填 v3 持久化候选索引
+uv run intel m2-token-stats                            # 修复/核对 blocking token 桶计数
+uv run intel replay-m2 --max-batches 10000             # 显式完整算法重放
+uv run intel replay-m2 --resume --max-batches 10000    # 失败修复后从已有积压续跑，不重置已完成批次
+uv run intel evaluate-m2 --dataset evaluation/m2_quality_seed.jsonl
+uv run intel m2-reviews --status pending --limit 50    # 查看低置信候选
 uv run intel stats       # 文档、近重复、事件和证据数量
 uv run intel serve       # 起 API（:8000）
 uv run intel worker      # 起后台常驻调度
@@ -147,12 +156,12 @@ curl localhost:8000/sources
 ## 测试
 
 ```bash
-uv run pytest -q                                      # 全部离线单元/冒烟/M2 测试
+uv run pytest -m "not live" -q                       # 离线 + PostgreSQL 集成测试
 INTEL_RUN_LIVE=1 uv run pytest -m live                  # 真实爬取端到端
 uv run ruff check . && uv run pyright                   # 质量门禁
 ```
 
-当前离线套件覆盖 56 个用例，包括不同 CVE 冲突保护、共享目录 URL、近重复、强键事件、多来源证据和关系膨胀保护；`live` 测试默认跳过，只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
+当前测试共 68 项，其中 67 项非 live；覆盖 M1 增量语义、不同强身份冲突、持久化签名、高频候选桶保护、SimHash/MinHash 候选、人工批准、reviewed 评测范围、局部退役重选主、EventVersion 和 Claim 支持/反驳证据。数据库集成测试需要已迁移的 `INTEL_DATABASE_URL`；`live` 只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
 
 ## 部署（Docker Compose）
 
@@ -168,7 +177,7 @@ curl localhost:8000/health        # {"status":"ok"}
 - `worker` 随后 `intel sync` 载入 `sources.yaml`，并按调度持续抓取。
 - 数据持久化在 `pgdata` 卷，网页快照存 `blobdata` 卷。
 
-已有数据库升级到本版本时必须应用到 `d7c4b8e1a950_document_visibility_and_retirement`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。迁移增加双轴生命周期、endpoint 替代关系、索引和约束；AI HOT RSS 历史记录被标记为 retired，NVD Rejected/Withdrawn 被标记为非当前证据，均不删除文档。Worker 会自动重建受影响的 M2 派生数据。
+已有数据库升级到本版本时必须应用到 head `9c4e7a2b1d60`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。M2.1 迁移回填稳定组件 ID，并新增签名/身份/token 及 token 桶计数索引、局部 work/run、人工复核、EventVersion、Claim 和 ClaimEvidence 表；M2.0 遗留事件会保存 `baseline_import` 快照并明确更早历史不可还原，不删除文档或旧事件。大库首次升级后应执行 `m2-index --all` 和 `replay-m2`，并观察 self-check 直至 v2 积压归零。
 
 > 当前 API 未实现认证，且包含 `/ops/tick` 运维写操作。部署时应只绑定可信内网或在前置网关完成认证与访问控制。
 
@@ -229,20 +238,22 @@ src/ai_security_hot/
   connectors/   FetchContext + SSRF + 8 类连接器（RSS/REST/NVD/AI HOT/GitHub/Web/arXiv/Sitemap）
   parsers/      各源 Parser（rss/cisa_kev/nvd/github_releases/web_article/arxiv/sitemap_article）+ normalize
   classify/     RuleClassifier + HybridClassifier + 严格 Schema + taxonomy.yaml
-  events/       M2 去重、强键事件聚类、证据等级和规则评分
-  storage/      BlobStore + repositories（租约/幂等/阶段推进/事件 upsert/导出）
+  events/       M2 去重/事件规则、持久化签名、质量评测和候选判断
+  storage/      BlobStore + repositories（租约/幂等/局部组件与事件重算/版本事实/导出）
   pipelines/    fetch/normalize/fulltext/classify/dedupe/cluster stages
   jobs/         独立 fetch/normalize/fulltext/classify/event 调度 + self_check
   api/          FastAPI 只读/运维接口
   cli.py        intel CLI（采集、分类、eventize、查询、导出与运维）
 sources/        sources.yaml（19 个配置项：18 active + 1 retired）+ taxonomy.yaml
-migrations/     Alembic（initial + classification + 内容版本 + M2 + M1 双轴 lifecycle/endpoint retirement/LLM audit）
-tests/          unit / smoke / event intelligence（离线）+ integration（真实爬取）
+migrations/     Alembic（initial + M1 lifecycle/classification + M2.0/M2.1）
+evaluation/     M2 人工标注种子 JSONL、标注约定与离线质量指标
+tests/          unit / smoke / event intelligence + PostgreSQL integration + opt-in live crawl
 ```
 
-## 后续（M2.1+）
+## 后续（M2.2+）
 
-- **事件聚类增强**：加入模型+版本、公司+事故等实体强键；以离线标注集评估 SimHash/语义候选，不在缺少指标时扩大自动合并范围。
+- **日期事件 API**：按指定自然日返回经过局部增量、去重和聚类后的热点事件，补齐分页、时区、as-of/version 和证据展开契约。
+- **评测集扩充**：对真实误合并/漏合并进行双人标注和裁决，再决定是否引入 embedding/pgvector；当前 SimHash/MinHash 仅用于候选召回。
 - **LLM 事件增强**：M1.3 分类已完成；后续增加中文事件摘要、影响分析和不确定性表达，不覆盖权威字段。
 - **日报与投递**：日报冻结/生成/版本化 + 飞书/邮件投递幂等。
 - **更多信源**：在当前 18 个 active endpoint 基础上扩展至约 35 个。

@@ -67,6 +67,7 @@ reportMissingImports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
+    "db: tests that require the configured PostgreSQL database",
     "live: tests that make real network requests to configured sources",
 ]
 

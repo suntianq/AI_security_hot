@@ -45,8 +45,8 @@ jobs:
       - name: Migrate
         run: uv run alembic upgrade head
 
-      - name: Unit + smoke tests (offline)
-        run: uv run pytest tests/test_unit.py tests/test_smoke.py -v
+      - name: Offline + database integration tests
+        run: uv run pytest -m "not live" -v
 
       # Live crawl is opt-in; runs on the CI DB but hits real sources.
       - name: Live crawl e2e (real data)

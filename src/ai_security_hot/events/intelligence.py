@@ -10,18 +10,19 @@ import hashlib
 import re
 import unicodedata
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from rapidfuzz import fuzz
 
-DEDUPE_VERSION = "dedupe-v1"
-CLUSTER_VERSION = "cluster-v1"
+DEDUPE_VERSION = "dedupe-v2"
+CLUSTER_VERSION = "cluster-v2"
 FUZZY_TITLE_THRESHOLD = 94.0
 
 _ARXIV_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([0-9]{4}\.[0-9]{4,5})(?:v[0-9]+)?", re.I)
+_GITHUB_RELEASE_RE = re.compile(r"github\.com/([^/]+)/([^/]+?)/releases/tag/([^/?#]+)", re.I)
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9+.#_-]{2,}")
 _SPACE_RE = re.compile(r"\s+")
@@ -52,6 +53,8 @@ class IntelDocument:
     # and discard the text instead of retaining the entire corpus in memory.
     content_digest: str | None = None
     content_length: int | None = None
+    entities: dict[str, Any] = field(default_factory=dict)
+    company_models: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,9 +181,39 @@ def _identifier_set(doc: IntelDocument) -> set[str]:
 
 
 def _identifiers_conflict(left: IntelDocument, right: IntelDocument) -> bool:
+    """Hard-block incompatible strong identities before any fuzzy rule.
+
+    CVE/GHSA/CNVD retain their original cross-kind conflict behaviour. New
+    M2.1 identities are compared within their own kind, so two different
+    GitHub releases or explicitly structured incidents cannot be merged by a
+    similar headline.
+    """
     left_ids = _identifier_set(left)
     right_ids = _identifier_set(right)
-    return bool(left_ids and right_ids and left_ids.isdisjoint(right_ids))
+    if left_ids and right_ids and left_ids.isdisjoint(right_ids):
+        return True
+    exclusive_kinds = {
+        "arxiv",
+        "github_release",
+        "model_release",
+        "package_release",
+        "incident",
+        "campaign",
+    }
+    left_by_kind: dict[str, set[str]] = defaultdict(set)
+    right_by_kind: dict[str, set[str]] = defaultdict(set)
+    for key in strong_event_keys(left):
+        if key.kind in exclusive_kinds:
+            left_by_kind[key.kind].add(key.fingerprint)
+    for key in strong_event_keys(right):
+        if key.kind in exclusive_kinds:
+            right_by_kind[key.kind].add(key.fingerprint)
+    return any(
+        left_by_kind[kind]
+        and right_by_kind[kind]
+        and left_by_kind[kind].isdisjoint(right_by_kind[kind])
+        for kind in left_by_kind.keys() & right_by_kind.keys()
+    )
 
 
 def _dates_compatible(
@@ -214,6 +247,7 @@ def deduplicate_documents(
     documents: list[IntelDocument],
     *,
     fuzzy_threshold: float = FUZZY_TITLE_THRESHOLD,
+    approved_pairs: set[tuple[int, int]] | None = None,
 ) -> dict[int, DedupDecision]:
     """Build non-destructive duplicate components and select one master each."""
     if not documents:
@@ -317,6 +351,17 @@ def deduplicate_documents(
         if score >= fuzzy_threshold and ratio >= 88:
             union_find.union(left_id, right_id)
 
+    approved_documents: set[int] = set()
+    for left_id, right_id in sorted(approved_pairs or set()):
+        if left_id not in docs or right_id not in docs:
+            continue
+        # Human review can approve a conservative semantic candidate, but it
+        # cannot override incompatible strong identities.
+        if _identifiers_conflict(docs[left_id], docs[right_id]):
+            continue
+        union_find.union(left_id, right_id)
+        approved_documents.update((left_id, right_id))
+
     component_masters: dict[int, IntelDocument] = {}
     for doc in documents:
         root = union_find.find(doc.id)
@@ -338,6 +383,9 @@ def deduplicate_documents(
             master
         ):
             kind, score = "exact_content", 1.0
+        elif doc.id in approved_documents:
+            kind = "review_approved"
+            score = title_similarity(doc.title, master.title) / 100
         else:
             kind = "near_title"
             score = title_similarity(doc.title, master.title) / 100
@@ -345,8 +393,48 @@ def deduplicate_documents(
     return decisions
 
 
+def _identity_part(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold().strip()
+    return re.sub(r"[^a-z0-9._+-]+", "-", normalized).strip("-")
+
+
+def _bounded_event_key(kind: str, *parts: Any) -> EventKey | None:
+    values = [_identity_part(part) for part in parts]
+    if not values or any(not value for value in values):
+        return None
+    fingerprint = f"{kind}:{'@'.join(values)}"
+    if len(fingerprint) > 160:
+        digest = hashlib.sha256(fingerprint.encode()).hexdigest()
+        fingerprint = f"{kind}:sha256:{digest}"
+    return EventKey(fingerprint, kind)
+
+
+def _structured_pairs(
+    entities: dict[str, Any], key: str, left_name: str, right_name: str
+) -> list[tuple[str, str]]:
+    raw = entities.get(key, [])
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    pairs: list[tuple[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        left = str(item.get(left_name) or "").strip()
+        right = str(item.get(right_name) or "").strip()
+        if left and right:
+            pairs.append((left, right))
+    return pairs
+
+
 def strong_event_keys(doc: IntelDocument) -> tuple[EventKey, ...]:
-    """Extract ordered, stable event keys; CWE is taxonomy, not event identity."""
+    """Extract conservative stable event keys; entity-only links stay separate.
+
+    Model/package identities are event keys only for release-classified
+    documents. Merely mentioning GPT-4 or a package version must not collapse
+    unrelated research, vulnerabilities and incidents into one event.
+    """
     keys: list[EventKey] = []
     for kind in ("cve", "ghsa", "cnvd"):
         for value in sorted(_identifier_values(doc, kind)):
@@ -354,7 +442,46 @@ def strong_event_keys(doc: IntelDocument) -> tuple[EventKey, ...]:
     match = _ARXIV_RE.search(doc.canonical_url)
     if match:
         keys.append(EventKey(f"arxiv:{match.group(1)}", "arxiv"))
-    return tuple(keys)
+    release = _GITHUB_RELEASE_RE.search(doc.canonical_url)
+    if release:
+        key = _bounded_event_key(
+            "github_release", release.group(1), release.group(2), release.group(3)
+        )
+        if key:
+            keys.append(key)
+    entities = doc.entities or {}
+    if doc.event_type == "release":
+        for model, version in _structured_pairs(entities, "model_versions", "model", "version"):
+            key = _bounded_event_key("model_release", model, version)
+            if key:
+                keys.append(key)
+        for package, version in _structured_pairs(entities, "packages", "name", "version"):
+            key = _bounded_event_key("package_release", package, version)
+            if key:
+                keys.append(key)
+    for company, incident in _structured_pairs(entities, "incidents", "company", "incident"):
+        product = ""
+        raw_incidents = entities.get("incidents", [])
+        rows = [raw_incidents] if isinstance(raw_incidents, dict) else raw_incidents
+        if isinstance(rows, list):
+            product = next(
+                (
+                    str(row.get("product") or "")
+                    for row in rows
+                    if isinstance(row, dict)
+                    and str(row.get("company") or "") == company
+                    and str(row.get("incident") or "") == incident
+                ),
+                "",
+            )
+        key = _bounded_event_key("incident", company, product or "unknown-product", incident)
+        if key:
+            keys.append(key)
+    for actor, campaign in _structured_pairs(entities, "campaigns", "actor", "campaign"):
+        key = _bounded_event_key("campaign", actor, campaign)
+        if key:
+            keys.append(key)
+    return tuple(dict.fromkeys(keys))
 
 
 def _primary_topic(documents: list[IntelDocument], kind: str) -> str | None:
@@ -375,6 +502,10 @@ def _event_type(documents: list[IntelDocument], kind: str) -> str | None:
         return "vulnerability"
     if kind == "arxiv":
         return "research"
+    if kind in {"github_release", "model_release", "package_release"}:
+        return "release"
+    if kind in {"incident", "campaign"}:
+        return "incident"
     counts = Counter(doc.event_type for doc in documents if doc.event_type)
     return counts.most_common(1)[0][0] if counts else None
 
@@ -392,7 +523,15 @@ def _event_score(documents: list[IntelDocument], *, kind: str, source_count: int
         key=lambda tier: {"A": 0, "B": 1, "C": 2}.get(tier, 3),
     )
     trust_score = {"A": 40, "B": 28, "C": 15}.get(best_tier, 10)
-    identity_score = 25 if kind in {"cve", "ghsa", "cnvd"} else 15 if kind == "arxiv" else 5
+    identity_score = (
+        25
+        if kind in {"cve", "ghsa", "cnvd", "github_release", "incident", "campaign"}
+        else 20
+        if kind in {"model_release", "package_release"}
+        else 15
+        if kind == "arxiv"
+        else 5
+    )
     diversity_score = min(20, max(0, source_count - 1) * 7)
     quality_score = round(max((doc.parse_quality for doc in documents), default=0.0) * 15)
     return min(100, trust_score + identity_score + diversity_score + quality_score)

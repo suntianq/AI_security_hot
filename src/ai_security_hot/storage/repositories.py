@@ -85,32 +85,73 @@ def is_current_document(source_status: str, record_status: str) -> bool:
     )
 
 
+def _enqueue_m2_change(
+    session: Session,
+    document_ids: list[int] | set[int],
+    *,
+    reason: str,
+    include_dedupe: bool = True,
+    include_cluster: bool = True,
+) -> None:
+    """Persist local invalidation before mutating lifecycle/component state."""
+    ids = sorted(set(document_ids))
+    if not ids:
+        return
+    from ai_security_hot.storage import event_repository
+
+    components = {
+        int(document_id): int(component_id) if component_id is not None else None
+        for document_id, component_id in session.execute(
+            select(Document.id, Document.dedupe_component_id).where(Document.id.in_(ids))
+        )
+    }
+    if include_dedupe:
+        event_repository.enqueue_work(
+            session,
+            ids,
+            stage="dedupe",
+            reason=reason,
+            algorithm_version=DEDUPE_VERSION,
+            component_ids=components,
+        )
+    if include_cluster:
+        event_repository.enqueue_work(
+            session,
+            ids,
+            stage="cluster",
+            reason=reason,
+            algorithm_version=CLUSTER_VERSION,
+            component_ids=components,
+        )
+
+
 def _retire_replaced_endpoint(
     session: Session, endpoint_id: str, replacement_id: str, *, now: datetime
 ) -> int:
     """Retire a superseded endpoint's projection while preserving evidence."""
     reason = f"endpoint_replaced:{replacement_id}"
-    retired_ids = list(
-        session.execute(
-            update(Document)
-            .where(
+    retired_ids = [
+        int(value)
+        for value in session.execute(
+            select(Document.id).where(
                 Document.endpoint_id == endpoint_id,
                 Document.source_status == DocumentSourceStatus.ACTIVE.value,
             )
-            .values(
-                source_status=DocumentSourceStatus.RETIRED.value,
-                source_status_reason=reason,
-                withdrawn_at=now,
-                classify_lease_until=None,
-                classify_lease_token=None,
-                near_dup_of=None,
-                duplicate_kind=None,
-                duplicate_score=None,
-                dedupe_version=DEDUPE_VERSION,
-                cluster_version=None,
-            )
-            .returning(Document.id)
         ).scalars()
+    ]
+    _enqueue_m2_change(session, retired_ids, reason="endpoint_retired")
+    session.execute(
+        update(Document)
+        .where(Document.id.in_(retired_ids))
+        .values(
+            source_status=DocumentSourceStatus.RETIRED.value,
+            source_status_reason=reason,
+            withdrawn_at=now,
+            classify_lease_until=None,
+            classify_lease_token=None,
+            dedupe_version=DEDUPE_VERSION,
+            cluster_version=None,
+        )
     )
     session.execute(
         update(SourceRecord)
@@ -124,13 +165,6 @@ def _retire_replaced_endpoint(
             last_seen_at=now,
         )
     )
-    if retired_ids:
-        # Removing a possible duplicate master can change any active component.
-        session.execute(
-            update(Document)
-            .where(Document.source_status == DocumentSourceStatus.ACTIVE.value)
-            .values(dedupe_version=None, cluster_version=None)
-        )
     return len(retired_ids)
 
 
@@ -517,6 +551,16 @@ def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
             RawItem.operation == "upsert",
         )
         if item.operation == "withdraw":
+            affected_ids = [
+                int(value)
+                for value in session.execute(
+                    select(Document.id).where(
+                        Document.raw_item_id.in_(native_raw_ids),
+                        Document.source_status == "active",
+                    )
+                ).scalars()
+            ]
+            _enqueue_m2_change(session, affected_ids, reason="source_withdrawn")
             session.execute(
                 update(Document)
                 .where(
@@ -529,14 +573,18 @@ def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
                     withdrawn_at=item.fetched_at,
                     classify_lease_until=None,
                     classify_lease_token=None,
-                    near_dup_of=None,
-                    duplicate_kind=None,
-                    duplicate_score=None,
                     dedupe_version=DEDUPE_VERSION,
                     cluster_version=None,
                 )
             )
         elif not inserted:
+            affected_ids = [
+                int(value)
+                for value in session.execute(
+                    select(Document.id).where(Document.raw_item_id.in_(native_raw_ids))
+                ).scalars()
+            ]
+            _enqueue_m2_change(session, affected_ids, reason="source_reactivated")
             session.execute(
                 update(Document)
                 .where(Document.raw_item_id == raw_id)
@@ -561,9 +609,6 @@ def persist_raw_items(session: Session, items: list[RawItemDTO]) -> int:
                     withdrawn_at=item.fetched_at,
                     classify_lease_until=None,
                     classify_lease_token=None,
-                    near_dup_of=None,
-                    duplicate_kind=None,
-                    duplicate_score=None,
                     dedupe_version=DEDUPE_VERSION,
                     cluster_version=None,
                 )
@@ -708,6 +753,16 @@ def persist_document(session: Session, raw_item_id: int, doc, next_stage: Pipeli
         RawItem.id != raw_item_id,
         RawItem.operation == "upsert",
     )
+    prior_document_ids = [
+        int(value)
+        for value in session.execute(
+            select(Document.id).where(
+                Document.raw_item_id.in_(prior_raw_ids),
+                Document.source_status == "active",
+            )
+        ).scalars()
+    ]
+    _enqueue_m2_change(session, prior_document_ids, reason="content_revision")
     session.execute(
         update(Document)
         .where(
@@ -720,43 +775,45 @@ def persist_document(session: Session, raw_item_id: int, doc, next_stage: Pipeli
             withdrawn_at=raw.fetched_at,
             classify_lease_until=None,
             classify_lease_token=None,
-            near_dup_of=None,
-            duplicate_kind=None,
-            duplicate_score=None,
             dedupe_version=DEDUPE_VERSION,
             cluster_version=None,
         )
     )
-    session.add(
-        Document(
-            raw_item_id=raw_item_id,
-            endpoint_id=doc.endpoint_id,
-            title_original=doc.title_original,
-            title_zh=doc.title_zh,
-            body_text=doc.body_text,
-            canonical_url=doc.canonical_url,
-            author=doc.author,
-            org=doc.org,
-            published_at_utc=doc.published_at_utc,
-            language=doc.language,
-            identifiers={
-                "cve": doc.cve_ids,
-                "ghsa": doc.ghsa_ids,
-                "cnvd": doc.cnvd_ids,
-                "cwe": doc.cwe_ids,
-            },
-            entities=doc.entities,
-            parse_quality=doc.parse_quality,
-            source_status="active",
-            source_status_reason=None,
-            record_status=doc.record_status,
-            record_status_raw=doc.record_status_raw,
-        )
+    document = Document(
+        raw_item_id=raw_item_id,
+        endpoint_id=doc.endpoint_id,
+        title_original=doc.title_original,
+        title_zh=doc.title_zh,
+        body_text=doc.body_text,
+        canonical_url=doc.canonical_url,
+        author=doc.author,
+        org=doc.org,
+        published_at_utc=doc.published_at_utc,
+        language=doc.language,
+        identifiers={
+            "cve": doc.cve_ids,
+            "ghsa": doc.ghsa_ids,
+            "cnvd": doc.cnvd_ids,
+            "cwe": doc.cwe_ids,
+        },
+        entities=doc.entities,
+        parse_quality=doc.parse_quality,
+        source_status="active",
+        source_status_reason=None,
+        record_status=doc.record_status,
+        record_status_raw=doc.record_status_raw,
     )
+    session.add(document)
     raw.stage = next_stage.value
     raw.stage_lease_until = None
     raw.parser_version = doc.__class__.__name__
     session.flush()
+    _enqueue_m2_change(
+        session,
+        {int(document.id)},
+        reason="document_created",
+        include_cluster=False,
+    )
 
 
 def claim_fulltext_candidates(
@@ -802,6 +859,7 @@ def apply_fulltext(
     if raw is None or doc is None:
         raise KeyError(f"unknown raw_item/document: {raw_item_id}/{document_id}")
     if body_text:
+        _enqueue_m2_change(session, {document_id}, reason="fulltext_changed")
         doc.body_text = body_text
         if parse_quality is not None:
             doc.parse_quality = parse_quality
@@ -971,6 +1029,12 @@ def apply_classification(
         doc.source_status, doc.record_status
     ):
         raise ClassificationLeaseLost(f"classification lease lost: {document_id}")
+    _enqueue_m2_change(
+        session,
+        {document_id},
+        reason="classification_changed",
+        include_dedupe=False,
+    )
     doc.tech_directions = cls.tech_directions
     doc.company_models = cls.company_models
     doc.classified_event_type = cls.event_type
@@ -1185,6 +1249,8 @@ def load_intel_documents(session: Session, *, retain_body: bool = True) -> list[
             Document.tech_directions,
             Document.classified_event_type,
             Document.parse_quality,
+            Document.entities,
+            Document.company_models,
         )
         .join(RawItem, RawItem.id == Document.raw_item_id)
         .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
@@ -1207,6 +1273,8 @@ def load_intel_documents(session: Session, *, retain_body: bool = True) -> list[
         tech_directions,
         event_type,
         parse_quality,
+        entities,
+        company_models,
     ) in session.execute(stmt):
         documents.append(
             IntelDocument(
@@ -1225,6 +1293,8 @@ def load_intel_documents(session: Session, *, retain_body: bool = True) -> list[
                 parse_quality=parse_quality,
                 content_digest=None if retain_body else content_fingerprint(body),
                 content_length=len(body or ""),
+                entities=entities or {},
+                company_models=list(company_models or []),
             )
         )
     return documents
@@ -1338,6 +1408,8 @@ def _iter_dedup_components(
             Document.tech_directions,
             Document.classified_event_type,
             Document.parse_quality,
+            Document.entities,
+            Document.company_models,
         )
         .join(RawItem, RawItem.id == Document.raw_item_id)
         .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
@@ -1371,6 +1443,8 @@ def _iter_dedup_components(
             tech_directions,
             event_type,
             parse_quality,
+            entities,
+            company_models,
         ) in result:
             if active_component is not None and row_component_id != active_component:
                 yield documents, decisions
@@ -1393,6 +1467,8 @@ def _iter_dedup_components(
                     event_type=event_type,
                     parse_quality=parse_quality,
                     content_length=len(body or ""),
+                    entities=entities or {},
+                    company_models=list(company_models or []),
                 )
             )
             decisions[document_id] = DedupDecision(
@@ -1472,7 +1548,9 @@ def _iter_staged_event_drafts(session: Session) -> Iterator[EventDraft]:
             document.identifiers,
             document.tech_directions,
             document.classified_event_type AS event_type,
-            document.parse_quality
+            document.parse_quality,
+            document.entities,
+            document.company_models
         FROM m2_event_memberships AS membership
         JOIN documents AS document ON document.id = membership.document_id
         JOIN raw_items AS raw_item ON raw_item.id = document.raw_item_id
@@ -1511,6 +1589,8 @@ def _iter_staged_event_drafts(session: Session) -> Iterator[EventDraft]:
                     event_type=row["event_type"],
                     parse_quality=row["parse_quality"],
                     content_length=len(body or ""),
+                    entities=row["entities"] or {},
+                    company_models=list(row["company_models"] or []),
                 )
             )
             reasons[document_id] = row["relation_reason"]

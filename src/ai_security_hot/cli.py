@@ -103,9 +103,7 @@ def retry_failed(
     """Requeue failed normalization rows after fixing their parser/config."""
     _setup_logging()
     with session_scope() as session:
-        retried = repo.retry_failed_stage_items(
-            session, limit=limit, endpoint_id=endpoint_id
-        )
+        retried = repo.retry_failed_stage_items(session, limit=limit, endpoint_id=endpoint_id)
     typer.echo(json.dumps({"retried": retried, "endpoint": endpoint_id}))
 
 
@@ -127,15 +125,105 @@ def classify(limit: int = 500) -> None:
     typer.echo(json.dumps(run_classify_stage(limit=limit)))
 
 
+@app.command("evaluate-m2")
+def evaluate_m2(
+    dataset: str = typer.Option(
+        "evaluation/m2_quality_seed.jsonl", help="JSONL quality-label dataset"
+    ),
+    top_n: int = typer.Option(10, min=1),
+    review_status: str | None = typer.Option(
+        None,
+        "--review-status",
+        help="evaluate only one label state; use reviewed for release gates",
+    ),
+) -> None:
+    """Evaluate deterministic dedupe, clustering and ranking quality offline."""
+    from ai_security_hot.events.evaluation import evaluate_dataset
+
+    typer.echo(
+        json.dumps(
+            evaluate_dataset(dataset, top_n=top_n, review_status=review_status),
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+@app.command("m2-index")
+def m2_index(
+    batch_size: int = typer.Option(5000, min=100, max=20000),
+    complete: bool = typer.Option(False, "--all", help="continue until index is current"),
+) -> None:
+    """Backfill versioned URL/title/content/identity/LSH candidate indexes."""
+    from ai_security_hot.storage import event_repository
+
+    total = 0
+    while True:
+        with session_scope() as session:
+            result = event_repository.backfill_signature_batch(session, limit=batch_size)
+        total += result["indexed"]
+        if not complete or result["remaining"] == 0 or result["indexed"] == 0:
+            typer.echo(json.dumps({**result, "indexed_total": total}))
+            return
+
+
+@app.command("m2-reviews")
+def m2_reviews(
+    status: str = typer.Option("pending", help="pending | approved | rejected"),
+    limit: int = typer.Option(50, min=1, max=500),
+) -> None:
+    """List low-confidence or hard-conflict M2 candidate reviews."""
+    if status not in {"pending", "approved", "rejected"}:
+        raise typer.BadParameter("status must be pending, approved or rejected")
+    from ai_security_hot.storage import event_repository
+
+    with session_scope() as session:
+        rows = event_repository.list_candidate_reviews(session, status=status, limit=limit)
+    typer.echo(json.dumps(rows, ensure_ascii=False, indent=2))
+
+
+@app.command("m2-token-stats")
+def m2_token_stats() -> None:
+    """Rebuild persistent current-document counts for candidate token buckets."""
+    from ai_security_hot.storage import event_repository
+
+    with session_scope() as session:
+        buckets = event_repository.rebuild_block_token_stats(session)
+    typer.echo(json.dumps({"status": "ok", "buckets": buckets}))
+
+
+@app.command("resolve-m2-review")
+def resolve_m2_review(
+    review_id: int,
+    decision: str = typer.Option(..., help="approved | rejected"),
+    reviewer: str = typer.Option(..., help="auditable reviewer identity"),
+    notes: str | None = typer.Option(None),
+) -> None:
+    """Resolve a candidate and queue only its affected dedupe/event graph."""
+    if decision not in {"approved", "rejected"}:
+        raise typer.BadParameter("decision must be approved or rejected")
+    from ai_security_hot.storage import event_repository
+
+    with session_scope() as session:
+        result = event_repository.resolve_candidate_review(
+            session,
+            review_id,
+            decision=decision,
+            reviewer=reviewer,
+            notes=notes,
+        )
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
 @app.command()
 def dedupe(
-    force: bool = typer.Option(False, help="recompute even when version is current"),
+    force: bool = typer.Option(False, help="queue a full replay, then process its first batch"),
 ) -> None:
     """Build non-destructive exact/near-duplicate relationships (M2)."""
     from ai_security_hot.pipelines.stages import run_dedupe_stage
 
     _setup_logging()
-    typer.echo(json.dumps(run_dedupe_stage(force=force)))
+    typer.echo(json.dumps(run_dedupe_stage(force=force, trigger="cli")))
 
 
 @app.command()
@@ -146,7 +234,68 @@ def cluster(
     from ai_security_hot.pipelines.stages import run_cluster_stage
 
     _setup_logging()
-    typer.echo(json.dumps(run_cluster_stage(force=force)))
+    typer.echo(json.dumps(run_cluster_stage(force=force, trigger="cli")))
+
+
+def _run_m2_replay(max_batches: int, *, resume: bool = False) -> dict:
+    from ai_security_hot.pipelines.stages import run_cluster_stage, run_dedupe_stage
+    from ai_security_hot.storage import event_repository
+
+    if resume:
+        queued = {"run_id": None, "queued_documents": 0, "resumed": True}
+    else:
+        with session_scope() as session:
+            queued = event_repository.queue_full_replay(session)
+    dedupe_result: dict = {}
+    cluster_result: dict = {}
+    batches = 0
+    while batches < max_batches:
+        dedupe_result = run_dedupe_stage(trigger="replay")
+        batches += 1
+        if dedupe_result.get("status") == "current" or (
+            dedupe_result.get("status") == "ok" and dedupe_result.get("remaining") == 0
+        ):
+            break
+    if dedupe_result.get("remaining", 0) or dedupe_result.get("status") == "indexing":
+        return {
+            "status": "partial",
+            "queued": queued,
+            "batches": batches,
+            "dedupe": dedupe_result,
+            "cluster": cluster_result,
+        }
+    while batches < max_batches:
+        cluster_result = run_cluster_stage(trigger="replay")
+        batches += 1
+        if cluster_result.get("status") == "current" or (
+            cluster_result.get("status") == "ok" and cluster_result.get("remaining") == 0
+        ):
+            break
+    complete = bool(cluster_result) and (
+        cluster_result.get("status") == "current"
+        or (cluster_result.get("status") == "ok" and cluster_result.get("remaining", 0) == 0)
+    )
+    return {
+        "status": "complete" if complete else "partial",
+        "queued": queued,
+        "batches": batches,
+        "dedupe": dedupe_result,
+        "cluster": cluster_result,
+    }
+
+
+@app.command("replay-m2")
+def replay_m2(
+    max_batches: int = typer.Option(10000, min=1),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help="continue existing version/work backlog without invalidating completed batches",
+    ),
+) -> None:
+    """Replay M2.1 in bounded local batches with durable run audit."""
+    _setup_logging()
+    typer.echo(json.dumps(_run_m2_replay(max_batches, resume=resume)))
 
 
 @app.command("eventize")
@@ -155,9 +304,15 @@ def eventize(force: bool = typer.Option(False, help="recompute both M2 stages"))
     from ai_security_hot.pipelines.stages import run_cluster_stage, run_dedupe_stage
 
     _setup_logging()
+    if force:
+        typer.echo(json.dumps(_run_m2_replay(10000)))
+        return
     typer.echo(
         json.dumps(
-            {"dedupe": run_dedupe_stage(force=force), "cluster": run_cluster_stage(force=force)}
+            {
+                "dedupe": run_dedupe_stage(trigger="cli"),
+                "cluster": run_cluster_stage(trigger="cli"),
+            }
         )
     )
 
