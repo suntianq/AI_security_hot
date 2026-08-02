@@ -117,6 +117,7 @@ def test_shadow_enrichment_persists_atomic_evidence_transactionally() -> None:
                 "relevance_reason": "First-party model release.",
                 "content_type": "release",
                 "summary": "Anthropic released Claude 5.",
+                "ontology_version": "semantic-onto-v1",
                 "entities": [],
                 "atomic_events": [
                     {
