@@ -365,3 +365,150 @@ def test_high_frequency_exact_hash_bucket_is_bounded() -> None:
         transaction.rollback()
         connection.close()
         engine.dispose()
+
+
+@pytest.mark.db
+def test_scope_isolation_prevents_cross_boundary_merge() -> None:
+    """A vuln/general-scoped pass must never claim the other scope's work items.
+
+    Regression: _claim_dedupe_seeds/_claim_cluster_seeds used to claim every
+    pending M2WorkItem regardless of scope, so a ``vuln`` pass could merge a
+    news document into an NVD duplicate component and a ``general`` pass could
+    supersede a vuln-db event.
+    """
+    database_url = os.environ.get("INTEL_DATABASE_URL")
+    if not database_url:
+        pytest.skip("INTEL_DATABASE_URL is required for PostgreSQL integration tests")
+    engine = create_engine(database_url)
+    connection = engine.connect()
+    transaction = connection.begin()
+    session = Session(bind=connection, expire_on_commit=False)
+    try:
+        session.add(Source(id="m2-test-source", name="M2 test", trust_tier="B"))
+        session.add(
+            SourceEndpoint(
+                id="m2-test-endpoint",
+                source_id="m2-test-source",
+                connector="rss",
+                url="https://m2-test.invalid/feed",
+                enabled=True,
+                state_version="1",
+                priority="P1",
+                trust_tier="B",
+                egress_route="direct",
+                policy={},
+                status="active",
+            )
+        )
+        # A structured-vulnerability endpoint so scope filtering has a target.
+        # (Fresh CI DBs have no synced endpoints; locally it may already exist.)
+        if (
+            session.execute(
+                select(SourceEndpoint.id).where(SourceEndpoint.id == "nvd-recent")
+            ).scalar_one_or_none()
+            is None
+        ):
+            session.add(
+                SourceEndpoint(
+                    id="nvd-recent",
+                    source_id="m2-test-source",
+                    connector="nvd",
+                    url="https://nvd.nist.gov/feeds/json/cve/1.1/nvdcve-1.1-modified.json.zip",
+                    enabled=True,
+                    state_version="1",
+                    priority="P1",
+                    trust_tier="A",
+                    egress_route="direct",
+                    policy={},
+                    status="active",
+                )
+            )
+        session.flush()
+        nvd_doc = _add_document(
+            session,
+            "nvd-recent",
+            "nvd-1",
+            "Same vulnerability announcement title here",
+            "https://nvd.nist.gov/vuln/detail/CVE-2026-1001",
+            quality=0.9,
+        )
+        nvd_doc.identifiers = {"cve": ["CVE-2026-1001"], "ghsa": [], "cnvd": [], "cwe": []}
+        gen_doc = _add_document(
+            session,
+            "m2-test-endpoint",
+            "gen-1",
+            "Same vulnerability announcement title here",
+            "https://m2-test.invalid/article/1",
+            quality=0.9,
+        )
+        gen_doc.identifiers = {"cve": ["CVE-2026-1001"], "ghsa": [], "cnvd": [], "cwe": []}
+        session.flush()
+
+        event_repository.backfill_signature_batch(session, limit=100)
+        event_repository.run_local_dedupe(session, limit=100, scope="all")
+        event_repository.run_local_cluster(session, limit=100, scope="all")
+        session.flush()
+        nvd_event = session.execute(
+            select(Event).where(Event.fingerprint == "cve-nvd:CVE-2026-1001")
+        ).scalar_one()
+        assert nvd_event.status == "detected"
+
+        # A VULN-scope dedupe pass must NOT claim the general doc's work item.
+        event_repository.enqueue_work(
+            session,
+            {gen_doc.id},
+            stage="dedupe",
+            reason="scope_test",
+            algorithm_version=DEDUPE_VERSION,
+        )
+        session.flush()
+        event_repository.run_local_dedupe(session, limit=10, scope="vuln")
+        assert (
+            session.execute(
+                select(M2WorkItem.status).where(
+                    M2WorkItem.document_id == gen_doc.id,
+                    M2WorkItem.stage == "dedupe",
+                )
+            ).scalar_one()
+            == "pending"
+        )
+
+        # The general doc's work item IS claimable by the GENERAL pass.
+        event_repository.run_local_dedupe(session, limit=10, scope="general")
+        assert (
+            session.execute(
+                select(M2WorkItem.status).where(
+                    M2WorkItem.document_id == gen_doc.id,
+                    M2WorkItem.stage == "dedupe",
+                )
+            ).scalar_one()
+            == "done"
+        )
+
+        # A GENERAL cluster pass must not supersede the NVD event. Before the
+        # fix it claimed the NVD doc's cluster work item and superseded it.
+        event_repository.enqueue_work(
+            session,
+            {nvd_doc.id},
+            stage="cluster",
+            reason="scope_test",
+            algorithm_version=CLUSTER_VERSION,
+        )
+        session.flush()
+        event_repository.run_local_cluster(session, limit=10, scope="general")
+        session.refresh(nvd_event)
+        assert nvd_event.status == "detected"
+        assert (
+            session.execute(
+                select(M2WorkItem.status).where(
+                    M2WorkItem.document_id == nvd_doc.id,
+                    M2WorkItem.stage == "cluster",
+                )
+            ).scalar_one()
+            == "pending"
+        )
+    finally:
+        session.close()
+        transaction.rollback()
+        connection.close()
+        engine.dispose()

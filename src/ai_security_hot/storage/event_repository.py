@@ -72,6 +72,35 @@ def _scope_conditions(document, scope: str) -> tuple:
     return tuple(conditions)
 
 
+def _work_item_scope_condition(scope: str) -> tuple:
+    """Document-scope filter for M2WorkItem claim queries.
+
+    M2WorkItem rows do not carry a scope; the owning document's endpoint decides
+    it. Without this filter a ``vuln`` pass would claim a general document's
+    pending work item and merge it across the NVD/KEV isolation boundary (and a
+    ``general`` pass could supersede vuln-db events). The filter is an IN
+    subquery so rows with NULL document_id stay claimable only by an explicit
+    scope="all" pass.
+    """
+    if scope == "vuln":
+        return (
+            M2WorkItem.document_id.in_(
+                select(Document.id).where(
+                    Document.endpoint_id.in_(STRUCTURED_VULN_ENDPOINTS)
+                )
+            ),
+        )
+    if scope == "general":
+        return (
+            M2WorkItem.document_id.in_(
+                select(Document.id).where(
+                    Document.endpoint_id.notin_(STRUCTURED_VULN_ENDPOINTS)
+                )
+            ),
+        )
+    return ()
+
+
 def load_documents(
     session: Session,
     document_ids: set[int] | list[int] | tuple[int, ...],
@@ -370,7 +399,11 @@ def _claim_dedupe_seeds(
     work = list(
         session.execute(
             select(M2WorkItem)
-            .where(M2WorkItem.stage == "dedupe", M2WorkItem.status == "pending")
+            .where(
+                M2WorkItem.stage == "dedupe",
+                M2WorkItem.status == "pending",
+                *_work_item_scope_condition(scope),
+            )
             .order_by(M2WorkItem.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
@@ -1068,7 +1101,11 @@ def _claim_cluster_seeds(
     work = list(
         session.execute(
             select(M2WorkItem)
-            .where(M2WorkItem.stage == "cluster", M2WorkItem.status == "pending")
+            .where(
+                M2WorkItem.stage == "cluster",
+                M2WorkItem.status == "pending",
+                *_work_item_scope_condition(scope),
+            )
             .order_by(M2WorkItem.id)
             .limit(limit)
             .with_for_update(skip_locked=True)

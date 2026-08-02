@@ -19,9 +19,13 @@ from tenacity import retry, retry_if_exception, stop_after_attempt
 
 from ai_security_hot.config.settings import get_settings
 from ai_security_hot.config.sources import EndpointPolicy
-from ai_security_hot.connectors.ssrf import validate_resolved, validate_url
+from ai_security_hot.connectors.ssrf import SSRFError, validate_resolved, validate_url
 from ai_security_hot.domain.enums import EgressRoute
 from ai_security_hot.domain.models import FetchResult
+
+# Status codes httpx treats as redirects. We follow them manually so every hop
+# passes the same SSRF validation as the original request.
+_REDIRECT_CODES = {301, 302, 303, 307, 308}
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -128,7 +132,7 @@ class FetchContext:
             client = self._sync_clients.get(key)
             if client is None:
                 client = httpx.Client(
-                    follow_redirects=True,
+                    follow_redirects=False,
                     max_redirects=policy.fetch.max_redirects,
                     proxy=proxy,
                     limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
@@ -141,7 +145,7 @@ class FetchContext:
         client = self._async_clients.get(key)
         if client is None:
             client = httpx.AsyncClient(
-                follow_redirects=True,
+                follow_redirects=False,
                 max_redirects=policy.fetch.max_redirects,
                 proxy=proxy,
                 limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
@@ -173,7 +177,6 @@ class FetchContext:
         extra_headers: dict[str, str] | None = None,
     ) -> FetchResult:
         """Perform one synchronous controlled GET. A 304 is marked from_cache."""
-        validate_url(url)
         proxy = self._proxy_for(policy.egress.route)
         headers = self._build_headers(
             user_agent=self.settings.fetch_user_agent,
@@ -191,42 +194,56 @@ class FetchContext:
         def _do() -> FetchResult:
             self._rate.wait(policy.id, policy.fetch.requests_per_minute)
             client = self._sync_client(policy, proxy)
-            req = client.build_request("GET", url, headers=headers)
-            if not proxy:
-                validate_resolved(req.url.host)
-
-            with client.stream(
-                "GET", url, headers=headers, timeout=policy.fetch.timeout_seconds
-            ) as resp:
-                if resp.status_code == 304:
+            # Follow redirects manually so every hop passes the same SSRF
+            # validation as the original URL. httpx auto-follow would silently
+            # fetch whatever the first response points at.
+            current_url = url
+            for _ in range(max(1, policy.fetch.max_redirects + 1)):
+                validate_url(current_url)
+                if not proxy:
+                    validate_resolved(httpx.URL(current_url).host)
+                with client.stream(
+                    "GET",
+                    current_url,
+                    headers=headers,
+                    timeout=policy.fetch.timeout_seconds,
+                ) as resp:
+                    if resp.status_code in _REDIRECT_CODES:
+                        location = resp.headers.get("location")
+                        if location is None:
+                            break  # 3xx without Location — treat as unresolvable
+                        current_url = str(resp.url.join(location))
+                        continue
+                    if resp.status_code == 304:
+                        return FetchResult(
+                            url=url,
+                            final_url=str(resp.url),
+                            status_code=304,
+                            headers={k.lower(): v for k, v in resp.headers.items()},
+                            body=b"",
+                            fetched_at=datetime.now(UTC),
+                            egress_route=policy.egress.route,
+                            from_cache=True,
+                        )
+                    resp.raise_for_status()
+                    cap = policy.fetch.max_response_bytes
+                    chunks: list[bytes] = []
+                    total = 0
+                    for chunk in resp.iter_bytes():
+                        total += len(chunk)
+                        if total > cap:
+                            raise ResponseTooLarge(f"{url} exceeded {cap} bytes")
+                        chunks.append(chunk)
                     return FetchResult(
                         url=url,
                         final_url=str(resp.url),
-                        status_code=304,
+                        status_code=resp.status_code,
                         headers={k.lower(): v for k, v in resp.headers.items()},
-                        body=b"",
+                        body=b"".join(chunks),
                         fetched_at=datetime.now(UTC),
                         egress_route=policy.egress.route,
-                        from_cache=True,
                     )
-                resp.raise_for_status()
-                cap = policy.fetch.max_response_bytes
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in resp.iter_bytes():
-                    total += len(chunk)
-                    if total > cap:
-                        raise ResponseTooLarge(f"{url} exceeded {cap} bytes")
-                    chunks.append(chunk)
-                return FetchResult(
-                    url=url,
-                    final_url=str(resp.url),
-                    status_code=resp.status_code,
-                    headers={k.lower(): v for k, v in resp.headers.items()},
-                    body=b"".join(chunks),
-                    fetched_at=datetime.now(UTC),
-                    egress_route=policy.egress.route,
-                )
+            raise SSRFError(f"redirect limit exceeded while fetching {url!r}")
 
         return _do()
 
@@ -240,7 +257,6 @@ class FetchContext:
         extra_headers: dict[str, str] | None = None,
     ) -> FetchResult:
         """Async controlled GET using a reusable connection-pooled client."""
-        validate_url(url)
         proxy = self._proxy_for(policy.egress.route)
         headers = self._build_headers(
             user_agent=self.settings.fetch_user_agent,
@@ -258,42 +274,53 @@ class FetchContext:
         async def _do() -> FetchResult:
             await self._rate.await_(policy.id, policy.fetch.requests_per_minute)
             client = self._async_client(policy, proxy)
-            if not proxy:
-                validate_resolved(httpx.URL(url).host)
-            async with client.stream(
-                "GET",
-                url,
-                headers=headers,
-                timeout=policy.fetch.timeout_seconds,
-            ) as resp:
-                if resp.status_code == 304:
+            # Same manual per-hop validation as the sync path.
+            current_url = url
+            for _ in range(max(1, policy.fetch.max_redirects + 1)):
+                validate_url(current_url)
+                if not proxy:
+                    validate_resolved(httpx.URL(current_url).host)
+                async with client.stream(
+                    "GET",
+                    current_url,
+                    headers=headers,
+                    timeout=policy.fetch.timeout_seconds,
+                ) as resp:
+                    if resp.status_code in _REDIRECT_CODES:
+                        location = resp.headers.get("location")
+                        if location is None:
+                            break  # 3xx without Location — treat as unresolvable
+                        current_url = str(resp.url.join(location))
+                        continue
+                    if resp.status_code == 304:
+                        return FetchResult(
+                            url=url,
+                            final_url=str(resp.url),
+                            status_code=304,
+                            headers={k.lower(): v for k, v in resp.headers.items()},
+                            body=b"",
+                            fetched_at=datetime.now(UTC),
+                            egress_route=policy.egress.route,
+                            from_cache=True,
+                        )
+                    resp.raise_for_status()
+                    cap = policy.fetch.max_response_bytes
+                    chunks: list[bytes] = []
+                    total = 0
+                    async for chunk in resp.aiter_bytes():
+                        total += len(chunk)
+                        if total > cap:
+                            raise ResponseTooLarge(f"{url} exceeded {cap} bytes")
+                        chunks.append(chunk)
                     return FetchResult(
                         url=url,
                         final_url=str(resp.url),
-                        status_code=304,
+                        status_code=resp.status_code,
                         headers={k.lower(): v for k, v in resp.headers.items()},
-                        body=b"",
+                        body=b"".join(chunks),
                         fetched_at=datetime.now(UTC),
                         egress_route=policy.egress.route,
-                        from_cache=True,
                     )
-                resp.raise_for_status()
-                cap = policy.fetch.max_response_bytes
-                chunks: list[bytes] = []
-                total = 0
-                async for chunk in resp.aiter_bytes():
-                    total += len(chunk)
-                    if total > cap:
-                        raise ResponseTooLarge(f"{url} exceeded {cap} bytes")
-                    chunks.append(chunk)
-                return FetchResult(
-                    url=url,
-                    final_url=str(resp.url),
-                    status_code=resp.status_code,
-                    headers={k.lower(): v for k, v in resp.headers.items()},
-                    body=b"".join(chunks),
-                    fetched_at=datetime.now(UTC),
-                    egress_route=policy.egress.route,
-                )
+            raise SSRFError(f"redirect limit exceeded while fetching {url!r}")
 
         return await _do()

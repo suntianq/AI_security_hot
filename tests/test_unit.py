@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
+from ai_security_hot.config.sources import EndpointPolicy
 from ai_security_hot.connectors.ssrf import SSRFError, validate_url
+from ai_security_hot.domain.enums import ConnectorKind
 from ai_security_hot.parsers.normalize import (
     canonicalize_url,
     extract_identifiers,
@@ -30,6 +33,88 @@ def test_ssrf_blocks_forbidden(url: str) -> None:
 
 def test_ssrf_allows_public_https() -> None:
     validate_url("https://openai.com/news/rss.xml")  # no raise
+
+
+def _redirect_test_policy() -> EndpointPolicy:
+    return EndpointPolicy(
+        id="redirect-test",
+        source_id="redirect-src",
+        connector=ConnectorKind.WEB,
+        url="http://93.184.216.34/start",
+    )
+
+
+def _redirect_mock_client(handler) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
+
+
+def test_fetch_rejects_redirect_to_metadata_host(monkeypatch) -> None:
+    """A 302 to a cloud-metadata host must be refused (regression for SSRF bypass)."""
+    import httpx
+
+    from ai_security_hot.connectors.fetch import FetchContext
+    from ai_security_hot.connectors.ssrf import SSRFError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            302,
+            headers={"location": "http://169.254.169.254/latest/meta-data/"},
+            request=request,
+        )
+
+    ctx = FetchContext()
+    monkeypatch.setattr(ctx, "_sync_client", lambda policy, proxy: _redirect_mock_client(handler))
+    try:
+        with pytest.raises(SSRFError):
+            ctx.get("http://93.184.216.34/start", _redirect_test_policy())
+    finally:
+        ctx.close()
+
+
+def test_fetch_rejects_redirect_to_private_ip(monkeypatch) -> None:
+    """A 302 to an RFC1918 address must be refused."""
+    import httpx
+
+    from ai_security_hot.connectors.fetch import FetchContext
+    from ai_security_hot.connectors.ssrf import SSRFError
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            302,
+            headers={"location": "http://10.0.0.5/internal"},
+            request=request,
+        )
+
+    ctx = FetchContext()
+    monkeypatch.setattr(ctx, "_sync_client", lambda policy, proxy: _redirect_mock_client(handler))
+    try:
+        with pytest.raises(SSRFError):
+            ctx.get("http://93.184.216.34/start", _redirect_test_policy())
+    finally:
+        ctx.close()
+
+
+def test_fetch_follows_safe_redirect(monkeypatch) -> None:
+    """A redirect to another public host is followed and returned."""
+    import httpx
+
+    from ai_security_hot.connectors.fetch import FetchContext
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/final":
+            return httpx.Response(
+                302, headers={"location": "https://93.184.216.34/final"}, request=request
+            )
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    ctx = FetchContext()
+    monkeypatch.setattr(ctx, "_sync_client", lambda policy, proxy: _redirect_mock_client(handler))
+    try:
+        result = ctx.get("http://93.184.216.34/start", _redirect_test_policy())
+        assert result.status_code == 200
+        assert result.final_url == "https://93.184.216.34/final"
+    finally:
+        ctx.close()
 
 
 def test_source_registry_key_endpoints() -> None:

@@ -227,3 +227,40 @@ def test_news_doc_mentioning_cve_keeps_general_key() -> None:
     keys = [key.fingerprint for key in strong_event_keys(news)]
     assert "cve:CVE-2026-1234" in keys
     assert not any(key.startswith("cve-nvd:") for key in keys)
+
+
+def test_nvd_event_has_cve_topic_and_full_identity_score() -> None:
+    # Regression: the cve-nvd key was missing from the CVE branches of
+    # _primary_topic/_event_type/_event_score, so vuln-db events got topic=None
+    # and were scored ~20 points below an equivalent general CVE event.
+    title = "CVE-2026-1001 critical remote code execution in product"
+    nvd = _doc(
+        1,
+        title,
+        endpoint_id="nvd-recent",
+        identifiers={"cve": ["CVE-2026-1001"]},
+        trust_tier="A",
+        tech_directions=["cve"],
+        event_type="vulnerability",
+        parse_quality=0.9,
+    )
+    news = _doc(
+        2,
+        title,
+        endpoint_id="portswigger-research-rss",
+        identifiers={"cve": ["CVE-2026-1001"]},
+        trust_tier="A",
+        tech_directions=["cve"],
+        event_type="news",
+        parse_quality=0.9,
+    )
+    decisions = deduplicate_documents([nvd, news])
+    drafts = build_event_drafts([nvd, news], decisions)
+    nvd_draft = drafts["cve-nvd:CVE-2026-1001"]
+    general_draft = drafts["cve:CVE-2026-1001"]
+    assert nvd_draft.topic == "cve"
+    assert nvd_draft.event_type == "vulnerability"
+    assert nvd_draft.category == "vuln_db"
+    assert general_draft.category == "general"
+    # Equal inputs must produce equal scores regardless of namespace.
+    assert nvd_draft.score == general_draft.score == 79

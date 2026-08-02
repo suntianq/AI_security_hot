@@ -246,6 +246,18 @@ def _master_rank(doc: IntelDocument) -> tuple[int, float, int, int, int]:
     )
 
 
+def _same_isolation_scope(left: IntelDocument, right: IntelDocument) -> bool:
+    """True when both documents belong to the same vuln/general isolation scope.
+
+    Structured vulnerability feeds (NVD/KEV) must never merge with a news
+    article, even when a headline repeats the same CVE id. Enforced at every
+    union point so cross-scope near-duplicates stay in separate components.
+    """
+    return (
+        left.endpoint_id in STRUCTURED_VULN_ENDPOINTS
+    ) == (right.endpoint_id in STRUCTURED_VULN_ENDPOINTS)
+
+
 def deduplicate_documents(
     documents: list[IntelDocument],
     *,
@@ -288,20 +300,25 @@ def deduplicate_documents(
         # Only documents sharing a strong identifier may merge in such groups.
         for same_identifier in identified.values():
             for document_id in same_identifier[1:]:
-                union_find.union(same_identifier[0], document_id)
+                if _same_isolation_scope(docs[same_identifier[0]], docs[document_id]):
+                    union_find.union(same_identifier[0], document_id)
         for document_id in unidentified[1:]:
-            union_find.union(unidentified[0], document_id)
+            if _same_isolation_scope(docs[unidentified[0]], docs[document_id]):
+                union_find.union(unidentified[0], document_id)
         if len(identified) <= 1 and identified and unidentified:
             identified_master = next(iter(identified.values()))[0]
-            union_find.union(identified_master, unidentified[0])
+            if _same_isolation_scope(docs[identified_master], docs[unidentified[0]]):
+                union_find.union(identified_master, unidentified[0])
 
     for group in title_groups.values():
         for index, left_id in enumerate(group):
             for right_id in group[index + 1 :]:
                 left = docs[left_id]
                 right = docs[right_id]
-                if not _identifiers_conflict(left, right) and _dates_compatible(
-                    left, right, days=30
+                if (
+                    _same_isolation_scope(left, right)
+                    and not _identifiers_conflict(left, right)
+                    and _dates_compatible(left, right, days=30)
                 ):
                     union_find.union(left_id, right_id)
 
@@ -311,7 +328,8 @@ def deduplicate_documents(
                 left = docs[left_id]
                 right = docs[right_id]
                 if (
-                    not _identifiers_conflict(left, right)
+                    _same_isolation_scope(left, right)
+                    and not _identifiers_conflict(left, right)
                     and _dates_compatible(left, right, days=30)
                     and title_similarity(left.title, right.title) >= 80
                 ):
@@ -351,7 +369,11 @@ def deduplicate_documents(
             continue
         ratio = fuzz.ratio(normalize_title(left.title), normalize_title(right.title))
         score = title_similarity(left.title, right.title)
-        if score >= fuzzy_threshold and ratio >= 88:
+        if (
+            _same_isolation_scope(left, right)
+            and score >= fuzzy_threshold
+            and ratio >= 88
+        ):
             union_find.union(left_id, right_id)
 
     approved_documents: set[int] = set()
@@ -359,8 +381,11 @@ def deduplicate_documents(
         if left_id not in docs or right_id not in docs:
             continue
         # Human review can approve a conservative semantic candidate, but it
-        # cannot override incompatible strong identities.
+        # cannot override incompatible strong identities or the vuln/general
+        # isolation boundary.
         if _identifiers_conflict(docs[left_id], docs[right_id]):
+            continue
+        if not _same_isolation_scope(docs[left_id], docs[right_id]):
             continue
         union_find.union(left_id, right_id)
         approved_documents.update((left_id, right_id))
@@ -497,7 +522,7 @@ def strong_event_keys(doc: IntelDocument) -> tuple[EventKey, ...]:
 
 
 def _primary_topic(documents: list[IntelDocument], kind: str) -> str | None:
-    if kind in {"cve", "ghsa", "cnvd"}:
+    if kind in {"cve", "ghsa", "cnvd", "cve-nvd"}:
         return "cve"
     priority = ("security_for_ai", "ai_for_security", "agent", "llm", "system_security")
     counts = Counter(topic for doc in documents for topic in doc.tech_directions if topic != "cve")
@@ -510,7 +535,7 @@ def _primary_topic(documents: list[IntelDocument], kind: str) -> str | None:
 
 
 def _event_type(documents: list[IntelDocument], kind: str) -> str | None:
-    if kind in {"cve", "ghsa", "cnvd"}:
+    if kind in {"cve", "ghsa", "cnvd", "cve-nvd"}:
         return "vulnerability"
     if kind == "arxiv":
         return "research"
@@ -537,7 +562,7 @@ def _event_score(documents: list[IntelDocument], *, kind: str, source_count: int
     trust_score = {"A": 40, "B": 28, "C": 15}.get(best_tier, 10)
     identity_score = (
         25
-        if kind in {"cve", "ghsa", "cnvd", "github_release", "incident", "campaign"}
+        if kind in {"cve", "ghsa", "cnvd", "cve-nvd", "github_release", "incident", "campaign"}
         else 20
         if kind in {"model_release", "package_release"}
         else 15
