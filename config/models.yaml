@@ -1,0 +1,34 @@
+# Non-secret model profiles shared by M1.3 classification and M2.2 semantic
+# enrichment. Keep API keys in INTEL_LLM_API_KEY, never in this file.
+version: 1
+
+# Change this value to switch profiles, or override it at deployment time with
+# INTEL_LLM_PROFILE. Model calls remain disabled until the corresponding
+# classification/semantic feature gate is enabled.
+active_profile: deepseek-v4
+
+profiles:
+  deepseek-v4:
+    provider: openai-compatible
+    # This may also be a self-hosted gateway. Both a /v1 base URL and a full
+    # /chat/completions endpoint are accepted.
+    base_url: https://api.deepseek.com
+    model: deepseek-v4-flash
+    # DeepSeek-compatible endpoints commonly support JSON Object rather than
+    # OpenAI's stricter json_schema extension. Pydantic still validates output.
+    response_format: json_object
+    thinking_mode: disabled
+    timeout_seconds: 60
+    max_input_chars: 12000
+    classification_max_output_tokens: 500
+    semantic_max_output_tokens: 4000
+
+  openai-compatible:
+    provider: openai-compatible
+    base_url: https://api.openai.com/v1
+    model: gpt-4.1-mini
+    response_format: json_schema
+    timeout_seconds: 30
+    max_input_chars: 12000
+    classification_max_output_tokens: 500
+    semantic_max_output_tokens: 2500

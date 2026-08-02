@@ -140,6 +140,43 @@ def test_nvd_bootstrap_shrinks_dense_window_and_persists_cursor(monkeypatch) -> 
 
 
 @respx.mock
+def test_nvd_min_cve_year_drops_old_cves(monkeypatch) -> None:
+    from ai_security_hot.connectors.nvd import NvdConnector
+
+    fixed_now = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(NvdConnector, "_now", staticmethod(lambda: fixed_now))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("resultsPerPage") == "1":
+            return httpx.Response(200, json={"totalResults": 3})
+        return httpx.Response(
+            200,
+            json={
+                "startIndex": 0,
+                "resultsPerPage": 2000,
+                "totalResults": 3,
+                "vulnerabilities": [
+                    {"cve": {"id": "CVE-2026-0001"}},
+                    {"cve": {"id": "CVE-2019-9999"}},  # old, must be dropped
+                    {"cve": {"id": "CVE-2025-4242"}},  # old, must be dropped
+                ],
+            },
+        )
+
+    respx.get(url__startswith="https://example.com/cves").mock(side_effect=handler)
+    policy = _nvd_policy()
+    policy.options["nvd"]["min_cve_year"] = 2026
+    ctx = FetchContext()
+    try:
+        result = NvdConnector(ctx).poll(policy, Checkpoint())
+    finally:
+        ctx.close()
+
+    ids = {item.native_id for item in result.items}
+    assert ids == {"CVE-2026-0001"}  # only the 2026 CVE survives the filter
+
+
+@respx.mock
 def test_nvd_steady_window_uses_overlap_and_normal_schedule(monkeypatch) -> None:
     from ai_security_hot.connectors.nvd import NvdConnector
 

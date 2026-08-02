@@ -1,9 +1,14 @@
-"""Generate a self-contained HTML report of current classification data.
+"""Generate a self-contained HTML data report.
 
-Reads documents from the DB, embeds them as JSON into a single HTML file with
-inline CSS/JS (no external deps, no network). Re-runnable any time.
+Reads current documents + events from PostgreSQL once and embeds them into a
+single HTML file with inline CSS/JS (no external deps, no network at view time).
+The report shows the data itself — sources, classification tags, event types,
+companies, languages, a filterable document table and top events.
 
-    uv run python scripts/gen_report.py [out.html] [max_rows]
+    uv run python scripts/gen_report.py [out.html] [max_document_rows]
+
+DB host port is 5433 (the Docker container); set INTEL_DATABASE_URL or rely on
+the default which this script points at 5433.
 """
 
 from __future__ import annotations
@@ -13,214 +18,288 @@ import sys
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from sqlalchemy import and_, func, not_, select
+from sqlalchemy import desc, func, select
 
 from ai_security_hot.models.base import session_scope
-from ai_security_hot.models.tables import Document, Source, SourceEndpoint
-from ai_security_hot.storage import repositories as repo
+from ai_security_hot.models.semantic_tables import (
+    AtomicEvent,
+    DocumentEnrichment,
+    ExtractedClaim,
+    RelationVerdict,
+    SemanticWorkItem,
+)
+from ai_security_hot.models.tables import Document, Event, SourceEndpoint
 
+# Friendly labels for the two-layer taxonomy (keeps the report readable).
 TECH_LABELS = {
-    "cve": "CVE",
-    "llm": "LLM",
-    "ai_for_security": "AI for Security",
-    "security_for_ai": "Security for AI",
-    "agent": "Agent",
+    "cve": "CVE 漏洞",
+    "llm": "大模型",
+    "ai_for_security": "AI 用于安全",
+    "security_for_ai": "AI 自身安全",
+    "agent": "智能体",
     "system_security": "系统安全",
 }
+ETYPE_LABELS = {
+    "vulnerability": "漏洞",
+    "release": "发布",
+    "research": "研究",
+    "incident": "事故",
+    "policy": "政策",
+    "funding": "融资",
+    "tool": "工具",
+    "opinion": "观点/其他",
+}
+SOURCE_LABELS = {
+    "openai-news-rss": "OpenAI News",
+    "aihot-selected-api": "AI HOT 精选",
+    "aihot-selected-rss": "AI HOT (RSS)",
+    "cisa-kev": "CISA KEV",
+    "anthropic-news": "Anthropic",
+    "nvd-recent": "NVD 漏洞库",
+    "huggingface-blog-rss": "Hugging Face",
+    "google-security-rss": "Google Security",
+    "trailofbits-rss": "Trail of Bits",
+    "portswigger-research-rss": "PortSwigger",
+    "apple-ml-research-rss": "Apple ML",
+    "nvidia-blog-rss": "NVIDIA",
+    "wiz-blog-rss": "Wiz",
+    "arxiv-ai-llm": "arXiv AI/LLM",
+    "arxiv-security-ai": "arXiv 安全",
+    "hackernews-rss": "Hacker News",
+    "ithome-rss": "IT之家",
+    "google-blog-ai-rss": "Google Blog AI",
+    "github-trending-rss": "GitHub Trending",
+}
+
+# Sources that are bulk vulnerability feeds — huge volume, low reading value.
+# The report tags them so the UI can offer a one-click toggle.
+BULK_SOURCES = {"nvd-recent"}
+
+MAX_ROWS_DEFAULT = 4000
 
 
-def _document_payload(d: Document, endpoint: SourceEndpoint, source: Source) -> dict:
-    current = repo.is_current_document(d.source_status, d.record_status)
-    return {
-        "id": d.id,
-        "title": d.title_original,
-        "url": d.canonical_url,
-        "source": source.name,
-        "source_id": source.id,
-        "endpoint": endpoint.id,
-        "endpoint_enabled": endpoint.enabled,
-        "endpoint_status": endpoint.status,
-        "replacement_endpoint": endpoint.replacement_endpoint_id,
-        "source_status": d.source_status,
-        "source_status_reason": d.source_status_reason,
-        "record_status": d.record_status,
-        "record_status_raw": d.record_status_raw,
-        "current": current,
-        "lang": d.language,
-        "published": d.published_at_utc.isoformat() if d.published_at_utc else None,
-        "tech": list(d.tech_directions or []),
-        "company": list(d.company_models or []),
-        "etype": d.classified_event_type,
-        "method": d.classify_method,
-        "conf": d.classify_confidence,
-        "cve": (d.identifiers or {}).get("cve", []),
+def _iso(dt: datetime | None) -> str | None:
+    return dt.isoformat() if dt else None
+
+
+def collect(session, max_rows: int) -> dict[str, Any]:
+    # only current, published documents (hide superseded/withdrawn/retired/rejected)
+    visible = (
+        (Document.source_status == "active")
+        & (Document.record_status == "published")
+    )
+
+    total = session.execute(
+        select(func.count()).select_from(Document).where(visible)
+    ).scalar_one()
+    total_bulk = session.execute(
+        select(func.count()).select_from(Document).where(
+            visible, Document.endpoint_id.in_(BULK_SOURCES)
+        )
+    ).scalar_one()
+
+    # aggregates (computed in SQL over the whole visible set)
+    src_rows = session.execute(
+        select(Document.endpoint_id, func.count())
+        .where(visible).group_by(Document.endpoint_id).order_by(desc(func.count()))
+    ).all()
+    etype_rows = session.execute(
+        select(Document.classified_event_type, func.count())
+        .where(visible).group_by(Document.classified_event_type).order_by(desc(func.count()))
+    ).all()
+    lang_rows = session.execute(
+        select(Document.language, func.count())
+        .where(visible).group_by(Document.language).order_by(desc(func.count()))
+    ).all()
+
+    # multi-label tags need per-row expansion — do it in Python over a capped scan
+    tech_c: Counter = Counter()
+    company_c: Counter = Counter()
+    for (td, cm) in session.execute(
+        select(Document.tech_directions, Document.company_models).where(visible)
+    ):
+        for t in td or []:
+            tech_c[t] += 1
+        for c in cm or []:
+            company_c[c] += 1
+
+    # sample rows for the table — newest first, exclude bulk vuln feed by default
+    # (the UI still lets the user include it). We cap to keep the file small.
+    sample_stmt = (
+        select(Document)
+        .where(visible, Document.endpoint_id.notin_(BULK_SOURCES))
+        .order_by(desc(Document.published_at_utc).nullslast(), desc(Document.id))
+        .limit(max_rows)
+    )
+    docs = []
+    for d in session.execute(sample_stmt).scalars():
+        docs.append(
+            {
+                "title": d.title_original,
+                "url": d.canonical_url,
+                "source": d.endpoint_id,
+                "lang": d.language,
+                "pub": _iso(d.published_at_utc),
+                "tech": d.tech_directions or [],
+                "company": d.company_models or [],
+                "etype": d.classified_event_type,
+                "cve": (d.identifiers or {}).get("cve", []),
+                "dup": d.near_dup_of is not None,
+            }
+        )
+
+    # top recent general (non-vuln) events by score.
+    # Vuln-db events (NVD/KEV category) and any CVE-topic event (including news
+    # articles about CVEs) are excluded from the reader-facing hot list — CVE
+    # content is tracked separately.
+    events = []
+    ev_stmt = (
+        select(Event)
+        .where(
+            Event.status == "detected",
+            (Event.category == "general") | (Event.category.is_(None)),
+            (Event.topic != "cve") | (Event.topic.is_(None)),
+        )
+        .order_by(desc(Event.score).nullslast(), desc(Event.last_seen_at).nullslast())
+        .limit(200)
+    )
+    for e in session.execute(ev_stmt).scalars():
+        events.append(
+            {
+                "title": e.title,
+                "type": e.event_type,
+                "topic": e.topic,
+                "score": e.score,
+                "last": _iso(e.last_seen_at),
+            }
+        )
+
+    # general (non-vuln-db) events count; vuln_db events are tracked separately.
+    total_events = session.execute(
+        select(func.count())
+        .select_from(Event)
+        .where(
+            Event.status == "detected",
+            (Event.category == "general") | (Event.category.is_(None)),
+        )
+    ).scalar_one()
+    total_cve_events = session.execute(
+        select(func.count())
+        .select_from(Event)
+        .where(Event.status == "detected", Event.category == "vuln_db")
+    ).scalar_one()
+    active_sources = session.execute(
+        select(func.count()).select_from(SourceEndpoint).where(SourceEndpoint.enabled.is_(True))
+    ).scalar_one()
+
+    # --- semantic enrichment summary (M2.2) ---
+    sem_total = session.execute(
+        select(func.count()).select_from(DocumentEnrichment)
+    ).scalar_one()
+    sem_relevant = session.execute(
+        select(func.count()).select_from(DocumentEnrichment).where(
+            DocumentEnrichment.relevant.is_(True)
+        )
+    ).scalar_one()
+    sem_with_batch = session.execute(
+        select(func.count()).select_from(DocumentEnrichment).where(
+            DocumentEnrichment.batch_id.is_not(None)
+        )
+    ).scalar_one()
+    sem_with_usage = session.execute(
+        select(func.count()).select_from(DocumentEnrichment).where(
+            DocumentEnrichment.usage != {}
+        )
+    ).scalar_one()
+    sem_finish_reason = session.execute(
+        select(func.count()).select_from(DocumentEnrichment).where(
+            DocumentEnrichment.finish_reason.is_not(None)
+        )
+    ).scalar_one()
+    sem_ct_rows = session.execute(
+        select(DocumentEnrichment.content_type, func.count())
+        .group_by(DocumentEnrichment.content_type)
+        .order_by(desc(func.count()))
+    ).all()
+    sem_atomic = session.execute(
+        select(func.count()).select_from(AtomicEvent)
+    ).scalar_one()
+    sem_claims = session.execute(
+        select(func.count()).select_from(ExtractedClaim)
+    ).scalar_one()
+    sem_work_status = session.execute(
+        select(SemanticWorkItem.status, func.count())
+        .group_by(SemanticWorkItem.status)
+        .order_by(desc(func.count()))
+    ).all()
+    # per-source enrichment distribution (exposes the source-skew M2.2.2 fixes)
+    sem_src_rows = session.execute(
+        select(Document.endpoint_id, func.count())
+        .join(DocumentEnrichment, DocumentEnrichment.document_id == Document.id)
+        .group_by(Document.endpoint_id)
+        .order_by(desc(func.count()))
+    ).all()
+    # M2.3 relation verdicts + M2.4 promotion metrics (shadow)
+    relation_rows = session.execute(
+        select(RelationVerdict.decision, func.count())
+        .group_by(RelationVerdict.decision)
+        .order_by(desc(func.count()))
+    ).all()
+    sem = {
+        "total": sem_total,
+        "relevant": sem_relevant,
+        "irrelevant": sem_total - sem_relevant,
+        "with_batch": sem_with_batch,
+        "with_usage": sem_with_usage,
+        "with_finish_reason": sem_finish_reason,
+        "content_types": {(k or "?"): v for k, v in sem_ct_rows},
+        "by_source": {(k or "?"): v for k, v in sem_src_rows},
+        "atomic_events": sem_atomic,
+        "claims": sem_claims,
+        "work_status": {(k or "?"): v for k, v in sem_work_status},
+        "relations": {(k or "?"): v for k, v in relation_rows},
     }
 
-
-def collect(max_rows: int = 30000) -> tuple[list[dict], dict]:
-    if max_rows < 1000:
-        raise ValueError("max_rows must be at least 1000")
-
-    with session_scope() as session:
-        current_conditions = repo.current_document_conditions()
-        current_clause = and_(*current_conditions)
-
-        total = int(session.scalar(select(func.count()).select_from(Document)) or 0)
-        current_total = int(
-            session.scalar(select(func.count()).select_from(Document).where(*current_conditions))
-            or 0
-        )
-        historical_total = total - current_total
-
-        tech_c: Counter = Counter()
-        etype_c: Counter = Counter()
-        company_c: Counter = Counter()
-        current_source_c: Counter = Counter()
-        stat_rows = session.execute(
-            select(
-                Document.tech_directions,
-                Document.company_models,
-                Document.classified_event_type,
-                Source.name,
-            )
-            .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
-            .join(Source, Source.id == SourceEndpoint.source_id)
-            .where(*current_conditions)
-            .execution_options(yield_per=2000)
-        )
-        for directions, companies, event_type, source_name in stat_rows:
-            tech_c.update(directions or [])
-            company_c.update(companies or [])
-            if event_type:
-                etype_c[event_type] += 1
-            current_source_c[source_name] += 1
-
-        source_status_c = Counter(
-            dict(
-                session.execute(
-                    select(Document.source_status, func.count()).group_by(Document.source_status)
-                ).all()
-            )
-        )
-        record_status_c = Counter(
-            dict(
-                session.execute(
-                    select(Document.record_status, func.count()).group_by(Document.record_status)
-                ).all()
-            )
-        )
-        all_source_c = Counter(
-            dict(
-                session.execute(
-                    select(Source.name, func.count())
-                    .select_from(Document)
-                    .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
-                    .join(Source, Source.id == SourceEndpoint.source_id)
-                    .group_by(Source.name)
-                ).all()
-            )
-        )
-        endpoint_c = Counter(
-            dict(
-                session.execute(
-                    select(Document.endpoint_id, func.count()).group_by(Document.endpoint_id)
-                ).all()
-            )
-        )
-        endpoint_current_c = Counter(
-            dict(
-                session.execute(
-                    select(Document.endpoint_id, func.count())
-                    .where(*current_conditions)
-                    .group_by(Document.endpoint_id)
-                ).all()
-            )
-        )
-
-        # A static HTML report must remain browser-sized as NVD grows. Preserve
-        # up to 5k non-current evidence rows, then fill the remaining budget with
-        # the newest current rows. Aggregate counts above always cover the DB.
-        history_limit = min(5000, max_rows // 4)
-        history_rows = session.execute(
-            select(Document, SourceEndpoint, Source)
-            .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
-            .join(Source, Source.id == SourceEndpoint.source_id)
-            .where(not_(current_clause))
-            .order_by(Document.id.desc())
-            .limit(history_limit)
-        ).all()
-        current_limit = max_rows - len(history_rows)
-        current_rows = session.execute(
-            select(Document, SourceEndpoint, Source)
-            .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
-            .join(Source, Source.id == SourceEndpoint.source_id)
-            .where(*current_conditions)
-            .order_by(Document.id.desc())
-            .limit(current_limit)
-        ).all()
-        docs = [
-            _document_payload(document, endpoint, source)
-            for document, endpoint, source in [*history_rows, *current_rows]
-        ]
-        docs.sort(key=lambda item: int(item["id"]), reverse=True)
-
-        endpoints = []
-        for endpoint, source in session.execute(
-            select(SourceEndpoint, Source)
-            .join(Source, Source.id == SourceEndpoint.source_id)
-            .order_by(Source.name, SourceEndpoint.id)
-        ).all():
-            endpoints.append(
-                {
-                    "id": endpoint.id,
-                    "source": source.name,
-                    "source_id": source.id,
-                    "enabled": endpoint.enabled,
-                    "status": endpoint.status,
-                    "replacement": endpoint.replacement_endpoint_id,
-                    "current_documents": endpoint_current_c[endpoint.id],
-                    "all_documents": endpoint_c[endpoint.id],
-                }
-            )
-
-        embedded_current = sum(1 for document in docs if document["current"])
-        stats = {
-            "total": total,
-            "current_total": current_total,
-            "historical_total": historical_total,
-            "embedded_total": len(docs),
-            "embedded_current": embedded_current,
-            "embedded_historical": len(docs) - embedded_current,
-            "truncated": len(docs) < total,
-            "tech": dict(tech_c.most_common()),
-            "etype": dict(etype_c.most_common()),
-            "company": dict(company_c.most_common()),
-            "source": dict(current_source_c.most_common()),
-            "source_all": dict(all_source_c.most_common()),
-            "source_status": dict(source_status_c.most_common()),
-            "record_status": dict(record_status_c.most_common()),
-            "endpoints": endpoints,
-            "generated_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
-        }
-        return docs, stats
+    return {
+        "generated_at": datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
+        "totals": {
+            "documents": total,
+            "documents_bulk": total_bulk,
+            "documents_reading": total - total_bulk,
+            "events": total_events,
+            "cve_events": total_cve_events,
+            "sources": active_sources,
+            "sample": len(docs),
+        },
+        "sources": [{"id": k, "n": v} for k, v in src_rows],
+        "tech": dict(tech_c.most_common()),
+        "company": dict(company_c.most_common()),
+        "etype": {(k or "opinion"): v for k, v in etype_rows},
+        "lang": {(k or "?"): v for k, v in lang_rows},
+        "docs": docs,
+        "events": events,
+        "semantic": sem,
+        "labels": {"tech": TECH_LABELS, "etype": ETYPE_LABELS, "source": SOURCE_LABELS},
+        "bulkSources": sorted(BULK_SOURCES),
+    }
 
 
 def main() -> None:
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("report.html")
-    max_rows = int(sys.argv[2]) if len(sys.argv) > 2 else 30000
-    docs, stats = collect(max_rows=max_rows)
-    payload = json.dumps(
-        {"docs": docs, "stats": stats, "techLabels": TECH_LABELS}, ensure_ascii=False
-    )
-    # This is embedded inside an HTML <script>; source text is untrusted.
-    payload = payload.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
-    template = (Path(__file__).parent / "dashboard_template.html").read_text(encoding="utf-8")
+    max_rows = int(sys.argv[2]) if len(sys.argv) > 2 else MAX_ROWS_DEFAULT
+    with session_scope() as session:
+        data = collect(session, max_rows)
+    payload = json.dumps(data, ensure_ascii=False)
+    template = (Path(__file__).parent / "report_template.html").read_text(encoding="utf-8")
     html = template.replace("/*__DATA__*/", payload)
     out.write_text(html, encoding="utf-8")
+    t = data["totals"]
     print(
-        f"wrote {out} — {stats['current_total']} current / "
-        f"{stats['total']} total documents, {out.stat().st_size // 1024} KB"
+        f"wrote {out} — {t['documents']} docs "
+        f"({t['documents_reading']} reading + {t['documents_bulk']} bulk), "
+        f"{t['events']} events, {out.stat().st_size // 1024} KB"
     )
 
 

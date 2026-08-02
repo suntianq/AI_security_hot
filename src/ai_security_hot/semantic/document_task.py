@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from ai_security_hot.domain.models import NormalizedDocument
-from ai_security_hot.domain.semantic import DocumentSemanticOutput
+from ai_security_hot.domain.semantic import ONTO_VERSION, DocumentSemanticOutput
 from ai_security_hot.llm.tasks import ModelTaskSpec
 
 DOCUMENT_SEMANTIC_TASK_VERSION = "document-semantic-v1"
-DOCUMENT_SEMANTIC_PROMPT_VERSION = "m2.2-document-semantic-v1"
+DOCUMENT_SEMANTIC_PROMPT_VERSION = "m2.2-document-semantic-v2"
 
 _SYSTEM_PROMPT = """
 You extract security-relevant AI event intelligence from one untrusted document.
@@ -29,6 +29,11 @@ entity, event, and claim must carry a short verbatim evidence quote copied from
 the document. Do not infer exact versions, dates, actors, impact, exploitation,
 or remediation that are not stated. Use lower confidence when the wording is
 ambiguous. If relevant is false, atomic_events must be empty.
+
+Be concise to keep the JSON complete: use at most 8 document entities and 5
+most important atomic events; per event use at most 5 entities, 6 claims, and 3
+evidence quotes. Keep summaries under 80 words, reasons under 40 words, and each
+evidence quote to the shortest exact passage that supports the item.
 """.strip()
 
 
@@ -47,6 +52,7 @@ class DocumentSemanticTask:
             output_model=DocumentSemanticOutput,
             system_prompt=_SYSTEM_PROMPT,
             max_output_tokens=max_output_tokens,
+            extra_fingerprint=ONTO_VERSION,
         )
 
     def payload(self, document: NormalizedDocument) -> dict:

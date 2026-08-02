@@ -4,20 +4,27 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from ai_security_hot.config.models import ResolvedModelConfig, resolve_model_config
 from ai_security_hot.config.settings import Settings
 from ai_security_hot.llm.provider import ModelProvider, OpenAICompatibleProvider
 
-ProviderFactory = Callable[[Settings], ModelProvider]
+ProviderFactory = Callable[[ResolvedModelConfig], ModelProvider]
 
 
-def _openai_compatible(settings: Settings) -> ModelProvider:
-    if not settings.llm_api_key or not settings.llm_model:
-        raise ValueError("INTEL_LLM_API_KEY and INTEL_LLM_MODEL are required")
+def _openai_compatible(config: ResolvedModelConfig) -> ModelProvider:
+    if not config.api_key_configured or not config.model:
+        raise ValueError(
+            "INTEL_LLM_API_KEY and a model from config/models.yaml or "
+            "INTEL_LLM_MODEL are required"
+        )
+    assert config.api_key is not None
     return OpenAICompatibleProvider(
-        base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
-        model=settings.llm_model,
-        timeout_seconds=settings.llm_timeout_seconds,
+        base_url=config.base_url,
+        api_key=config.api_key.get_secret_value(),
+        model=config.model,
+        timeout_seconds=config.timeout_seconds,
+        response_format=config.response_format,
+        thinking_mode=config.thinking_mode,
     )
 
 
@@ -34,11 +41,16 @@ def provider_names() -> tuple[str, ...]:
     return tuple(sorted(_FACTORIES))
 
 
-def build_provider(settings: Settings) -> ModelProvider:
+def build_provider(
+    settings: Settings,
+    *,
+    config: ResolvedModelConfig | None = None,
+) -> ModelProvider:
+    resolved = config or resolve_model_config(settings)
     try:
-        factory = _FACTORIES[settings.llm_provider]
+        factory = _FACTORIES[resolved.provider]
     except KeyError as exc:
         raise ValueError(
-            f"unknown LLM provider {settings.llm_provider!r}; available={provider_names()}"
+            f"unknown LLM provider {resolved.provider!r}; available={provider_names()}"
         ) from exc
-    return factory(settings)
+    return factory(resolved)

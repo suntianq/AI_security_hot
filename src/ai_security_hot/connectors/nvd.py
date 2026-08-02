@@ -17,6 +17,14 @@ _CURSOR_PREFIX = "nvd-window-v1:"
 _STEADY_CURSOR = "nvd-steady-v1"
 
 
+def _cve_year(native_id: str) -> int | None:
+    """Parse the year from a CVE id like 'CVE-2026-12345'. None if unparseable."""
+    parts = native_id.split("-")
+    if len(parts) >= 2 and parts[0].upper() == "CVE" and parts[1].isdigit():
+        return int(parts[1])
+    return None
+
+
 def _format_nvd_time(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -50,6 +58,10 @@ class NvdConnector(Connector):
         target_results = int(opts.get("target_results", 20000))
         minimum_window_minutes = int(opts.get("minimum_window_minutes", 60))
         catchup_interval = int(opts.get("catchup_interval_minutes", 1))
+        # Drop CVEs whose id-year is before this (e.g. 2026): NVD's lastMod
+        # window still surfaces old CVEs revised recently, so filter by id-year.
+        min_cve_year = opts.get("min_cve_year")
+        min_cve_year = int(min_cve_year) if min_cve_year is not None else None
         now = self._now()
 
         if checkpoint.cursor and checkpoint.cursor.startswith(_CURSOR_PREFIX):
@@ -98,12 +110,18 @@ class NvdConnector(Connector):
             active_native_ids=checkpoint.active_native_ids,
         )
         result = RestApiConnector(self.ctx).poll(window_policy, inner_checkpoint)
-        for item in result.items:
+        items = result.items
+        if min_cve_year is not None:
+            items = [
+                it for it in items
+                if (_cve_year(it.native_id) or 0) >= min_cve_year
+            ]
+        for item in items:
             item.connector_kind = ConnectorKind.NVD
             item.connector_version = self.version
             item.canonical_url = f"https://nvd.nist.gov/vuln/detail/{item.native_id}"
         return PollResult(
-            result.items,
+            items,
             Checkpoint(cursor=next_cursor),
             next_poll_minutes=next_poll,
         )

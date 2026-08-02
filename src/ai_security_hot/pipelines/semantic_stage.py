@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 from time import monotonic
 
+from ai_security_hot.config.models import resolve_model_config
 from ai_security_hot.config.settings import get_settings
+from ai_security_hot.llm.provider import provider_cache_namespace
 from ai_security_hot.llm.registry import build_provider
 from ai_security_hot.llm.tasks import ValidatedModelTaskRunner
 from ai_security_hot.models.base import session_scope
@@ -20,10 +22,19 @@ def run_semantic_enrichment_stage(
     limit: int | None = None,
     *,
     force: bool = False,
+    enqueue: bool = True,
+    batch_id: str | None = None,
+    document_ids: list[int] | None = None,
 ) -> dict:
-    """Extract versioned entities/events/claims without changing current Events."""
+    """Extract versioned entities/events/claims without changing current Events.
+
+    ``document_ids`` restricts enqueueing to a specific doc set (used by the
+    stratified eval sampler) — otherwise the stage enqueues recent eligible docs.
+    """
 
     settings = get_settings()
+    if batch_id is None:
+        batch_id = settings.semantic_enrichment_batch_id
     enabled = getattr(settings, "semantic_enrichment_enabled", False)
     if not enabled and not force:
         return {"status": "disabled", "claimed": 0, "enriched": 0}
@@ -35,7 +46,8 @@ def run_semantic_enrichment_stage(
         raise ValueError("only shadow semantic enrichment is implemented")
 
     try:
-        provider = build_provider(settings)
+        model_config = resolve_model_config(settings)
+        provider = build_provider(settings, config=model_config)
     except ValueError as exc:
         log.warning("semantic enrichment configuration invalid: %s", exc)
         return {
@@ -46,20 +58,27 @@ def run_semantic_enrichment_stage(
         }
 
     task = DocumentSemanticTask(
-        max_input_chars=settings.llm_max_input_chars,
-        max_output_tokens=getattr(settings, "semantic_llm_max_output_tokens", 2500),
+        max_input_chars=model_config.max_input_chars,
+        max_output_tokens=model_config.semantic_max_output_tokens,
     )
     runner = ValidatedModelTaskRunner(provider)
+    provider_namespace = provider_cache_namespace(provider)
     execution_version = runner.prepare(task.spec, {}).execution_version
 
     with session_scope() as session:
-        queued = semantic_repository.enqueue_document_work(
-            session,
-            task=task.spec.name,
-            task_version=task.spec.task_version,
-            execution_version=execution_version,
-            mode=mode,
-            limit=batch_size,
+        queued = (
+            semantic_repository.enqueue_document_work(
+                session,
+                task=task.spec.name,
+                task_version=task.spec.task_version,
+                execution_version=execution_version,
+                mode=mode,
+                limit=batch_size,
+                batch_id=batch_id,
+                document_ids=document_ids,
+            )
+            if enqueue
+            else 0
         )
         work = semantic_repository.claim_document_work(
             session,
@@ -67,6 +86,7 @@ def run_semantic_enrichment_stage(
             execution_version=execution_version,
             limit=batch_size,
             lease_seconds=lease_seconds,
+            batch_id=batch_id,
         )
 
     stats = {
@@ -102,7 +122,7 @@ def run_semantic_enrichment_stage(
         prepared = runner.prepare(task.spec, task.payload(item.document))
         cache_key = {
             "task": task.spec.name,
-            "provider": provider.name,
+            "provider": provider_namespace,
             "model": provider.model,
             "prompt_version": task.spec.prompt_version,
             "input_hash": prepared.input_hash,
@@ -138,7 +158,7 @@ def run_semantic_enrichment_stage(
                     session,
                     document_id=item.document_id,
                     task=task.spec.name,
-                    provider=provider.name,
+                    provider=provider_namespace,
                     model=provider.model,
                     prompt_version=task.spec.prompt_version,
                     input_hash=prepared.input_hash,
@@ -155,9 +175,13 @@ def run_semantic_enrichment_stage(
                     input_hash=prepared.input_hash,
                     execution_version=execution_version,
                     enrichment_version=task.spec.task_version,
-                    provider=provider.name,
+                    provider=provider_namespace,
                     model=provider.model,
                     prompt_version=task.spec.prompt_version,
+                    finish_reason=result.finish_reason,
+                    usage=result.usage,
+                    raw_response=result.raw_response,
+                    batch_id=batch_id,
                 )
             stats["enriched"] += 1
             stats["relevant"] += int(result.output.relevant)
@@ -168,18 +192,22 @@ def run_semantic_enrichment_stage(
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             retry_seconds = min(86400, 60 * (2 ** min(item.attempts, 10)))
+            # audit the failed call: usage + finish_reason if the runner had them
+            failed_usage = result.usage if result is not None else None
+            failed_finish = result.finish_reason if result is not None else None
             try:
                 with session_scope() as session:
                     repo.record_model_run(
                         session,
                         document_id=item.document_id,
                         task=task.spec.name,
-                        provider=provider.name,
+                        provider=provider_namespace,
                         model=provider.model,
                         prompt_version=task.spec.prompt_version,
                         input_hash=prepared.input_hash,
                         status="failed",
                         latency_ms=round((monotonic() - started) * 1000),
+                        usage=failed_usage,
                         error=error,
                     )
                     semantic_repository.fail_document_work(
@@ -188,6 +216,8 @@ def run_semantic_enrichment_stage(
                         lease_token=item.lease_token,
                         error=error,
                         retry_after_seconds=retry_seconds,
+                        finish_reason=failed_finish,
+                        usage=failed_usage,
                     )
             except semantic_repository.SemanticLeaseLost:
                 stats["lease_lost"] += 1

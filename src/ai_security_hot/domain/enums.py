@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+# Endpoints that are authoritative structured-vulnerability feeds. Their CVE
+# records are deduplicated/clustered in their own scope (vuln-db events), kept
+# separate from the news/general pipeline, and use a namespaced event key so
+# they never collide with a news article that merely mentions the same CVE.
+STRUCTURED_VULN_ENDPOINTS: frozenset[str] = frozenset({"nvd-recent", "cisa-kev"})
+
 
 class Topic(StrEnum):
     """The four top-level content lines (MVP 2.1)."""

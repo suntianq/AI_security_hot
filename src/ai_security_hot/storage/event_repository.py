@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from datetime import UTC, datetime
 from itertools import batched
@@ -11,7 +12,7 @@ from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, aliased
 
-from ai_security_hot.domain.enums import NON_CURRENT_UPSTREAM_STATUSES
+from ai_security_hot.domain.enums import NON_CURRENT_UPSTREAM_STATUSES, STRUCTURED_VULN_ENDPOINTS
 from ai_security_hot.events.intelligence import (
     CLUSTER_VERSION,
     DEDUPE_VERSION,
@@ -46,12 +47,29 @@ from ai_security_hot.models.tables import (
     SourceEndpoint,
 )
 
+log = logging.getLogger("intel.event_repository")
+
 
 def _current_alias_conditions(document) -> tuple:
     return (
         document.source_status == "active",
         document.record_status.not_in(NON_CURRENT_UPSTREAM_STATUSES),
     )
+
+
+def _scope_conditions(document, scope: str) -> tuple:
+    """Base current-document conditions plus the endpoint-scope filter.
+
+    scope="all" (default) applies no endpoint restriction. scope="vuln" restricts
+    to the structured-vulnerability endpoints (NVD/KEV); scope="general" excludes
+    them so the news pipeline never touches the vuln-db corpus.
+    """
+    conditions = list(_current_alias_conditions(document))
+    if scope == "vuln":
+        conditions.append(document.endpoint_id.in_(STRUCTURED_VULN_ENDPOINTS))
+    elif scope == "general":
+        conditions.append(document.endpoint_id.notin_(STRUCTURED_VULN_ENDPOINTS))
+    return tuple(conditions)
 
 
 def load_documents(
@@ -346,7 +364,7 @@ def count_pending_work(session: Session, *, stage: str) -> int:
 
 
 def _claim_dedupe_seeds(
-    session: Session, *, limit: int, run_id: int
+    session: Session, *, limit: int, run_id: int, scope: str = "all"
 ) -> tuple[list[int], list[int], set[int]]:
     now = datetime.now(UTC)
     work = list(
@@ -363,7 +381,7 @@ def _claim_dedupe_seeds(
     remaining = max(0, limit - len(set(seed_ids)))
     if remaining:
         due_stmt = select(Document.id).where(
-            *_current_alias_conditions(Document),
+            *_scope_conditions(Document, scope),
             (Document.dedupe_version.is_(None)) | (Document.dedupe_version != DEDUPE_VERSION),
         )
         if seed_ids:
@@ -383,6 +401,7 @@ def _candidate_pairs(
     *,
     max_pairs: int,
     excluded_candidate_ids: set[int] | None = None,
+    scope: str = "all",
 ) -> tuple[list[tuple[int, int]], bool]:
     if not seed_ids:
         return [], False
@@ -396,7 +415,7 @@ def _candidate_pairs(
             CandidateReview.left_document_id.in_(seed_ids),
             CandidateReview.status == "approved",
             CandidateReview.algorithm_version == DEDUPE_VERSION,
-            *_current_alias_conditions(review_candidate),
+            *_scope_conditions(review_candidate, scope),
         )
         .distinct()
         .order_by(CandidateReview.left_document_id, CandidateReview.right_document_id)
@@ -416,7 +435,7 @@ def _candidate_pairs(
             CandidateReview.right_document_id.in_(seed_ids),
             CandidateReview.status == "approved",
             CandidateReview.algorithm_version == DEDUPE_VERSION,
-            *_current_alias_conditions(review_candidate),
+            *_scope_conditions(review_candidate, scope),
         )
         .distinct()
         .order_by(CandidateReview.right_document_id, CandidateReview.left_document_id)
@@ -463,7 +482,7 @@ def _candidate_pairs(
             .where(
                 frequency_signature.active.is_(True),
                 frequency_column.in_(seed_values),
-                *_current_alias_conditions(frequency_document),
+                *_scope_conditions(frequency_document, scope),
             )
             .group_by(frequency_column)
             .having(func.count() <= 100)
@@ -479,7 +498,7 @@ def _candidate_pairs(
                 seed_column.is_not(None),
                 candidate_sig.active.is_(True),
                 seed_sig.document_id != candidate_sig.document_id,
-                *_current_alias_conditions(candidate_doc),
+                *_scope_conditions(candidate_doc, scope),
             )
             .distinct()
             .order_by(seed_sig.document_id, candidate_sig.document_id)
@@ -527,7 +546,7 @@ def _candidate_pairs(
                 token_stat.active_document_count <= 100,
                 seed_token.document_id != candidate_token.document_id,
                 time_compatible,
-                *_current_alias_conditions(candidate_doc),
+                *_scope_conditions(candidate_doc, scope),
             )
         )
         if excluded:
@@ -564,7 +583,7 @@ def _candidate_pairs(
 
 
 def _expand_component_closure(
-    session: Session, document_ids: set[int], *, max_documents: int
+    session: Session, document_ids: set[int], *, max_documents: int, scope: str = "all"
 ) -> set[int]:
     if not document_ids:
         return set()
@@ -587,7 +606,7 @@ def _expand_component_closure(
             select(Document.id)
             .where(
                 Document.dedupe_component_id.in_(component_ids),
-                *_current_alias_conditions(Document),
+                *_scope_conditions(Document, scope),
             )
             .order_by(Document.id)
             .limit(max_documents + 1)
@@ -606,6 +625,7 @@ def _expand_dedupe_closure(
     *,
     max_documents: int,
     max_pairs: int,
+    scope: str = "all",
 ) -> tuple[set[int], list[tuple[int, int]]]:
     """Load seed components, one-hop candidates and every candidate's old component.
 
@@ -614,11 +634,14 @@ def _expand_dedupe_closure(
     unchanged candidate's other possible relationships are handled by its own
     version work; its established duplicate component is included immediately.
     """
-    seed_universe = _expand_component_closure(session, set(seed_ids), max_documents=max_documents)
+    seed_universe = _expand_component_closure(
+        session, set(seed_ids), max_documents=max_documents, scope=scope
+    )
     pairs, truncated = _candidate_pairs(
         session,
         sorted(seed_universe),
         max_pairs=max_pairs,
+        scope=scope,
     )
     if truncated:
         raise RuntimeError(f"local dedupe candidate graph exceeds pair limit {max_pairs}")
@@ -627,6 +650,7 @@ def _expand_dedupe_closure(
         session,
         seed_universe | candidate_ids,
         max_documents=max_documents,
+        scope=scope,
     )
     return universe, pairs
 
@@ -947,6 +971,7 @@ def run_local_dedupe(
     limit: int = 1000,
     max_candidates: int = 20000,
     trigger: str = "scheduler",
+    scope: str = "all",
 ) -> dict[str, Any]:
     run = M2Run(
         stage="dedupe",
@@ -958,24 +983,46 @@ def run_local_dedupe(
     session.add(run)
     session.flush()
     seed_ids, work_ids, changed_seed_ids = _claim_dedupe_seeds(
-        session, limit=limit, run_id=int(run.id)
+        session, limit=limit, run_id=int(run.id), scope=scope
     )
     if not seed_ids:
         run.status = "success"
         run.finished_at = datetime.now(UTC)
-        run.stats = {"status": "current"}
+        run.stats = {"status": "current", "scope": scope}
         return {"status": "current", "version": DEDUPE_VERSION, "due": 0, "run_id": run.id}
 
     # Signature backfill runs before this stage. Pure algorithm-version replay
     # seeds can reuse that persisted index; only durable content/classification/
     # lifecycle work may have changed the signature since it was indexed.
     refresh_document_signatures(session, changed_seed_ids)
-    universe_ids, pairs = _expand_dedupe_closure(
-        session,
-        set(seed_ids),
-        max_documents=max_candidates,
-        max_pairs=max_candidates,
-    )
+    # Dense scopes (e.g. NVD/KEV) can exceed the candidate pair budget. Instead
+    # of aborting the whole batch, retry on a progressively smaller seed slice.
+    batch_seeds = seed_ids
+    universe_ids: set[int] = set()
+    pairs: list[tuple[int, int]] = []
+    while batch_seeds:
+        try:
+            universe_ids, pairs = _expand_dedupe_closure(
+                session,
+                set(batch_seeds),
+                max_documents=max_candidates,
+                max_pairs=max_candidates,
+                scope=scope,
+            )
+            break
+        except RuntimeError as exc:
+            if "candidate graph exceeds pair limit" not in str(exc):
+                raise
+            if len(batch_seeds) <= 1:
+                raise
+            halved = batch_seeds[: max(1, len(batch_seeds) // 2)]
+            log.warning(
+                "dedupe candidate graph exceeded pair limit for %d seeds; "
+                "retrying on %d seeds",
+                len(batch_seeds),
+                len(halved),
+            )
+            batch_seeds = halved
     documents = {document.id: document for document in load_documents(session, universe_ids)}
     decisions = deduplicate_documents(
         list(documents.values()),
@@ -1015,7 +1062,7 @@ def run_local_dedupe(
 
 
 def _claim_cluster_seeds(
-    session: Session, *, limit: int, run_id: int
+    session: Session, *, limit: int, run_id: int, scope: str = "all"
 ) -> tuple[list[int], set[int], list[int]]:
     now = datetime.now(UTC)
     work = list(
@@ -1032,7 +1079,7 @@ def _claim_cluster_seeds(
     remaining = max(0, limit - len(set(seed_ids)))
     if remaining:
         due_stmt = select(Document.id).where(
-            *_current_alias_conditions(Document),
+            *_scope_conditions(Document, scope),
             Document.dedupe_version == DEDUPE_VERSION,
             (Document.cluster_version.is_(None)) | (Document.cluster_version != CLUSTER_VERSION),
         )
@@ -1057,7 +1104,7 @@ def _claim_cluster_seeds(
 
 
 def _component_document_ids(
-    session: Session, component_ids: set[int], *, max_documents: int
+    session: Session, component_ids: set[int], *, max_documents: int, scope: str = "all"
 ) -> set[int]:
     if not component_ids:
         return set()
@@ -1068,7 +1115,7 @@ def _component_document_ids(
             .where(
                 Document.dedupe_component_id.in_(component_ids),
                 Document.dedupe_version == DEDUPE_VERSION,
-                *_current_alias_conditions(Document),
+                *_scope_conditions(Document, scope),
             )
             .order_by(Document.id)
             .limit(max_documents + 1)
@@ -1084,6 +1131,7 @@ def _expand_event_closure(
     component_ids: set[int],
     *,
     max_documents: int,
+    scope: str = "all",
 ) -> tuple[set[int], set[str]]:
     """Expand through event-key identities until the affected graph is closed."""
     active_components = set(component_ids)
@@ -1091,7 +1139,7 @@ def _expand_event_closure(
     event_identity_fingerprints: set[str] = set()
     while True:
         document_ids = _component_document_ids(
-            session, active_components, max_documents=max_documents
+            session, active_components, max_documents=max_documents, scope=scope
         )
         if not document_ids:
             return set(), set()
@@ -1133,7 +1181,7 @@ def _expand_event_closure(
                 .where(
                     DocumentIdentity.event_key.is_(True),
                     or_(*identity_filters),
-                    *_current_alias_conditions(Document),
+                    *_scope_conditions(Document, scope),
                 )
                 .distinct()
                 .limit(max_documents + 1)
@@ -1579,6 +1627,7 @@ def _apply_event_draft_local(
     desired_state = (
         draft.event_type,
         draft.topic,
+        draft.category,
         draft.title,
         draft.summary,
         draft.status,
@@ -1593,6 +1642,7 @@ def _apply_event_draft_local(
             fingerprint=draft.fingerprint,
             event_type=draft.event_type,
             topic=draft.topic,
+            category=draft.category,
             title=draft.title,
             summary=draft.summary,
             status=draft.status,
@@ -1613,6 +1663,7 @@ def _apply_event_draft_local(
         current_state = (
             event.event_type,
             event.topic,
+            event.category,
             event.title,
             event.summary,
             event.status,
@@ -1627,6 +1678,7 @@ def _apply_event_draft_local(
         (
             event.event_type,
             event.topic,
+            event.category,
             event.title,
             event.summary,
             event.status,
@@ -1705,6 +1757,7 @@ def run_local_cluster(
     limit: int = 1000,
     max_documents: int = 20000,
     trigger: str = "scheduler",
+    scope: str = "all",
 ) -> dict[str, Any]:
     run = M2Run(
         stage="cluster",
@@ -1716,7 +1769,7 @@ def run_local_cluster(
     session.add(run)
     session.flush()
     seed_ids, component_ids, work_ids = _claim_cluster_seeds(
-        session, limit=limit, run_id=int(run.id)
+        session, limit=limit, run_id=int(run.id), scope=scope
     )
     old_fingerprints = set(
         str(value)
@@ -1730,11 +1783,11 @@ def run_local_cluster(
     if not seed_ids and not component_ids and not old_fingerprints:
         run.status = "success"
         run.finished_at = datetime.now(UTC)
-        run.stats = {"status": "current"}
+        run.stats = {"status": "current", "scope": scope}
         return {"status": "current", "version": CLUSTER_VERSION, "due": 0, "run_id": run.id}
 
     document_ids, _identity_fingerprints = _expand_event_closure(
-        session, component_ids, max_documents=max_documents
+        session, component_ids, max_documents=max_documents, scope=scope
     )
     documents = load_documents(session, document_ids)
     decisions = _load_decisions(session, document_ids)
@@ -1797,17 +1850,18 @@ def run_local_cluster(
     }
 
 
-def queue_full_replay(session: Session, *, reason: str = "operator_replay") -> dict[str, int]:
+def queue_full_replay(
+    session: Session, *, reason: str = "operator_replay", scope: str = "all"
+) -> dict[str, int]:
     """Invalidate current derived versions once and record the replay request."""
+    conditions = list(_scope_conditions(Document, scope))
     count = int(
         session.execute(
-            select(func.count()).select_from(Document).where(*_current_alias_conditions(Document))
+            select(func.count()).select_from(Document).where(*conditions)
         ).scalar_one()
     )
     session.execute(
-        update(Document)
-        .where(*_current_alias_conditions(Document))
-        .values(dedupe_version=None, cluster_version=None)
+        update(Document).where(*conditions).values(dedupe_version=None, cluster_version=None)
     )
     run = M2Run(
         stage="replay",
@@ -1817,7 +1871,7 @@ def queue_full_replay(session: Session, *, reason: str = "operator_replay") -> d
         status="success",
         input_count=count,
         affected_count=count,
-        stats={"reason": reason, "queued_documents": count},
+        stats={"reason": reason, "queued_documents": count, "scope": scope},
         finished_at=datetime.now(UTC),
     )
     session.add(run)
@@ -1845,3 +1899,58 @@ def record_failed_run(
             finished_at=datetime.now(UTC),
         )
     )
+
+
+def supersede_stale_vuln_events(session: Session, *, limit: int = 2000) -> dict:
+    """Supersede legacy 'cve:' events left by the pre-isolation clusterer.
+
+    After the NVD isolation migration, structured-vuln CVEs get 'cve-nvd:' keys.
+    Old 'cve:' events (same CVE, pre-namespace) remain and create one document
+    mapping to two events. We mark the legacy events superseded (via EventVersion,
+    preserving history) so only the current 'cve-nvd:' event remains active.
+    """
+    stale_fingerprints = set(
+        session.execute(
+            select(Event.fingerprint)
+            .where(
+                Event.category == "vuln_db",
+                Event.status != "superseded",
+                Event.fingerprint.like("cve:%"),
+                ~Event.fingerprint.like("cve-nvd:%"),
+            )
+            .order_by(Event.id)
+            .limit(limit)
+        ).scalars()
+    )
+    if not stale_fingerprints:
+        return {"superseded": 0, "remaining_stale": 0}
+
+    events_by_fingerprint, links_by_event, claims_by_event, evidence_by_claim = (
+        _load_event_batch_state(session, stale_fingerprints)
+    )
+    superseded = 0
+    for fingerprint in sorted(stale_fingerprints):
+        _created, updated, _versions = _apply_event_draft_local(
+            session,
+            fingerprint,
+            None,  # draft None → supersede
+            events_by_fingerprint=events_by_fingerprint,
+            links_by_event=links_by_event,
+            claims_by_event=claims_by_event,
+            evidence_by_claim=evidence_by_claim,
+        )
+        if updated:
+            superseded += 1
+    session.flush()
+
+    remaining = session.execute(
+        select(func.count())
+        .select_from(Event)
+        .where(
+            Event.category == "vuln_db",
+            Event.status != "superseded",
+            Event.fingerprint.like("cve:%"),
+            ~Event.fingerprint.like("cve-nvd:%"),
+        )
+    ).scalar_one()
+    return {"superseded": superseded, "remaining_stale": int(remaining)}

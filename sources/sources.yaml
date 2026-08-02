@@ -264,6 +264,9 @@ endpoints:
         target_results: 20000
         minimum_window_minutes: 60
         catchup_interval_minutes: 1
+        # Keep only CVEs numbered 2026 or later. NVD's lastMod window still
+        # surfaces old CVEs revised recently, so drop them by id-year here.
+        min_cve_year: 2026
       rest:
         list_key: vulnerabilities
         nested_key: cve

@@ -1,8 +1,8 @@
 # M1 增量采集与混合分类实现说明
 
 > 状态：M1.1、M1.2.x、M1.3 已实现
-> 最后更新：2026-07-30
-> 配套文档：[系统设计](./system-design.md) · [信源注册表](./source-registry.md) · [M2 事件情报](./event-intelligence.md)
+> 最后更新：2026-07-31
+> 配套文档：[当前状态与路线](./current-status.md) · [系统设计](./system-design.md) · [信源注册表](./source-registry.md) · [M2 事件情报](./event-intelligence.md)
 
 M1 的目标不是“能抓到一批数据”，而是建立一条可长期演进的数据链：源端可以增量、修订、撤回和重建；原始证据不可变；当前状态可查询；慢模型失败时不影响采集；所有分类结果可重放、可审计。
 
@@ -197,14 +197,13 @@ Worker 将各个速度域拆成互相独立的 APScheduler job：
 INTEL_CLASSIFICATION_MODE=rule
 ```
 
-启用 hybrid：
+启用仓库内置 `deepseek-v4` Profile：
 
 ```env
 INTEL_CLASSIFICATION_MODE=hybrid
-INTEL_LLM_PROVIDER=openai-compatible
-INTEL_LLM_BASE_URL=https://api.openai.com/v1
+INTEL_LLM_CONFIG_FILE=config/models.yaml
+INTEL_LLM_PROFILE=deepseek-v4
 INTEL_LLM_API_KEY=...
-INTEL_LLM_MODEL=...
 INTEL_NORMALIZE_INTERVAL_SECONDS=10
 INTEL_NORMALIZE_BATCH_SIZE=2000
 INTEL_FULLTEXT_INTERVAL_SECONDS=30
@@ -216,6 +215,8 @@ INTEL_EVENT_INTERVAL_SECONDS=60
 INTEL_EVENT_BACKLOG_THRESHOLD=1000
 INTEL_LEASE_SECONDS=900
 ```
+
+URL、模型、超时和输出模式可以修改 `config/models.yaml`，也可分别由 `INTEL_LLM_BASE_URL`、`INTEL_LLM_MODEL`、`INTEL_LLM_TIMEOUT_SECONDS`、`INTEL_LLM_RESPONSE_FORMAT` 覆盖。环境变量优先；API Key 只能来自环境。先运行 `uv run intel llm-config` 可在不调用模型的情况下检查最终配置。完整说明见 [模型配置与 DeepSeek 接入](./model-configuration.md)。
 
 若 hybrid 缺少 provider/model/key，worker 自动用 rules 继续处理，`self-check` 和 classify stats 会报告 config_fallback/config_errors。
 

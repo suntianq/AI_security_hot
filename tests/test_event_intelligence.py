@@ -199,3 +199,31 @@ def test_abnormal_component_never_builds_cartesian_evidence_links() -> None:
 
     assert len(drafts) == len(documents)
     assert sum(len(event.memberships) for event in drafts.values()) == len(documents)
+
+
+def test_structured_vuln_doc_gets_namespaced_cve_key() -> None:
+    # An NVD/KEV structured-vuln doc gets a cve-nvd: key so its event never
+    # collides with a news article that merely mentions the same CVE id.
+    nvd = _doc(
+        1,
+        "CVE-2026-1234: some flaw",
+        endpoint_id="nvd-recent",
+        identifiers={"cve": ["CVE-2026-1234"]},
+    )
+    keys = [key.fingerprint for key in strong_event_keys(nvd)]
+    assert "cve-nvd:CVE-2026-1234" in keys
+    assert not any(key.startswith("cve:") for key in keys)
+
+
+def test_news_doc_mentioning_cve_keeps_general_key() -> None:
+    # A news article that mentions a CVE stays on the general cve: key, separate
+    # from the NVD vuln-db event for the same CVE.
+    news = _doc(
+        2,
+        "Vendor patches CVE-2026-1234 in latest release",
+        endpoint_id="portswigger-research-rss",
+        identifiers={"cve": ["CVE-2026-1234"]},
+    )
+    keys = [key.fingerprint for key in strong_event_keys(news)]
+    assert "cve:CVE-2026-1234" in keys
+    assert not any(key.startswith("cve-nvd:") for key in keys)

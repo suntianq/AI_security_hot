@@ -12,6 +12,10 @@ from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+# Version of the semantic ontology (enum domains). Bumping this invalidates
+# cached enrichments / execution versions so older outputs are not re-used.
+ONTO_VERSION = "semantic-onto-v1"
+
 ContentType = Literal[
     "news",
     "research",
@@ -35,6 +39,7 @@ EntityType = Literal[
     "threat_actor",
     "campaign",
     "location",
+    "benchmark",
     "other",
 ]
 AtomicEventType = Literal[
@@ -118,6 +123,7 @@ class DocumentSemanticOutput(StrictSemanticModel):
     summary: str = Field(min_length=1, max_length=1600)
     entities: list[ExtractedEntity] = Field(max_length=50)
     atomic_events: list[AtomicEventExtraction] = Field(max_length=12)
+    ontology_version: str  # required — emitted by the model, folded into execution_version
 
     @model_validator(mode="after")
     def irrelevant_documents_have_no_events(self) -> DocumentSemanticOutput:

@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from ai_security_hot.config.models import resolve_model_config
 from ai_security_hot.config.settings import get_settings
 from ai_security_hot.domain.enums import PipelineStage
 from ai_security_hot.events.intelligence import CLUSTER_VERSION, DEDUPE_VERSION
@@ -159,15 +160,44 @@ def run_self_check() -> dict:
         ).scalar_one()
         settings = get_settings()
         config_errors = []
-        if settings.classification_mode == "hybrid":
-            if settings.llm_provider not in provider_names():
-                config_errors.append(f"unknown provider: {settings.llm_provider}")
-            if not settings.llm_api_key or not settings.llm_model:
-                config_errors.append("hybrid mode requires LLM_API_KEY and LLM_MODEL")
+        llm_required = (
+            settings.classification_mode == "hybrid"
+            or settings.semantic_enrichment_enabled
+        )
+        model_config = None
+        try:
+            model_config = resolve_model_config(settings)
+        except ValueError as exc:
+            if llm_required:
+                config_errors.append(str(exc))
+        if model_config is not None and llm_required:
+            if model_config.provider not in provider_names():
+                config_errors.append(f"unknown provider: {model_config.provider}")
+            if not model_config.api_key_configured or not model_config.model:
+                config_errors.append(
+                    "model calls require INTEL_LLM_API_KEY and a configured model"
+                )
         report["classification"] = {
             "mode": settings.classification_mode,
-            "provider": settings.llm_provider,
-            "model_configured": bool(settings.llm_model),
+            "semantic_enabled": settings.semantic_enrichment_enabled,
+            "profile": model_config.profile if model_config else None,
+            "provider": model_config.provider if model_config else settings.llm_provider,
+            "model": model_config.model if model_config else settings.llm_model,
+            "response_format": (
+                model_config.response_format
+                if model_config
+                else settings.llm_response_format
+            ),
+            "thinking_mode": (
+                model_config.thinking_mode
+                if model_config
+                else settings.llm_thinking_mode
+            ),
+            "api_key_configured": (
+                model_config.api_key_configured
+                if model_config
+                else bool(settings.llm_api_key)
+            ),
             "expired_leases": int(expired_leases),
             "pending_retries": int(pending_retries),
             "fallbacks_24h": int(recent_fallbacks),

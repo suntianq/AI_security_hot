@@ -1,6 +1,6 @@
 # M2.1 可扩展事件情报实现说明
 
-> 状态：M2.1 基础能力已实现；M2.2 影子语义富化基础已实现；按日期返回热点的业务 API 尚未开始<br>
+> 状态：M2.1 基础能力已实现；M2.2 基础设施及首轮 100 篇影子实验已完成；按日期返回热点的业务 API 尚未开始<br>
 > 最后更新：2026-07-31<br>
 > 算法版本：`signature-v3` / `dedupe-v2` / `cluster-v2`
 
@@ -29,22 +29,22 @@ AND record_status NOT IN (rejected, withdrawn)
 
 退役、撤回和 superseded 文档不删除，原始 RawItem、旧组件关系、旧事件版本和证据仍可审计。正常增量路径不会全局清空派生状态；只有运维人员显式执行完整 replay 才会请求全量重放。
 
-## 2. 质量评测先于语义自动合并
+## 2. 自动质量门禁与可选评测样本
 
-`evaluation/m2_quality_seed.jsonl` 提供三类 JSONL 样本：
+人工双人金标集不再作为后续开发和发布的前置条件。当前已经运行的自动门禁包括强身份冲突规则、严格输出 Schema、原文证据精确定位、影子隔离，以及成本、延迟和失败率审计；独立 LLM-as-judge 仍属于下一阶段。LLM 生成的标签和未来的 judge 分数都只是代理指标，不能表述为真实 precision/recall 或 F1。
+
+`evaluation/m2_quality_seed.jsonl` 保留三类 JSONL 确定性回归样本：
 
 - `dedupe_pair`：两篇文档是否是重复证据。
 - `cluster_pair`：两篇文档是否属于同一事件。
 - `ranking_event`：Top-N 是否相关、是否一手来源。
-
-评测输出包括 dedupe/cluster precision、recall、错误合并率、Top-N 相关率、一手来源覆盖率和 review 状态分布：
 
 ```bash
 uv run intel evaluate-m2 --dataset evaluation/m2_quality_seed.jsonl --top-n 3
 uv run intel evaluate-m2 --dataset evaluation/m2_quality_gold.jsonl --review-status reviewed
 ```
 
-仓库内 14 条记录是启动人工标注的种子，不是双人复核金标集。发布门槛必须使用 `--review-status reviewed`，并确认输出的 `dataset_cases` 非零、`labels_reviewed_only=true`；补充标注和分歧裁决流程见 [`evaluation/README.md`](../evaluation/README.md)。
+人工 reviewed 数据和分歧裁决仍可用于困难案例诊断，但属于可选增强；只有确实使用人工 reviewed 数据时，命令输出的 precision/recall 才能解释为相对人工标签的指标。
 
 ## 3. 持久化索引
 
@@ -150,7 +150,7 @@ Self-check 的 `m2_incremental` 报告 signature_due、各阶段 work_pending、
 
 ## 8. 迁移、测试与部署
 
-迁移 head 为 `2b6d8f4a1c90`。迁移创建上述索引、队列、版本、事实表和持久 token 桶计数，并从 M2.0 的 `near_dup_of/id` 回填稳定 component ID；不删除 Document、Event 或旧证据。迁移已验证：全新数据库 upgrade、downgrade 到上一版本、再次 upgrade 均成功。
+迁移 head 为 `d2c5d53a7a76`。迁移创建上述索引、队列、版本、事实表和持久 token 桶计数，并从 M2.0 的 `near_dup_of/id` 回填稳定 component ID；不删除 Document、Event 或旧证据。迁移已验证：全新数据库 upgrade、downgrade 到上一版本、再次 upgrade 均成功。
 
 GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签名确定性、相似候选、人工批准、强冲突不可越过、新强身份、质量指标、局部退役重选主、未受影响事件不改版本、EventVersion 和 Claim 支持/反驳证据。
 
@@ -165,12 +165,14 @@ GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签�
 
 ## 9. 当前明确边界
 
-- 种子评测集仍需真实人工双人复核，当前命令结果只能验证评测程序和 bootstrap case，不能证明生产 precision/recall。
+- 人工金标不再是前置条件；LLM-as-judge 只能提供代理质量信号，报告中不得把它冒充真实 precision/recall。
 - 结构化 model/package/incident/campaign 强键已经可用，但召回率取决于上游 Parser/实体抽取是否提供对应 `entities`；后续应以漏合并样本驱动实体抽取扩充。
-- pgvector/embedding 未启用。评测集证明有收益后可作为候选层加入，但仍不能自动绕过强冲突。
+- pgvector/embedding 未启用。影子实验确认召回质量、成本和延迟可接受后可作为候选层加入，但仍不能自动绕过强冲突。
 - 自动 Claim 目前只覆盖事件摘要和强身份；影响范围、已利用状态、修复版本等领域 Claim 需要在后续抽取/管理接口中逐项增加。
 - M2.2 已增加默认关闭的影子语义富化、实体、原子事件和抽取 Claim 表，但尚未影响生产 Event；详见 [`semantic-enrichment.md`](semantic-enrichment.md)。
 - 按指定日期返回去重、聚类后热点的 API 仍未实现；应在原子事件输出契约和查询版本语义稳定后接入。
+
+各里程碑完成度、首轮实验口径和推荐实施顺序统一见 [项目当前状态与后续路线](./current-status.md)。
 
 ## 10. M2.0 历史基线快照
 

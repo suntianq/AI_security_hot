@@ -1,6 +1,7 @@
 # AI × Security 信源注册表（Seed List）
 
 > 状态：持续维护（M1 接入基线已完成）
+> 项目进度与下一步：[当前状态与路线](./current-status.md)
 > 最后核验：2026-07-30
 > 当前配置：19 个 endpoint（18 个 active、1 个 retired；17 个 source），8 类 Connector（RSS/REST/NVD/AI HOT/GitHub/Web/arXiv/Sitemap）
 > 目标：为 `AI`、`AI for Security`、`AI-enabled Threats`、`Security for AI` 四条内容主线提供可追溯、可扩展的信源池。

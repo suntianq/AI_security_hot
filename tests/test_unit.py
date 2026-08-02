@@ -289,3 +289,33 @@ def test_inject_date_params_uses_overlap() -> None:
         )
     )
     assert "pubStartDate=2026-07-15T09:45:00.000" in result
+
+
+def test_nvd_parser_no_fanout_from_description() -> None:
+    """An NVD record whose description mentions other CVEs/GHSAs must only carry
+    its own CVE id — otherwise one record fans out into one event per mention."""
+    from datetime import UTC, datetime
+
+    from ai_security_hot.domain.enums import ConnectorKind
+    from ai_security_hot.domain.models import RawItem
+    from ai_security_hot.parsers.nvd import NvdParser
+
+    rec = {
+        "id": "CVE-2026-3258",
+        "published": "2026-01-01T00:00:00Z",
+        "descriptions": [
+            {"lang": "en", "value": "Related to CVE-2026-7805 and GHSA-GPHH-9Q3H-JGPP."}
+        ],
+        "weaknesses": [{"description": [{"value": "CWE-79"}]}],
+    }
+    raw = RawItem(
+        endpoint_id="nvd-recent", source_id="nvd", native_id="CVE-2026-3258",
+        request_url="x", final_url="x", http_status=200,
+        fetched_at=datetime.now(UTC), content_hash="x",
+        connector_kind=ConnectorKind.NVD, connector_version="v1",
+        raw_text=__import__("json").dumps(rec),
+    )
+    doc = NvdParser().parse(raw)
+    assert doc.cve_ids == ["CVE-2026-3258"]  # own id only
+    assert doc.ghsa_ids == []  # secondary GHSA mention is NOT the record's identity
+    assert doc.cwe_ids == ["CWE-79"]

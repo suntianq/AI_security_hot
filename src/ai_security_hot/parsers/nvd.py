@@ -49,15 +49,24 @@ class NvdParser(Parser):
             except (ValueError, OverflowError):
                 pub = None
 
-        # CWE ids live under weaknesses[].description[].value
+        # CWE ids live under weaknesses[].description[].value.
+        # IMPORTANT: only CWE ids are scanned from the structured fields. The
+        # record's OWN CVE id is its sole identity — the description may mention
+        # other CVE/GHSA/CNVD ids as related context, but those are NOT this
+        # record's identity, so we must not scan the description for them
+        # (otherwise one NVD record fans out into one event per mentioned id).
         cwe_text = " ".join(
             wd.get("value", "")
             for w in rec.get("weaknesses", [])
             for wd in w.get("description", [])
         )
-        ids = extract_identifiers(f"{cve} {cwe_text} {desc}")
-        if cve and cve not in ids["cve"]:
-            ids["cve"].append(cve)
+        cwe_ids = extract_identifiers(cwe_text)["cwe"]
+        ids = {
+            "cve": [cve] if cve else [],
+            "ghsa": [],
+            "cnvd": [],
+            "cwe": cwe_ids,
+        }
 
         title = f"{cve}: {desc[:80]}" if desc else cve
         return NormalizedDocument(

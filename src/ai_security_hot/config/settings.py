@@ -79,10 +79,20 @@ class Settings(BaseSettings):
     )
     rule_classification_batch_size: int = Field(default=2000, ge=1, le=5000)
     classification_lease_seconds: int = Field(default=300, ge=30)
+    llm_config_file: str = Field(default="config/models.yaml")
+    llm_profile: str | None = Field(default=None)
     llm_provider: str = Field(default="openai-compatible")
     llm_base_url: str = Field(default="https://api.openai.com/v1")
     llm_api_key: str | None = Field(default=None)
     llm_model: str | None = Field(default=None)
+    llm_response_format: Literal["json_schema", "json_object", "prompt_only"] = Field(
+        default="json_schema",
+        description="Structured-output strategy supported by the selected compatible endpoint",
+    )
+    llm_thinking_mode: Literal["default", "enabled", "disabled"] = Field(
+        default="default",
+        description="Optional reasoning toggle for compatible endpoints such as DeepSeek",
+    )
     llm_timeout_seconds: float = Field(default=30.0, ge=1, le=120)
     llm_max_input_chars: int = Field(default=12000, ge=1000, le=100000)
     llm_max_output_tokens: int = Field(default=500, ge=100, le=4000)
@@ -97,6 +107,8 @@ class Settings(BaseSettings):
     semantic_enrichment_batch_size: int = Field(default=5, ge=1, le=100)
     semantic_enrichment_lease_seconds: int = Field(default=600, ge=60)
     semantic_llm_max_output_tokens: int = Field(default=2500, ge=500, le=8000)
+    # reproducible experiment batch tag (M2.2.1 1d)
+    semantic_enrichment_batch_id: str | None = Field(default=None)
 
     # --- delivery ---
     feishu_webhook_url: str | None = Field(default=None)

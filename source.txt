@@ -2,3 +2,14 @@ https://machinelearning.apple.com/research
 https://blogs.nvidia.com/
 https://www.wiz.io/blog
 https://aihot.virxact.com/
+https://www.anthropic.com/news
+https://blog.google/security/
+https://news.ycombinator.com/
+https://huggingface.co/blog
+https://trailofbits.com/
+https://portswigger.net/research
+https://machinelearning.apple.com/
+https://arxiv.org/list/cs.AI/recent
+https://www.ithome.com/
+https://blog.google/innovation-and-ai/technology/ai/
+https://github.com/trending

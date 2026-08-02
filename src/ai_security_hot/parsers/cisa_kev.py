@@ -22,10 +22,16 @@ class CisaKevParser(Parser):
         pub = None
         if date_added:
             pub = datetime.fromisoformat(date_added).replace(tzinfo=UTC)
-        ids = extract_identifiers(f"{cve} {rec.get('cwes', '')}")
-        # KEV record always carries an authoritative CVE — force it in
-        if cve and cve not in ids["cve"]:
-            ids["cve"].append(cve)
+        # KEV record's sole CVE identity is cveID; only CWE ids come from the
+        # structured cwes field (do not scan the description for secondary CVE
+        # mentions — that would fan one record out into multiple events).
+        cwe_ids = extract_identifiers(str(rec.get("cwes") or ""))["cwe"]
+        ids = {
+            "cve": [cve] if cve else [],
+            "ghsa": [],
+            "cnvd": [],
+            "cwe": cwe_ids,
+        }
         return NormalizedDocument(
             raw_item_native_id=raw.native_id,
             endpoint_id=raw.endpoint_id,

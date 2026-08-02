@@ -407,8 +407,10 @@ def run_classify_stage(limit: int | None = None) -> dict:
     from ai_security_hot.classify.base import Classification
     from ai_security_hot.classify.llm import HybridClassifier
     from ai_security_hot.classify.rules import RuleClassifier
+    from ai_security_hot.config.models import resolve_model_config
     from ai_security_hot.config.settings import get_settings
     from ai_security_hot.domain.models import NormalizedDocument
+    from ai_security_hot.llm.provider import provider_cache_namespace
     from ai_security_hot.llm.registry import build_provider
 
     settings = get_settings()
@@ -422,7 +424,8 @@ def run_classify_stage(limit: int | None = None) -> dict:
 
     if requested_mode == "hybrid":
         try:
-            provider = build_provider(settings)
+            model_config = resolve_model_config(settings)
+            provider = build_provider(settings, config=model_config)
         except ValueError as exc:
             log.warning("hybrid classification configuration invalid; using rules: %s", exc)
             effective_mode = "rule"
@@ -430,8 +433,8 @@ def run_classify_stage(limit: int | None = None) -> dict:
         else:
             hybrid = HybridClassifier(
                 provider,
-                max_input_chars=settings.llm_max_input_chars,
-                max_output_tokens=settings.llm_max_output_tokens,
+                max_input_chars=model_config.max_input_chars,
+                max_output_tokens=model_config.classification_max_output_tokens,
             )
 
     default_batch_size = (
@@ -547,7 +550,7 @@ def run_classify_stage(limit: int | None = None) -> dict:
         assert hybrid is not None
         cache_key = {
             "task": "classification",
-            "provider": hybrid.provider.name,
+            "provider": provider_cache_namespace(hybrid.provider),
             "model": hybrid.model_version,
             "prompt_version": hybrid.prompt_version,
             "input_hash": hybrid.input_hash(doc),
@@ -692,19 +695,21 @@ def _audit_m2_failures(stage: str, version: str):
 
 
 @_audit_m2_failures("dedupe", "dedupe-v2")
-def run_dedupe_stage(*, force: bool = False, trigger: str = "scheduler") -> dict:
-    """Refresh persistent candidates and recompute only affected components."""
+def _run_dedupe_scope(*, force: bool, trigger: str, scope: str) -> dict:
+    """Run one dedupe pass restricted to a scope ("vuln" | "general" | "all")."""
     from ai_security_hot.config.settings import get_settings
     from ai_security_hot.events.intelligence import DEDUPE_VERSION
     from ai_security_hot.events.signatures import SIGNATURE_VERSION
     from ai_security_hot.storage import event_repository
 
     with session_scope() as session:
-        if not repo.try_event_stage_lock(session, "dedupe"):
-            return {"status": "locked", "version": DEDUPE_VERSION}
+        if not repo.try_event_stage_lock(session, f"dedupe:{scope}"):
+            return {"status": "locked", "version": DEDUPE_VERSION, "scope": scope}
         settings = get_settings()
         if force:
-            event_repository.queue_full_replay(session, reason="force_dedupe")
+            event_repository.queue_full_replay(
+                session, reason="force_dedupe", scope=scope
+            )
         index_stats = event_repository.backfill_signature_batch(
             session, limit=settings.m2_signature_batch_size
         )
@@ -712,15 +717,17 @@ def run_dedupe_stage(*, force: bool = False, trigger: str = "scheduler") -> dict
             return {
                 "status": "indexing",
                 "version": DEDUPE_VERSION,
+                "scope": scope,
                 "signature_version": SIGNATURE_VERSION,
                 **index_stats,
             }
-        due = repo.count_dedupe_due(session)
+        due = repo.count_dedupe_due(session, scope=scope)
         pending = event_repository.count_pending_work(session, stage="dedupe")
         if due == 0 and pending == 0 and not force:
             return {
                 "status": "current",
                 "version": DEDUPE_VERSION,
+                "scope": scope,
                 "due": 0,
                 "updated": 0,
             }
@@ -729,18 +736,46 @@ def run_dedupe_stage(*, force: bool = False, trigger: str = "scheduler") -> dict
             limit=settings.m2_dedupe_batch_size,
             max_candidates=settings.m2_max_local_documents,
             trigger=trigger,
+            scope=scope,
         )
-        remaining_due = max(0, repo.count_dedupe_due(session))
+        remaining_due = max(0, repo.count_dedupe_due(session, scope=scope))
         pending = event_repository.count_pending_work(session, stage="dedupe")
         result["remaining_due"] = remaining_due
         result["pending_work"] = pending
         result["remaining"] = remaining_due + pending
+        result["scope"] = scope
         return result
 
 
-@_audit_m2_failures("cluster", "cluster-v2")
-def run_cluster_stage(*, force: bool = False, trigger: str = "scheduler") -> dict:
-    """Rebuild only events reachable from changed duplicate components."""
+def run_dedupe_stage(
+    *, force: bool = False, trigger: str = "scheduler", scope: str = "all"
+) -> dict:
+    """Refresh persistent candidates and recompute only affected components.
+
+    When scope="all" (default) the stage runs two passes — "vuln" (NVD/KEV) and
+    "general" — so the structured-vulnerability corpus is deduplicated in its own
+    scope, isolated from the news pipeline. A specific scope runs one pass only.
+    """
+    if scope != "all":
+        return _run_dedupe_scope(force=force, trigger=trigger, scope=scope)
+    merged: dict = {}
+    for sub in ("vuln", "general"):
+        result = _run_dedupe_scope(force=force, trigger=trigger, scope=sub)
+        if result.get("status") == "locked":
+            return result  # another worker holds the lock — stop, don't race
+        for key, value in result.items():
+            if key == "scope":
+                continue
+            if isinstance(value, (int, float)) and key not in ("version",):
+                merged[key] = merged.get(key, 0) + value
+            elif key not in merged:
+                merged[key] = value
+    merged["scopes"] = ("vuln", "general")
+    return merged
+
+
+def _run_cluster_scope(*, force: bool, trigger: str, scope: str) -> dict:
+    """Run one cluster pass restricted to a scope ("vuln" | "general" | "all")."""
     from sqlalchemy import update
 
     from ai_security_hot.config.settings import get_settings
@@ -749,24 +784,25 @@ def run_cluster_stage(*, force: bool = False, trigger: str = "scheduler") -> dic
     from ai_security_hot.storage import event_repository
 
     with session_scope() as session:
-        if not repo.try_event_stage_lock(session, "cluster"):
-            return {"status": "locked", "version": CLUSTER_VERSION}
+        if not repo.try_event_stage_lock(session, f"cluster:{scope}"):
+            return {"status": "locked", "version": CLUSTER_VERSION, "scope": scope}
         settings = get_settings()
         if force:
             session.execute(
                 update(Document)
                 .where(
-                    *repo.current_document_conditions(),
+                    *repo.scope_document_conditions(scope),
                     Document.dedupe_version == "dedupe-v2",
                 )
                 .values(cluster_version=None)
             )
-        due = repo.count_cluster_due(session)
+        due = repo.count_cluster_due(session, scope=scope)
         pending = event_repository.count_pending_work(session, stage="cluster")
         if due == 0 and pending == 0 and not force:
             return {
                 "status": "current",
                 "version": CLUSTER_VERSION,
+                "scope": scope,
                 "due": 0,
                 "events_created": 0,
                 "events_updated": 0,
@@ -776,10 +812,40 @@ def run_cluster_stage(*, force: bool = False, trigger: str = "scheduler") -> dic
             limit=settings.m2_cluster_batch_size,
             max_documents=settings.m2_max_local_documents,
             trigger=trigger,
+            scope=scope,
         )
-        remaining_due = max(0, repo.count_cluster_due(session))
+        remaining_due = max(0, repo.count_cluster_due(session, scope=scope))
         pending = event_repository.count_pending_work(session, stage="cluster")
         result["remaining_due"] = remaining_due
         result["pending_work"] = pending
         result["remaining"] = remaining_due + pending
+        result["scope"] = scope
         return result
+
+
+@_audit_m2_failures("cluster", "cluster-v2")
+def run_cluster_stage(
+    *, force: bool = False, trigger: str = "scheduler", scope: str = "all"
+) -> dict:
+    """Rebuild only events reachable from changed duplicate components.
+
+    When scope="all" (default) the stage runs two passes — "vuln" (NVD/KEV) and
+    "general" — so structured-vulnerability events are built in their own scope,
+    isolated from the news pipeline. A specific scope runs one pass only.
+    """
+    if scope != "all":
+        return _run_cluster_scope(force=force, trigger=trigger, scope=scope)
+    merged: dict = {}
+    for sub in ("vuln", "general"):
+        result = _run_cluster_scope(force=force, trigger=trigger, scope=sub)
+        if result.get("status") == "locked":
+            return result  # another worker holds the lock — stop, don't race
+        for key, value in result.items():
+            if key == "scope":
+                continue
+            if isinstance(value, (int, float)) and key not in ("version",):
+                merged[key] = merged.get(key, 0) + value
+            elif key not in merged:
+                merged[key] = value
+    merged["scopes"] = ("vuln", "general")
+    return merged

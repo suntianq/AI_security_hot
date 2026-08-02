@@ -21,6 +21,7 @@ from ai_security_hot.config.sources import SourceRegistry
 from ai_security_hot.connectors.base import Checkpoint
 from ai_security_hot.domain.enums import (
     NON_CURRENT_UPSTREAM_STATUSES,
+    STRUCTURED_VULN_ENDPOINTS,
     DocumentSourceStatus,
     PipelineStage,
     SourceRecordStatus,
@@ -75,6 +76,20 @@ def current_document_conditions() -> tuple:
         Document.source_status == DocumentSourceStatus.ACTIVE.value,
         Document.record_status.not_in(NON_CURRENT_UPSTREAM_STATUSES),
     )
+
+
+def scope_document_conditions(scope: str = "all") -> tuple:
+    """current_document_conditions plus an optional endpoint-scope filter.
+
+    scope="vuln" restricts to structured-vulnerability endpoints (NVD/KEV);
+    scope="general" excludes them; scope="all" (default) applies no filter.
+    """
+    conditions = list(current_document_conditions())
+    if scope == "vuln":
+        conditions.append(Document.endpoint_id.in_(STRUCTURED_VULN_ENDPOINTS))
+    elif scope == "general":
+        conditions.append(Document.endpoint_id.notin_(STRUCTURED_VULN_ENDPOINTS))
+    return tuple(conditions)
 
 
 def is_current_document(source_status: str, record_status: str) -> bool:
@@ -1198,33 +1213,50 @@ def count_event_pipeline_backlog(session: Session) -> int:
 
 
 def try_event_stage_lock(session: Session, stage: str) -> bool:
-    """Take a transaction-scoped lock so manual and scheduled runs cannot race."""
-    keys = {"dedupe": _DEDUPE_LOCK_KEY, "cluster": _CLUSTER_LOCK_KEY}
-    if stage not in keys:
+    """Take a transaction-scoped lock so manual and scheduled runs cannot race.
+
+    Accepts a bare stage ("dedupe"/"cluster") or a scope-qualified stage
+    ("dedupe:vuln", "cluster:general", ...). Each stage+scope gets a distinct
+    advisory lock so the vuln and general passes never block each other, while a
+    bare stage still serializes with any scoped pass of the same kind.
+    """
+    base_keys = {"dedupe": _DEDUPE_LOCK_KEY, "cluster": _CLUSTER_LOCK_KEY}
+    base, _, qualifier = stage.partition(":")
+    if base not in base_keys:
         raise ValueError(f"unknown event stage: {stage}")
-    return bool(session.execute(select(func.pg_try_advisory_xact_lock(keys[stage]))).scalar_one())
+    key = base_keys[base]
+    if qualifier:
+        # Derive a stable per-scope key from the base key + qualifier hash.
+        key = key ^ int.from_bytes(
+            qualifier.encode("utf-8")[:8].ljust(8, b"\0"), "little"
+        )
+    return bool(session.execute(select(func.pg_try_advisory_xact_lock(key))).scalar_one())
 
 
-def count_dedupe_due(session: Session, *, version: str = DEDUPE_VERSION) -> int:
+def count_dedupe_due(
+    session: Session, *, version: str = DEDUPE_VERSION, scope: str = "all"
+) -> int:
     return int(
         session.execute(
             select(func.count())
             .select_from(Document)
             .where(
-                *current_document_conditions(),
+                *scope_document_conditions(scope),
                 Document.dedupe_version.is_(None) | (Document.dedupe_version != version),
             )
         ).scalar_one()
     )
 
 
-def count_cluster_due(session: Session, *, version: str = CLUSTER_VERSION) -> int:
+def count_cluster_due(
+    session: Session, *, version: str = CLUSTER_VERSION, scope: str = "all"
+) -> int:
     return int(
         session.execute(
             select(func.count())
             .select_from(Document)
             .where(
-                *current_document_conditions(),
+                *scope_document_conditions(scope),
                 Document.dedupe_version == DEDUPE_VERSION,
                 Document.cluster_version.is_(None) | (Document.cluster_version != version),
             )

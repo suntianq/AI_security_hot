@@ -1,9 +1,9 @@
 # AI × Security 情报后端 MVP 设计方案
 
 > 版本：v0.3
-> 状态：实施基线（M0 + M1 + M2.1 可扩展事件情报底座 已完成）<br>
+> 状态：实施基线（M0 + M1 + M2.1 已完成；M2.2 影子基础及首轮 100 篇实验已完成）<br>
 > 最后更新：2026-07-31
-> 相关文档：[完整目标蓝图](./system-design.md) · [信源注册表](./source-registry.md) · [M1 增量与分类](./m1-data-pipeline.md) · [M2 事件情报](./event-intelligence.md)
+> 相关文档：[当前状态与路线](./current-status.md) · [完整目标蓝图](./system-design.md) · [信源注册表](./source-registry.md) · [M1 增量与分类](./m1-data-pipeline.md) · [M2 事件情报](./event-intelligence.md)
 
 ## 1. 已确认的产品与技术决策
 
@@ -728,7 +728,7 @@ docker compose up
 - Worker 中断后重新启动。
 - SSRF、重定向、超大响应和恶意 HTML。
 
-当前测试共 68 项，其中 67 项非 live，覆盖 AI HOT snapshot/changes/remove/409、CISA 权威快照撤回、NVD 参数、HTTP 重试、M1.3 Schema/白名单/CVE bypass，以及 M2.1 的持久化签名、高频候选桶保护、强冲突、人工批准、reviewed 评测范围、局部退役重选主、EventVersion 和争议 Claim 证据；投递仍属于后续里程碑。
+当前测试共 81 项，其中 80 项非 live；最近一次完整非 live 验证结果为 77 passed、3 skipped、1 live deselected。测试覆盖 AI HOT snapshot/changes/remove/409、CISA 权威快照撤回、NVD 参数、HTTP 重试、M1.3 Schema/白名单/CVE bypass，M2.1 持久化索引、局部重算、强冲突、候选复核和版本事实，以及 M2.2 模型配置、语义 Schema、证据定位和 PostgreSQL 事务落库；投递仍属于后续里程碑。
 
 ### 16.2 最小指标
 
@@ -808,7 +808,7 @@ MVP 使用结构化日志、`/health`、`/stats` 和 self-check；self-check 已
 - JSONL 评测器和 `M2Run` 审计已接通；PostgreSQL advisory lock 保证阶段单写。
 - Worker、`intel eventize`、`/events` 列表/详情、`/stats` 和 self-check 已接通。
 
-M2.1 基础完成标准已达到。下一步 M2.2 实现按日期返回去重、聚类后热点的 API；真实双人金标集、领域 Claim 抽取和可选 embedding 继续按评测数据推进。详见 [M2 事件情报实现说明](./event-intelligence.md)。
+M2.1 基础完成标准已达到。M2.2 的严格 Schema、证据定位、影子落库和首轮 100 篇真实实验也已完成，但独立 judge、分层批次、Embedding 候选、关系裁决、Claim 合并与生产提升尚未实现。下一步先做语义运行稳定化，再扩展分层影子评测；按日期热点 API 在事件和排序契约稳定后实现。详见 [当前状态与后续路线](./current-status.md) 和 [M2 事件情报实现说明](./event-intelligence.md)。
 
 ### M3：日报与推送
 

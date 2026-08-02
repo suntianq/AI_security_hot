@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
@@ -74,8 +74,14 @@ def enqueue_document_work(
     execution_version: str,
     mode: str,
     limit: int,
+    batch_id: str | None = None,
+    document_ids: list[int] | None = None,
 ) -> int:
-    """Queue recent current non-CVE duplicate masters exactly once per execution."""
+    """Queue current non-CVE duplicate masters exactly once per execution.
+
+    If ``document_ids`` is provided, only those documents are enqueued (used by
+    controlled eval sampling); otherwise the most recent eligible docs are used.
+    """
 
     already_queued = (
         select(SemanticWorkItem.id)
@@ -87,20 +93,28 @@ def enqueue_document_work(
         )
         .exists()
     )
+    base_conditions = [
+        *current_document_conditions(),
+        RawItem.stage == "done",
+        Document.classified_at.is_not(None),
+        Document.tech_directions != ["cve"],
+        func.coalesce(Document.identifiers["cve"].astext, "[]") == "[]",
+        func.coalesce(Document.identifiers["ghsa"].astext, "[]") == "[]",
+        func.coalesce(Document.identifiers["cnvd"].astext, "[]") == "[]",
+        Document.dedupe_version.is_not(None),
+        Document.near_dup_of.is_(None),
+        ~already_queued,
+    ]
+    if document_ids is not None:
+        base_conditions.append(Document.id.in_(document_ids))
     document_ids = list(
         session.execute(
             select(Document.id)
             .join(RawItem, RawItem.id == Document.raw_item_id)
             .where(
-                *current_document_conditions(),
-                RawItem.stage == "done",
-                Document.classified_at.is_not(None),
-                Document.tech_directions != ["cve"],
-                Document.dedupe_version.is_not(None),
-                Document.near_dup_of.is_(None),
-                ~already_queued,
+                *base_conditions,
             )
-            .order_by(Document.published_at_utc.desc().nullslast(), Document.id.desc())
+            .order_by(Document.id)
             .limit(limit)
         ).scalars()
     )
@@ -119,6 +133,7 @@ def enqueue_document_work(
                         "execution_version": execution_version,
                         "mode": mode,
                         "status": "pending",
+                        "batch_id": batch_id,
                     }
                     for document_id in document_ids
                 ]
@@ -131,6 +146,41 @@ def enqueue_document_work(
     return len(inserted)
 
 
+def _reconcile_orphan_succeeded_work(
+    session: Session, *, task: str, execution_version: str
+) -> None:
+    """Mark 'succeeded' work items that have no enrichment row as failed.
+
+    A work item can be left 'succeeded' without a DocumentEnrichment if a prior
+    crash or partial write completed the work status before persisting the
+    enrichment. Leaving them 'succeeded' hides them from both retry and audit.
+    """
+    orphan_ids = session.execute(
+        select(SemanticWorkItem.id)
+        .outerjoin(
+            DocumentEnrichment, DocumentEnrichment.work_item_id == SemanticWorkItem.id
+        )
+        .where(
+            SemanticWorkItem.task == task,
+            SemanticWorkItem.execution_version == execution_version,
+            SemanticWorkItem.status == "succeeded",
+            DocumentEnrichment.id.is_(None),
+        )
+    ).scalars().all()
+    if not orphan_ids:
+        return
+    session.execute(
+        update(SemanticWorkItem)
+        .where(SemanticWorkItem.id.in_(orphan_ids))
+        .values(
+            status="failed",
+            error="succeeded work item has no enrichment row (reconciled)",
+            updated_at=datetime.now(UTC),
+        )
+    )
+    session.flush()
+
+
 def claim_document_work(
     session: Session,
     *,
@@ -138,6 +188,7 @@ def claim_document_work(
     execution_version: str,
     limit: int,
     lease_seconds: int,
+    batch_id: str | None = None,
 ) -> list[ClaimedDocumentWork]:
     now = datetime.now(UTC)
     eligible = or_(
@@ -152,15 +203,19 @@ def claim_document_work(
             & (SemanticWorkItem.lease_until < now)
         ),
     )
+    conditions = [
+        SemanticWorkItem.subject_type == "document",
+        SemanticWorkItem.task == task,
+        SemanticWorkItem.execution_version == execution_version,
+        eligible,
+    ]
+    if batch_id is not None:
+        conditions.append(SemanticWorkItem.batch_id == batch_id)
+    _reconcile_orphan_succeeded_work(session, task=task, execution_version=execution_version)
     rows = list(
         session.execute(
             select(SemanticWorkItem)
-            .where(
-                SemanticWorkItem.subject_type == "document",
-                SemanticWorkItem.task == task,
-                SemanticWorkItem.execution_version == execution_version,
-                eligible,
-            )
+            .where(*conditions)
             .order_by(SemanticWorkItem.id)
             .limit(limit)
             .with_for_update(skip_locked=True)
@@ -321,6 +376,10 @@ def complete_document_work(
     provider: str,
     model: str,
     prompt_version: str,
+    finish_reason: str | None = None,
+    usage: dict | None = None,
+    raw_response: str | None = None,
+    batch_id: str | None = None,
 ) -> int:
     """Persist one validated output and all child rows in one transaction."""
 
@@ -357,6 +416,12 @@ def complete_document_work(
         content_type=output.content_type,
         summary=output.summary,
         output=output.model_dump(mode="json"),
+        finish_reason=finish_reason,
+        usage=usage or {},
+        raw_response=raw_response,
+        # Prefer the work item's original batch so aggregation never crosses
+        # batches even when a later run with a different --batch claims it.
+        batch_id=work.batch_id or batch_id,
     )
     session.add(enrichment)
     session.flush()
@@ -445,12 +510,24 @@ def fail_document_work(
     lease_token: str,
     error: str,
     retry_after_seconds: int,
+    finish_reason: str | None = None,
+    usage: dict | None = None,
 ) -> None:
+    """Mark work retry (or terminal failed at max_attempts) with audit fields."""
     work = _locked_owned_work(session, work_item_id, lease_token)
-    work.status = "retry"
+    now = datetime.now(UTC)
     work.lease_token = None
     work.lease_until = None
-    work.next_retry_at = datetime.now(UTC) + timedelta(seconds=retry_after_seconds)
     work.error = error[:2000]
-    work.updated_at = datetime.now(UTC)
+    work.last_finish_reason = finish_reason
+    if usage:
+        work.last_usage = usage
+    max_attempts = work.max_attempts or 5
+    if (work.attempts or 0) >= max_attempts:
+        work.status = "failed"  # terminal — no infinite retry
+        work.next_retry_at = None
+    else:
+        work.status = "retry"
+        work.next_retry_at = now + timedelta(seconds=retry_after_seconds)
+    work.updated_at = now
     session.flush()

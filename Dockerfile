@@ -21,6 +21,7 @@ COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./alembic.ini
 COPY sources ./sources
+COPY config ./config
 COPY entrypoint.sh ./entrypoint.sh
 RUN uv sync --frozen --no-dev && chmod +x entrypoint.sh
 

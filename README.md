@@ -1,9 +1,9 @@
 # AI × Security 情报后端
 
 把 AI/安全情报的采集能力融为一个稳定、可扩展的后端。基于 `docs/` 设计文档
-（[MVP 设计](docs/mvp-design.md) · [整体蓝图](docs/system-design.md) ·
-[信源注册表](docs/source-registry.md) · [M1 增量与分类](docs/m1-data-pipeline.md) · [M2 事件情报](docs/event-intelligence.md) · [M2.2 语义富化](docs/semantic-enrichment.md)）实现的
-**M0 工程骨架 + M1 结构化采集 + M2.1 可扩展事件情报底座 + M2.2 影子语义富化基础**。
+（[当前状态与路线](docs/current-status.md) · [MVP 设计](docs/mvp-design.md) · [整体蓝图](docs/system-design.md) ·
+[信源注册表](docs/source-registry.md) · [M1 增量与分类](docs/m1-data-pipeline.md) · [M2 事件情报](docs/event-intelligence.md) · [M2.2 语义富化](docs/semantic-enrichment.md) · [模型与 DeepSeek 配置](docs/model-configuration.md)）实现的
+**M0 工程骨架 + M1 结构化采集 + M2.1 事件情报底座 + M2.2 影子语义富化 + M2.3 关系裁决 + M2.4 提升预览 + NVD 隔离**。
 
 ## 已实现
 
@@ -22,7 +22,7 @@
 
 - **不可变历史 + 双轴当前投影**：RawItem 保存全部内容/撤回版本；Document 同时记录本地来源生命周期（active/superseded/withdrawn/retired）与上游记录状态（published/rejected/withdrawn/unknown），历史可审计、当前视图可统一过滤。
 - **AI HOT 完整镜像**：selected snapshot bootstrap、durable changes cursor、upsert/remove、409 自动重建，不再受 RSS 最新 50 条窗口限制。
-- **NVD modified-time**：120 天 bootstrap/长停机 catch-up 使用动态缩窗和 durable cursor 分批推进；稳态从 `last_success_at - 15min` 重叠抓取；Rejected/Withdrawn CVE 保留为历史证据但退出当前视图。
+- **NVD modified-time**：120 天 bootstrap/长停机 catch-up 使用动态缩窗和 durable cursor 分批推进；稳态从 `last_success_at - 15min` 重叠抓取；`min_cve_year` 按 CVE 编号年份过滤（当前只保留 2026 起的 CVE，避免历史漏洞淹没资讯）；Rejected/Withdrawn CVE 保留为历史证据但退出当前视图。
 - **CISA 权威快照**：官方 GitHub 镜像 + ETag/304 + 修订与删除检测。
 - **Anthropic 双通道**：Newsroom 快速发现 + 每日 Sitemap 72 小时重叠对账。
 - **状态版本和配置收敛**：endpoint `state_version` 控制 checkpoint 重建；`replaced_by` 可声明替代关系并审计式退役旧 endpoint；YAML 删除的 endpoint 自动 paused；长任务用心跳续租和 fencing token 防止旧 worker 越权推进水位。
@@ -46,15 +46,24 @@
 
 算法、运维命令、评分公式和当前边界详见 [M2 事件情报](docs/event-intelligence.md)。
 
-### M2.2 影子语义富化基础
+### NVD/KEV 单独隔离 + 事件分类
 
-- **严格语义契约**：相关性、通用实体、0～N 个原子事件和 Claim 均通过严格 JSON Schema/Pydantic 校验。
-- **证据可追溯**：实体与 Claim 必须携带原文逐字摘录；只记录精确定位，无法定位时明确标记 unknown。
-- **版本化派生数据**：Document 保持不可变；富化结果、实体提及、原子事件和抽取 Claim 存入独立表。
-- **成本与并发隔离**：只处理 current non-CVE duplicate master；复用模型缓存/审计，使用独立 durable queue、租约和退避。
-- **默认关闭且仅影子模式**：升级不会自动调用模型，也不会改变现有 Event/聚类。
+- **NVD + CISA KEV 完全隔离**：结构化漏洞源按自身 `cve-nvd:` 命名空间去重/聚类，不与新闻交叉；事件打 `category` 标签（`vuln_db` / `general`）。
+- **旧事件清理**：隔离迁移后旧的 `cve:` 事件通过 EventVersion supersede 保留历史，退出当前视图（修复"事件数 > 文档数"的口径问题）。
+- **多 CVE fan-out 修复**：NVD 解析器只保留记录自身 CVE 身份，不再从描述正文扫描次要 CVE/GHSA/CNVD。
+- **日期热点 API**：`GET /v1/daily-hotspots?date&tz&category` 按自然日+时区返回去重热点，general/vuln_db 可分别筛选。
 
-实现、配置和上线门槛见 [M2.2 语义富化](docs/semantic-enrichment.md)。
+### M2.2 影子语义富化基础 + M2.3/M2.4 语义情报
+
+- **严格语义契约**：相关性、通用实体、0～N 个原子事件和 Claim 均通过严格 JSON Schema/Pydantic 校验；实体类型含 `benchmark`，本体版本 `semantic-onto-v1`。
+- **运行稳定化（M2.2.1）**：失败响应审计（raw_response/finish_reason/usage）、有界结构修复（校验失败重试一次）、batch_id 可重放、`max_attempts` 终止态。
+- **分层评测（M2.2.2）**：`intel semantic-sample` 按来源平衡抽样（16 源均匀）、`intel semantic-eval` 聚合相关率/证据命中/成本，按来源与内容类型拆解。
+- **关系裁决（M2.3）**：`intel relation-scan` 跨文档原子事件候选召回 + `same/related/different` 确定性裁决，写 `relation_verdicts` 影子表。
+- **Claim 合并与提升预览（M2.4）**：`intel claim-merge` 合并同事件 Claims（support/contradict 立场）；`intel event-promote --dry-run` 生成门禁通过的提升预览（默认影子，不写正式 Event）。
+- **默认关闭且仅影子模式**：升级不会自动调用模型，也不会改变现有 Event/聚类；提升预览默认 dry-run。
+- **可切换模型 Profile**：M1.3 与 M2.2 共用 `config/models.yaml`；环境变量优先覆盖 URL/模型，API Key 只允许从环境注入；兼容 `json_schema/json_object/prompt_only`。
+
+98 篇平衡样本评测：相关率 61.2%、证据精确命中 86%、结构失败 0。结果默认只写影子表，未参与正式事件。当前完成度与推荐实施顺序见 [项目当前状态与后续路线](docs/current-status.md)；实现和上线门槛见 [M2.2 语义富化](docs/semantic-enrichment.md)，接入 DeepSeek 或私有网关见 [模型配置](docs/model-configuration.md)。
 
 ### 八类 Connector + Parser
 
@@ -127,7 +136,14 @@ uv run intel m2-token-stats                            # 修复/核对 blocking 
 uv run intel replay-m2 --max-batches 10000             # 显式完整算法重放
 uv run intel replay-m2 --resume --max-batches 10000    # 失败修复后从已有积压续跑，不重置已完成批次
 uv run intel evaluate-m2 --dataset evaluation/m2_quality_seed.jsonl
+uv run intel llm-config                                  # 只校验最终模型配置，不发起 API 调用
 uv run intel semantic-enrich --limit 5 --force            # 显式运行一批影子语义富化（会调用已配置模型）
+uv run intel semantic-sample --size 100 --batch m2.2.2-eval-v1  # 分层平衡抽样（16 源）
+uv run intel semantic-eval --batch m2.2.2-eval-v1         # 语义评测聚合（相关率/证据/成本）
+uv run intel relation-scan --min-documents 2              # M2.3 跨文档关系裁决（影子）
+uv run intel claim-merge --limit 200                      # M2.4 Claim 合并（影子）
+uv run intel event-promote --limit 50 --dry-run           # M2.4 提升预览（默认不写正式表）
+uv run intel supersede-stale-vuln --limit 2000            # 清理隔离前旧 cve: 事件
 uv run intel m2-reviews --status pending --limit 50    # 查看低置信候选
 uv run intel stats       # 文档、近重复、事件和证据数量
 uv run intel serve       # 起 API（:8000）
@@ -151,7 +167,7 @@ uv run python scripts/gen_report.py report.html        # 默认最多嵌入 30,0
 uv run python scripts/gen_report.py report.html 50000  # 可选：调整浏览器内明细上限
 ```
 
-报告中的全库统计始终精确；明细按上限保留最新当前记录及最多 5,000 条历史记录，并可按当前/历史、逻辑来源、endpoint、上游状态筛选。
+报告中的全库统计始终精确；文档明细按上限保留最新当前记录及最多 5,000 条历史记录。页面同时展示能力地图、事件/证据/版本/Claim、M2 候选复核和运行审计、语义影子状态及信源健康；事件样本最多 4,000 条，并优先保留 75% 非 CVE 热点。
 
 验证 API：
 
@@ -173,7 +189,7 @@ uv run ruff check . && uv run pyright                   # 质量门禁
 uv run alembic upgrade head && uv run alembic check     # 迁移 + ORM 元数据漂移门禁
 ```
 
-当前测试共 74 项，其中 73 项非 live；覆盖 M1 增量语义、不同强身份冲突、持久化签名、高频候选桶保护、SimHash/MinHash 候选、人工批准、reviewed 评测范围、局部退役重选主、EventVersion 和 Claim 支持/反驳证据，以及语义 Schema、原子事件、实体/Claim 证据定位和 PostgreSQL 事务落库。数据库集成测试需要已迁移的 `INTEL_DATABASE_URL`；`live` 只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
+当前测试共 93 项，其中 89 项非 live；覆盖 M1 增量语义、不同强身份冲突、持久化签名、高频候选桶保护、SimHash/MinHash 候选、人工批准、reviewed 评测范围、局部退役重选主、EventVersion 和 Claim 支持/反驳证据，以及语义 Schema、原子事件、实体/Claim 证据定位、NVD fan-out 修复、抽样平衡、关系裁决、Claim 合并与提升门禁和 PostgreSQL 事务落库。数据库集成测试需要已迁移的 `INTEL_DATABASE_URL`；`live` 只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
 
 ## 部署（Docker Compose）
 
@@ -189,7 +205,7 @@ curl localhost:8000/health        # {"status":"ok"}
 - `worker` 随后 `intel sync` 载入 `sources.yaml`，并按调度持续抓取。
 - 数据持久化在 `pgdata` 卷，网页快照存 `blobdata` 卷。
 
-已有数据库升级到本版本时必须应用到 head `d2c5d53a7a76`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。M2.1 迁移回填稳定组件 ID，并新增签名/身份/token 及 token 桶计数索引、局部 work/run、人工复核、EventVersion、Claim 和 ClaimEvidence 表；M2.2 仅新增默认关闭的影子语义工作队列、富化、实体、原子事件和抽取 Claim 表；当前 head 还会收紧 M2.1 审计时间列的非空约束、补齐候选复核索引，并使 ORM 与数据库的复合/部分索引定义保持一致。M2.0 遗留事件会保存 `baseline_import` 快照并明确更早历史不可还原，不删除文档或旧事件。大库首次升级后应执行 `m2-index --all` 和 `replay-m2`，并观察 self-check 直至 v2 积压归零。
+已有数据库升级到本版本时必须应用到 head `2b19e8eb334b`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。M2.1 迁移回填稳定组件 ID，并新增签名/身份/token 及 token 桶计数索引、局部 work/run、人工复核、EventVersion、Claim 和 ClaimEvidence 表；M2.2 新增默认关闭的影子语义工作队列、富化、实体、原子事件和抽取 Claim 表，并追加语义审计列（raw_response/finish_reason/usage/batch_id/max_attempts）与 relation_verdicts（M2.3）；事件表新增 `category` 列（vuln_db/general）。M2.0 遗留事件会保存 `baseline_import` 快照并明确更早历史不可还原，不删除文档或旧事件。大库首次升级后应执行 `m2-index --all` 和 `replay-m2`，并观察 self-check 直至 v2 积压归零。
 
 > 当前 API 未实现认证，且包含 `/ops/tick` 运维写操作。部署时应只绑定可信内网或在前置网关完成认证与访问控制。
 
@@ -230,7 +246,7 @@ INTEL_PROXY_POOL_GLOBAL=http://172.18.0.1:17897
 ```bash
 uv sync
 docker compose up -d postgres
-export INTEL_DATABASE_URL=postgresql+psycopg://intel:intel@localhost:5432/intel
+export INTEL_DATABASE_URL=postgresql+psycopg://intel:intel@localhost:5433/intel
 
 uv run alembic upgrade head     # 迁移
 uv run intel sync               # 载入 sources.yaml（19 个配置项：18 active + 1 retired）
@@ -240,35 +256,40 @@ uv run intel stats              # 查看文档/重复/事件/证据数量
 uv run intel serve              # 起 API（:8000）
 ```
 
+> 容器 Postgres 宿主机端口默认 5432，可由 `POSTGRES_HOST_PORT` 覆盖；本部署使用 5433。
+
 ## 目录
 
 ```
 src/ai_security_hot/
   config/       Settings + sources.yaml 加载器（含 egress 字段）
-  domain/       枚举 + 领域值对象（RawItem/NormalizedDocument/Checkpoint + known content hashes + 独立内容水位）
-  models/       SQLAlchemy 表 + 会话
+  domain/       枚举 + 领域值对象 + STRUCTURED_VULN_ENDPOINTS
+  models/       SQLAlchemy 表 + 会话（含 semantic_tables：原子事件/关系裁决/提升）
   connectors/   FetchContext + SSRF + 8 类连接器（RSS/REST/NVD/AI HOT/GitHub/Web/arXiv/Sitemap）
   parsers/      各源 Parser（rss/cisa_kev/nvd/github_releases/web_article/arxiv/sitemap_article）+ normalize
   classify/     RuleClassifier + HybridClassifier + 严格 Schema + taxonomy.yaml
   events/       M2 去重/事件规则、持久化签名、质量评测和候选判断
-  semantic/     严格语义任务、实体与原子事件抽取契约
-  storage/      BlobStore + repositories（租约/幂等/局部组件与事件重算/版本事实/导出）
+  semantic/     语义任务、实体/原子事件抽取、抽样、评测、关系裁决、Claim 合并、提升预览
+  storage/      BlobStore + repositories + event_repository + semantic_repository
   pipelines/    fetch/normalize/fulltext/classify/semantic/dedupe/cluster stages
   jobs/         独立 fetch/normalize/fulltext/classify/event 调度 + self_check
-  api/          FastAPI 只读/运维接口
-  cli.py        intel CLI（采集、分类、eventize、查询、导出与运维）
+  api/          FastAPI 只读/运维接口（含 /v1/daily-hotspots）
+  cli.py        intel CLI（采集、分类、事件、语义、关系、提升、导出与运维）
+config/         models.yaml（DeepSeek/OpenAI-compatible 非敏感 Profile）
 sources/        sources.yaml（19 个配置项：18 active + 1 retired）+ taxonomy.yaml
-migrations/     Alembic（initial + M1 lifecycle/classification + M2.0/M2.1/M2.2）
-evaluation/     M2 去重与语义人工标注模板、标注约定及离线质量指标
-tests/          unit / smoke / event intelligence + PostgreSQL integration + opt-in live crawl
+migrations/     Alembic（initial + M1 + M2.0/M2.1/M2.2/M2.2.1/M2.3）
+evaluation/     M2 去重/语义样本（m2.2.2-eval-v1）+ 离线诊断指标
+tests/          unit / smoke / event intelligence + semantic + PostgreSQL integration + opt-in live crawl
 ```
 
-## 后续（M2.2+）
+## 后续（M2.4+）
 
-- **日期事件 API**：按指定自然日返回经过局部增量、去重和聚类后的热点事件，补齐分页、时区、as-of/version 和证据展开契约。
-- **评测集扩充**：对真实误合并/漏合并进行双人标注和裁决，再决定是否引入 embedding/pgvector；当前 SimHash/MinHash 仅用于候选召回。
-- **语义影子评测**：完成真实数据双人标注，测量实体、原子事件、证据忠实度、成本和延迟，再决定是否允许语义结果参与事件候选。
-- **Embedding + 关系裁决**：只对规则/时间/实体/向量召回的候选判断 same/related/different，不覆盖强标识冲突。
+- **正式提升启用**：M2.4 `event-promote` 当前默认 dry-run；达到门禁且确认命名空间对齐后显式启用影子→正式 Event 提升。
+- **Embedding/pgvector 召回**：M2.3 当前用确定性（共享实体+时间）召回；按实际指标触发再引入向量增强。
+- **LLM-as-judge**：M2.2.2 当前用规则聚合；独立 judge 作为代理指标（不命名 F1）。
+- **延迟 p50/p95**：语义评测当前为 null，需持久化每篇 started_at。
 - **日报与投递**：日报冻结/生成/版本化 + 飞书/邮件投递幂等。
-- **更多信源**：在当前 18 个 active endpoint 基础上扩展至约 35 个。
-- Parser 漂移检测、pgvector 可选增强。均由实际指标触发，不提前引入。
+- **更多信源**：在当前 active endpoint 基础上扩展至约 35 个。
+- Parser 漂移检测。均由实际指标触发，不提前引入。
+
+详细完成度、已知问题、启动条件和阶段验收标准统一维护在 [项目当前状态与后续路线](docs/current-status.md)。

@@ -17,6 +17,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from rapidfuzz import fuzz
 
+from ai_security_hot.domain.enums import STRUCTURED_VULN_ENDPOINTS
+
 DEDUPE_VERSION = "dedupe-v2"
 CLUSTER_VERSION = "cluster-v2"
 FUZZY_TITLE_THRESHOLD = 94.0
@@ -83,6 +85,7 @@ class EventDraft:
     fingerprint: str
     event_type: str | None
     topic: str | None
+    category: str | None  # "vuln_db" (NVD/KEV) or "general"
     title: str
     summary: str | None
     status: str
@@ -436,9 +439,18 @@ def strong_event_keys(doc: IntelDocument) -> tuple[EventKey, ...]:
     unrelated research, vulnerabilities and incidents into one event.
     """
     keys: list[EventKey] = []
+    # Structured vuln feeds (NVD/KEV) get a namespaced key so their events are
+    # a separate vuln-db category and never merge with a news article that
+    # merely references the same CVE id.
+    vuln_namespace = (
+        "cve-nvd" if doc.endpoint_id in STRUCTURED_VULN_ENDPOINTS else "cve"
+    )
     for kind in ("cve", "ghsa", "cnvd"):
         for value in sorted(_identifier_values(doc, kind)):
-            keys.append(EventKey(f"{kind}:{value}", kind))
+            if kind == "cve" and doc.endpoint_id in STRUCTURED_VULN_ENDPOINTS:
+                keys.append(EventKey(f"cve-nvd:{value}", vuln_namespace))
+            else:
+                keys.append(EventKey(f"{kind}:{value}", kind))
     match = _ARXIV_RE.search(doc.canonical_url)
     if match:
         keys.append(EventKey(f"arxiv:{match.group(1)}", "arxiv"))
@@ -559,6 +571,7 @@ def build_event_draft(
         fingerprint=key.fingerprint,
         event_type=_event_type(members, key.kind),
         topic=_primary_topic(members, key.kind),
+        category="vuln_db" if key.kind == "cve-nvd" else "general",
         title=primary.title.strip()[:240],
         summary=_summary(primary),
         status="detected",

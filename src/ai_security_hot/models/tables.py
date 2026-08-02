@@ -386,6 +386,8 @@ class Event(Base):
     fingerprint: Mapped[str] = mapped_column(String(160), unique=True, index=True)
     event_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     topic: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # "vuln_db" for structured vulnerability feeds (NVD/KEV), "general" otherwise.
+    category: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     title: Mapped[str] = mapped_column(Text)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="detected")

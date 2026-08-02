@@ -137,6 +137,7 @@ def _event_payload(event: Event, *, document_count: int, source_count: int) -> d
         "fingerprint": event.fingerprint,
         "event_type": event.event_type,
         "topic": event.topic,
+        "category": event.category,
         "title": event.title,
         "summary": event.summary,
         "status": event.status,
@@ -194,6 +195,64 @@ def list_events(
             stmt.group_by(Event.id)
             .order_by(desc(Event.score), desc(Event.last_seen_at), desc(Event.id))
             .offset(offset)
+            .limit(limit)
+        )
+        rows = session.execute(stmt).all()
+        return [
+            _event_payload(event, document_count=int(doc_count), source_count=int(source_count))
+            for event, doc_count, source_count in rows
+        ]
+
+
+@app.get("/v1/daily-hotspots")
+def daily_hotspots(
+    date: str = Query(..., description="natural day YYYY-MM-DD"),
+    tz: str = Query("Asia/Shanghai"),
+    category: str | None = Query(None, description="general | vuln_db"),
+    limit: int = Query(20, ge=1, le=100),
+    min_score: int = Query(0, ge=0, le=100),
+) -> list[dict]:
+    """Return top events whose last activity falls on a natural day, in tz.
+
+    Filters to detected (non-superseded) events, groups by the natural day of
+    last_seen_at in the requested timezone, and returns the highest-scoring
+    events for that day. category=general|vuln_db narrows the scope.
+    """
+    from zoneinfo import ZoneInfo
+
+    try:
+        tzinfo = ZoneInfo(tz)
+    except Exception:
+        raise HTTPException(status_code=422, detail=f"unknown timezone: {tz!r}") from None
+    try:
+        day_start = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=tzinfo)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid date: {date!r}") from exc
+    day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    with session_scope() as session:
+        stmt = (
+            select(
+                Event,
+                func.count(EventDocument.id),
+                func.count(func.distinct(SourceEndpoint.source_id)),
+            )
+            .join(EventDocument, EventDocument.event_id == Event.id)
+            .join(Document, Document.id == EventDocument.document_id)
+            .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
+            .where(
+                Event.status == "detected",
+                Event.score >= min_score,
+                Event.last_seen_at >= day_start,
+                Event.last_seen_at <= day_end,
+                *repo.current_document_conditions(),
+            )
+        )
+        if category:
+            stmt = stmt.where(Event.category == category)
+        stmt = (
+            stmt.group_by(Event.id)
+            .order_by(desc(Event.score), desc(Event.last_seen_at), desc(Event.id))
             .limit(limit)
         )
         rows = session.execute(stmt).all()

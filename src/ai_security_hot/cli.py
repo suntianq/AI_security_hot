@@ -133,17 +133,197 @@ def semantic_enrich(
         "--force",
         help="run one shadow batch even when scheduled enrichment is disabled",
     ),
+    retry_only: bool = typer.Option(
+        False,
+        "--retry-only",
+        help="claim due retries without enqueueing new documents",
+    ),
+    batch: str | None = typer.Option(
+        None,
+        "--batch",
+        help="tag this run with a reproducible batch id (e.g. m2.2.2-eval-v1)",
+    ),
+    manifest: str | None = typer.Option(
+        None,
+        "--manifest",
+        help="JSONL sample manifest — enqueue exactly those document ids (controlled eval)",
+    ),
 ) -> None:
     """Run a cost-bounded shadow semantic-enrichment batch."""
     from ai_security_hot.pipelines.semantic_stage import run_semantic_enrichment_stage
+    from ai_security_hot.semantic.sampling import load_manifest
 
     _setup_logging()
+    document_ids = load_manifest(manifest) if manifest else None
     typer.echo(
         json.dumps(
-            run_semantic_enrichment_stage(limit=limit, force=force),
+            run_semantic_enrichment_stage(
+                limit=limit,
+                force=force,
+                enqueue=not retry_only,
+                batch_id=batch,
+                document_ids=document_ids,
+            ),
             ensure_ascii=False,
         )
     )
+
+
+@app.command("semantic-eval")
+def semantic_eval(
+    batch: str = typer.Option(..., "--batch", help="batch id to evaluate"),
+    manifest: str | None = typer.Option(
+        None, "--manifest", help="sample manifest JSONL (for coverage report)"
+    ),
+) -> None:
+    """Aggregate proxy metrics for a semantic-evaluation batch (M2.2.2)."""
+    from ai_security_hot.semantic.evaluation import evaluate_batch
+
+    _setup_logging()
+    typer.echo(
+        json.dumps(evaluate_batch(batch, manifest=manifest), ensure_ascii=False, indent=2)
+    )
+
+
+@app.command("claim-merge")
+def claim_merge(limit: int = typer.Option(200, min=1)) -> None:
+    """Merge claims for related atomic-event pairs (M2.4, shadow summary)."""
+    from ai_security_hot.models.base import session_scope
+    from ai_security_hot.semantic.claim_merge_repo import run_claim_merge
+
+    _setup_logging()
+    with session_scope() as session:
+        typer.echo(json.dumps(run_claim_merge(session, limit=limit), ensure_ascii=False))
+
+
+@app.command("event-promote")
+def event_promote(
+    limit: int = typer.Option(50, min=1),
+    dry_run: bool = typer.Option(True, "--dry-run", help="preview (default, shadow-only)"),
+) -> None:
+    """Preview semantic promotions from related pairs (M2.4). Default shadow."""
+    from sqlalchemy import select
+
+    from ai_security_hot.models.base import session_scope
+    from ai_security_hot.models.semantic_tables import RelationVerdict
+    from ai_security_hot.semantic.claim_merge_repo import (
+        _load_claims_for_atomics,
+        merge_related_pair,
+    )
+    from ai_security_hot.semantic.promotion import build_promotion_preview
+
+    _setup_logging()
+    with session_scope() as session:
+        verdicts = session.execute(
+            select(RelationVerdict).where(
+                RelationVerdict.decision.in_(["related_event", "same_event"])
+            ).limit(limit)
+        ).scalars().all()
+        atomic_ids = {v.left_atomic_id for v in verdicts} | {v.right_atomic_id for v in verdicts}
+        claims = _load_claims_for_atomics(session, atomic_ids)
+        previews = []
+        for verdict in verdicts:
+            left_claims = claims.get(verdict.left_atomic_id, [])
+            right_claims = claims.get(verdict.right_atomic_id, [])
+            if not left_claims or not right_claims:
+                continue
+            merged = merge_related_pair(left_claims, right_claims)
+            left_docs = {c.document_id for c in left_claims}
+            right_docs = {c.document_id for c in right_claims}
+            doc_ids = sorted(left_docs | right_docs)
+            title = merged[0].text[:80] if merged else "Merged semantic event"
+            summary = " ".join(m.text for m in merged[:3])[:500]
+            previews.append(
+                build_promotion_preview(
+                    fingerprint=f"semantic:{verdict.left_atomic_id}:{verdict.right_atomic_id}",
+                    title=title,
+                    summary=summary,
+                    event_type="incident",
+                    topic="security_for_ai",
+                    category="general",
+                    document_ids=doc_ids,
+                    merged_claim_count=len(merged),
+                ).as_dict()
+            )
+        gated = sum(1 for p in previews if p["gated"])
+        typer.echo(
+            json.dumps(
+                {"previews": len(previews), "gated_met": gated, "sample": previews[:5]},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+
+
+@app.command("relation-scan")
+def relation_scan(
+    min_documents: int = typer.Option(2, min=2),
+    limit: int = typer.Option(500, min=1),
+) -> None:
+    """Scan cross-document atomic-event candidate pairs and adjudicate (M2.3, shadow)."""
+    from ai_security_hot.models.base import session_scope
+    from ai_security_hot.semantic.candidate_scan import (
+        adjudicate_candidates,
+        persist_verdicts,
+        scan_candidate_pairs,
+    )
+
+    _setup_logging()
+    with session_scope() as session:
+        candidates = scan_candidate_pairs(session, min_documents=min_documents, limit=limit)
+        verdicts = adjudicate_candidates(session, candidates)
+        persisted = persist_verdicts(session, verdicts)
+        summary = {"candidates": len(candidates), "verdicts": len(verdicts), "persisted": persisted}
+        if verdicts:
+            summary["same_event"] = sum(v.decision == "same_event" for v in verdicts)
+            summary["related_event"] = sum(v.decision == "related_event" for v in verdicts)
+            summary["different_event"] = sum(v.decision == "different_event" for v in verdicts)
+        typer.echo(json.dumps(summary, ensure_ascii=False))
+
+
+@app.command("semantic-sample")
+def semantic_sample(
+    size: int = typer.Option(100, min=1, max=500, help="sample size"),
+    batch: str = typer.Option(
+        "m2.2.2-eval-v1", "--batch", help="reproducible batch id for the sample"
+    ),
+    manifest: str | None = typer.Option(
+        None, "--manifest", help="write the sample manifest to this JSONL path"
+    ),
+) -> None:
+    """Draw a stratified sample of non-CVE docs and write a reproducible manifest."""
+    from ai_security_hot.semantic.sampling import run_sampling
+
+    _setup_logging()
+    result = run_sampling(size=size, batch_id=batch, manifest=manifest)
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
+@app.command("llm-config")
+def llm_config() -> None:
+    """Validate and print the effective model config without exposing secrets."""
+    from ai_security_hot.config.models import resolve_model_config
+    from ai_security_hot.llm.registry import provider_names
+
+    try:
+        model_config = resolve_model_config(get_settings())
+    except ValueError as exc:
+        typer.echo(
+            json.dumps(
+                {"status": "configuration_error", "error": str(exc)},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        raise typer.Exit(code=2) from exc
+    summary = model_config.public_summary()
+    summary["provider_registered"] = model_config.provider in provider_names()
+    summary["status"] = (
+        "ready"
+        if summary["ready"] and summary["provider_registered"]
+        else "not_ready"
+    )
+    typer.echo(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
 @app.command("evaluate-m2")
@@ -239,23 +419,33 @@ def resolve_m2_review(
 @app.command()
 def dedupe(
     force: bool = typer.Option(False, help="queue a full replay, then process its first batch"),
+    scope: str = typer.Option(
+        "all",
+        "--scope",
+        help="all | vuln (NVD/KEV) | general — run one pass restricted to a scope",
+    ),
 ) -> None:
     """Build non-destructive exact/near-duplicate relationships (M2)."""
     from ai_security_hot.pipelines.stages import run_dedupe_stage
 
     _setup_logging()
-    typer.echo(json.dumps(run_dedupe_stage(force=force, trigger="cli")))
+    typer.echo(json.dumps(run_dedupe_stage(force=force, trigger="cli", scope=scope)))
 
 
 @app.command()
 def cluster(
     force: bool = typer.Option(False, help="recompute even when version is current"),
+    scope: str = typer.Option(
+        "all",
+        "--scope",
+        help="all | vuln (NVD/KEV) | general — run one pass restricted to a scope",
+    ),
 ) -> None:
     """Materialize strong-key events and their evidence links (M2)."""
     from ai_security_hot.pipelines.stages import run_cluster_stage
 
     _setup_logging()
-    typer.echo(json.dumps(run_cluster_stage(force=force, trigger="cli")))
+    typer.echo(json.dumps(run_cluster_stage(force=force, trigger="cli", scope=scope)))
 
 
 def _run_m2_replay(max_batches: int, *, resume: bool = False) -> dict:
@@ -317,6 +507,17 @@ def replay_m2(
     """Replay M2.1 in bounded local batches with durable run audit."""
     _setup_logging()
     typer.echo(json.dumps(_run_m2_replay(max_batches, resume=resume)))
+
+
+@app.command("supersede-stale-vuln")
+def supersede_stale_vuln(limit: int = typer.Option(2000, min=1)) -> None:
+    """Supersede legacy pre-isolation 'cve:' events (keep 'cve-nvd:' active)."""
+    from ai_security_hot.models.base import session_scope
+    from ai_security_hot.storage import event_repository
+
+    _setup_logging()
+    with session_scope() as session:
+        typer.echo(json.dumps(event_repository.supersede_stale_vuln_events(session, limit=limit)))
 
 
 @app.command("eventize")

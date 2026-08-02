@@ -1,294 +1,559 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AI × Security 情报后端 — 当前与历史语料</title>
+<title>AI × Security Intelligence Console</title>
 <style>
   :root {
-    --bg:#0f1115; --panel:#181b22; --panel2:#1f232c; --line:#2a2f3a;
-    --fg:#e6e9ef; --mut:#9aa4b2; --acc:#4f8cff;
-    --t1:#ff6b6b; --t2:#ffd166; --t3:#06d6a0; --t4:#c77dff;
+    --bg:#090d14; --panel:#111823; --panel2:#172131; --line:#253247;
+    --fg:#e9eef7; --mut:#91a0b7; --accent:#61a5fa; --cyan:#22d3ee;
+    --green:#34d399; --yellow:#fbbf24; --red:#fb7185; --purple:#c084fc;
+    --shadow:0 14px 38px rgba(0,0,0,.22);
   }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-    font:14px/1.5 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif; }
-  header { padding:20px 24px; border-bottom:1px solid var(--line); background:var(--panel); }
-  header h1 { margin:0 0 4px; font-size:20px; }
-  header .meta { color:var(--mut); font-size:12px; }
-  .wrap { max-width:1200px; margin:0 auto; padding:20px 24px; }
-  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:20px; }
-  .stat { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
-  .stat .n { font-size:26px; font-weight:700; }
-  .stat .l { color:var(--mut); font-size:12px; margin-top:2px; }
-  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px; }
-  @media(max-width:800px){ .grid2{grid-template-columns:1fr;} }
-  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:16px; }
-  .panel h3 { margin:0 0 12px; font-size:14px; color:var(--mut); font-weight:600; }
-  .bar { display:flex; align-items:center; gap:8px; margin:6px 0; }
-  .bar .name { width:130px; font-size:12px; flex-shrink:0; }
-  .bar .track { flex:1; background:var(--panel2); border-radius:4px; height:16px; overflow:hidden; }
-  .bar .fill { height:100%; border-radius:4px; }
-  .bar .v { width:48px; text-align:right; font-size:12px; color:var(--mut); flex-shrink:0; }
-  .toolbar { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; align-items:center; }
-  .toolbar input, .toolbar select {
-    background:var(--panel2); border:1px solid var(--line); color:var(--fg);
-    border-radius:8px; padding:8px 10px; font-size:13px; }
-  .toolbar input[type=search]{ flex:1; min-width:180px; }
-  .count { color:var(--mut); font-size:12px; }
+  html { scroll-behavior:smooth; }
+  body { margin:0; color:var(--fg); background:
+    radial-gradient(circle at 15% -10%, rgba(37,99,235,.18), transparent 34%),
+    radial-gradient(circle at 90% 0%, rgba(6,182,212,.10), transparent 28%), var(--bg);
+    font:14px/1.55 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+  button,input,select { font:inherit; }
+  header { position:sticky; top:0; z-index:20; border-bottom:1px solid rgba(37,50,71,.9);
+    background:rgba(9,13,20,.92); backdrop-filter:blur(16px); }
+  .top { max-width:1440px; margin:auto; padding:16px 24px 12px; display:flex;
+    align-items:flex-start; justify-content:space-between; gap:16px; }
+  .brand h1 { margin:0; font-size:21px; letter-spacing:-.02em; }
+  .brand h1 span { color:var(--cyan); }
+  .meta { color:var(--mut); font-size:12px; margin-top:3px; }
+  .header-pills { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:7px; }
+  nav { max-width:1440px; margin:auto; padding:0 24px; display:flex; gap:4px; overflow:auto; }
+  nav button { color:var(--mut); background:transparent; border:0; border-bottom:2px solid transparent;
+    padding:9px 13px 11px; cursor:pointer; white-space:nowrap; }
+  nav button:hover { color:var(--fg); }
+  nav button.active { color:var(--fg); border-bottom-color:var(--cyan); }
+  main { max-width:1440px; margin:0 auto; padding:22px 24px 60px; }
+  .view[hidden] { display:none; }
+  .section-head { display:flex; align-items:flex-end; justify-content:space-between;
+    gap:16px; margin:2px 0 16px; }
+  .section-head h2 { margin:0; font-size:19px; }
+  .section-head p { margin:3px 0 0; color:var(--mut); font-size:12px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(155px,1fr));
+    gap:10px; margin-bottom:18px; }
+  .card,.panel,.cap,.flow,.endpoint { border:1px solid var(--line); background:
+    linear-gradient(155deg,rgba(23,33,49,.94),rgba(17,24,35,.96)); box-shadow:var(--shadow); }
+  .card { min-height:94px; border-radius:12px; padding:14px 15px; }
+  .card .value { font-size:25px; font-weight:720; letter-spacing:-.03em; }
+  .card .label { color:var(--mut); font-size:12px; margin-top:2px; }
+  .card .hint { color:var(--mut); font-size:10px; margin-top:5px; }
+  .grid2 { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin-bottom:16px; }
+  .grid3 { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:16px; }
+  .panel { border-radius:12px; padding:16px; min-width:0; }
+  .panel h3 { margin:0 0 12px; font-size:13px; color:#cbd5e1; }
+  .panel-note { color:var(--mut); font-size:11px; margin:-7px 0 12px; }
+  .bar { display:flex; align-items:center; gap:9px; margin:7px 0; }
+  .bar .name { width:145px; flex:none; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:11px; }
+  .bar .track { flex:1; height:15px; border-radius:5px; overflow:hidden; background:#0c121c; }
+  .bar .fill { height:100%; min-width:2px; border-radius:5px; background:linear-gradient(90deg,var(--accent),var(--cyan)); }
+  .bar .number { width:74px; flex:none; text-align:right; color:var(--mut); font-size:11px; }
+  .cap-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(235px,1fr)); gap:10px; margin-bottom:18px; }
+  .cap { padding:13px; border-radius:11px; }
+  .cap .phase { color:var(--mut); font-size:10px; text-transform:uppercase; letter-spacing:.08em; }
+  .cap .name { font-weight:650; margin:4px 0; }
+  .cap .detail { color:var(--mut); font-size:11px; }
+  .cap.ready { border-left:3px solid var(--green); }
+  .cap.shadow { border-left:3px solid var(--yellow); }
+  .cap.planned { border-left:3px solid #64748b; opacity:.78; }
+  .flow-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-bottom:18px; }
+  .flow { border-radius:11px; padding:14px; position:relative; }
+  .flow:not(:last-child)::after { content:"›"; position:absolute; right:-9px; top:29px;
+    color:var(--cyan); font-size:22px; z-index:2; }
+  .flow .step { color:var(--cyan); font-size:10px; letter-spacing:.08em; }
+  .flow strong { display:block; margin:3px 0; }
+  .flow span { color:var(--mut); font-size:11px; }
+  .toolbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:12px; }
+  .toolbar input,.toolbar select { color:var(--fg); background:#0d1521; border:1px solid var(--line);
+    border-radius:8px; padding:8px 10px; min-height:36px; }
+  .toolbar input[type=search] { flex:1; min-width:230px; }
+  .count { margin-left:auto; color:var(--mut); font-size:11px; }
+  .table-wrap { overflow:auto; max-height:68vh; border:1px solid var(--line); border-radius:9px; }
   table { width:100%; border-collapse:collapse; }
-  th,td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--mut); font-size:12px; font-weight:600; position:sticky; top:0; background:var(--panel); cursor:pointer; }
-  td.title a { color:var(--fg); text-decoration:none; }
-  td.title a:hover { color:var(--acc); text-decoration:underline; }
-  .tag { display:inline-block; padding:1px 7px; border-radius:20px; font-size:11px; margin:1px 2px 1px 0; white-space:nowrap; }
-  .tag.ai_for_security{ background:rgba(255,107,107,.15); color:var(--t1); border:1px solid var(--t1); }
-  .tag.security_for_ai{ background:rgba(255,209,102,.15); color:var(--t2); border:1px solid var(--t2); }
-  .tag.agent{ background:rgba(6,214,160,.15); color:var(--t3); border:1px solid var(--t3); }
-  .tag.system_security{ background:rgba(199,125,255,.15); color:var(--t4); border:1px solid var(--t4); }
-  .tag.cve{ background:rgba(255,107,107,.15); color:var(--t1); border:1px solid var(--t1); }
-  .tag.llm{ background:rgba(79,140,255,.15); color:var(--acc); border:1px solid var(--acc); }
-  .tag.co { background:var(--panel2); color:var(--mut); border:1px solid var(--line); }
-  .tag.et { background:rgba(79,140,255,.12); color:var(--acc); border:1px solid var(--acc); }
-  .src { color:var(--mut); font-size:11px; }
-  .src strong { color:var(--fg); font-weight:600; }
-  .cve { color:var(--t1); font-size:11px; }
-  .state { display:inline-block; margin-top:3px; padding:1px 6px; border-radius:10px;
-    font-size:10px; border:1px solid var(--line); color:var(--mut); }
-  .state.current { color:var(--t3); border-color:var(--t3); }
-  .state.rejected,.state.withdrawn,.state.retired { color:var(--t1); border-color:var(--t1); }
-  .endpoint-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:8px; }
-  .endpoint-item { background:var(--panel2); border:1px solid var(--line); border-radius:8px; padding:10px; }
-  .endpoint-item .id { font-weight:600; }
-  .endpoint-item .detail { color:var(--mut); font-size:11px; margin-top:3px; }
-  .pager { display:flex; gap:8px; justify-content:center; align-items:center; margin:16px 0; }
-  .pager button { background:var(--panel2); border:1px solid var(--line); color:var(--fg); border-radius:8px; padding:6px 12px; cursor:pointer; }
+  th,td { padding:10px 11px; border-bottom:1px solid rgba(37,50,71,.78); text-align:left; vertical-align:top; }
+  th { position:sticky; top:0; z-index:2; color:var(--mut); background:#121b28;
+    font-size:11px; font-weight:650; white-space:nowrap; }
+  tr:hover td { background:rgba(97,165,250,.035); }
+  a { color:#dbeafe; text-decoration:none; }
+  a:hover { color:var(--cyan); text-decoration:underline; }
+  .title { min-width:280px; }
+  .title strong { display:block; font-weight:620; }
+  .subtle { color:var(--mut); font-size:11px; margin-top:3px; }
+  .mono { font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; color:#8493aa;
+    word-break:break-all; }
+  .pill,.tag,.state { display:inline-flex; align-items:center; padding:2px 7px; margin:1px 3px 1px 0;
+    border:1px solid var(--line); border-radius:999px; white-space:nowrap; font-size:10px; }
+  .pill.ready,.state.success,.state.current,.state.detected { color:var(--green); border-color:rgba(52,211,153,.55); background:rgba(52,211,153,.08); }
+  .pill.shadow,.state.pending,.state.running,.state.retry { color:var(--yellow); border-color:rgba(251,191,36,.55); background:rgba(251,191,36,.08); }
+  .pill.planned,.state.superseded { color:#94a3b8; }
+  .state.failed,.state.rejected,.state.retired,.state.withdrawn,.state.degraded { color:var(--red); border-color:rgba(251,113,133,.55); background:rgba(251,113,133,.08); }
+  .tag.cve { color:var(--red); border-color:rgba(251,113,133,.55); }
+  .tag.agent { color:var(--green); border-color:rgba(52,211,153,.55); }
+  .tag.llm { color:var(--accent); border-color:rgba(97,165,250,.55); }
+  .tag.security_for_ai { color:var(--yellow); border-color:rgba(251,191,36,.55); }
+  .tag.ai_for_security { color:var(--cyan); border-color:rgba(34,211,238,.55); }
+  .tag.system_security { color:var(--purple); border-color:rgba(192,132,252,.55); }
+  .banner { border:1px solid var(--line); border-radius:12px; padding:15px 16px; margin-bottom:16px;
+    display:flex; justify-content:space-between; gap:16px; align-items:center; background:var(--panel); }
+  .banner.disabled { border-left:4px solid var(--yellow); }
+  .banner.enabled { border-left:4px solid var(--green); }
+  .banner strong { display:block; }
+  .banner .detail { color:var(--mut); font-size:11px; margin-top:3px; }
+  .empty { padding:28px 16px; text-align:center; color:var(--mut); border:1px dashed var(--line); border-radius:9px; }
+  .empty code { display:inline-block; color:#bae6fd; margin-top:8px; }
+  .endpoint-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:10px; }
+  .endpoint { border-radius:10px; padding:12px; }
+  .endpoint .row { display:flex; justify-content:space-between; gap:10px; }
+  .endpoint .name { font-weight:620; }
+  .endpoint .id { color:var(--mut); font-size:10px; word-break:break-all; }
+  .endpoint .details { margin-top:8px; color:var(--mut); font-size:11px; }
+  .pager { display:flex; flex-wrap:wrap; justify-content:center; align-items:center; gap:6px; margin:14px 0 0; }
+  .pager button { border:1px solid var(--line); border-radius:7px; color:var(--fg); background:#111b29;
+    padding:5px 10px; cursor:pointer; }
+  .pager button.active { background:var(--accent); color:#07101d; border-color:var(--accent); }
   .pager button:disabled { opacity:.4; cursor:default; }
+  .metric-line { display:flex; justify-content:space-between; gap:12px; padding:6px 0; border-bottom:1px solid rgba(37,50,71,.6); }
+  .metric-line:last-child { border:0; }
+  .metric-line span:first-child { color:var(--mut); }
+  @media(max-width:980px) {
+    .grid3,.flow-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .flow:nth-child(2)::after { display:none; }
+  }
+  @media(max-width:720px) {
+    .top { padding:13px 15px 10px; }
+    .header-pills { display:none; }
+    nav { padding:0 10px; }
+    main { padding:17px 13px 45px; }
+    .grid2,.grid3,.flow-grid { grid-template-columns:1fr; }
+    .flow::after { display:none!important; }
+    .count { width:100%; margin-left:0; }
+  }
 </style>
 </head>
 <body>
 <header>
-  <h1>AI × Security 情报后端 — 当前与历史语料</h1>
-  <div class="meta" id="meta"></div>
+  <div class="top">
+    <div class="brand">
+      <h1>AI × Security <span>Intelligence Console</span></h1>
+      <div class="meta" id="meta"></div>
+    </div>
+    <div class="header-pills" id="headerPills"></div>
+  </div>
+  <nav id="nav">
+    <button data-view="overview" class="active">总览</button>
+    <button data-view="events">事件情报</button>
+    <button data-view="m2">M2 增量与复核</button>
+    <button data-view="semantic">语义影子层</button>
+    <button data-view="sources">信源健康</button>
+    <button data-view="documents">文档语料</button>
+  </nav>
 </header>
-<div class="wrap">
-  <div class="cards" id="statCards"></div>
-  <div class="grid2">
-    <div class="panel"><h3>当前语料 · 技术方向（多标签）</h3><div id="techBars"></div></div>
-    <div class="panel"><h3>当前语料 · 内容类型</h3><div id="etypeBars"></div></div>
-  </div>
-  <div class="grid2">
-    <div class="panel"><h3>当前语料 · 逻辑来源</h3><div id="sourceBars"></div></div>
-    <div class="panel"><h3>全部证据 · 生命周期</h3><div id="lifecycleBars"></div></div>
-  </div>
-  <div class="panel" style="margin-bottom:20px"><h3>Endpoint 状态（当前 / 全部文档）</h3><div class="endpoint-list" id="endpointList"></div></div>
-  <div class="panel" style="margin-bottom:20px"><h3>当前语料 · 公司与模型 Top 12</h3><div id="companyBars"></div></div>
 
-  <div class="panel">
-    <div class="toolbar">
-      <input type="search" id="q" placeholder="搜索标题…">
-      <select id="fScope">
-        <option value="current">当前语料</option>
-        <option value="history">仅历史/非当前</option>
-        <option value="all">全部证据</option>
-      </select>
-      <select id="fTech"><option value="">全部方向</option></select>
-      <select id="fEtype"><option value="">全部类型</option></select>
-      <select id="fCompany"><option value="">全部公司</option></select>
-      <select id="fSource"><option value="">全部逻辑来源</option></select>
-      <select id="fEndpoint"><option value="">全部 Endpoint</option></select>
-      <select id="fRecord"><option value="">全部上游状态</option></select>
-      <span class="count" id="count"></span>
+<main>
+  <section class="view" id="view-overview">
+    <div class="section-head"><div><h2>运行总览</h2><p>聚合统计覆盖全部数据库；列表使用有界样本以控制静态文件大小。</p></div></div>
+    <div class="cards" id="overviewCards"></div>
+    <div class="section-head"><div><h2>能力地图</h2><p>区分已运行、仅影子基础设施和规划能力，避免把未实现功能显示成生产能力。</p></div></div>
+    <div class="cap-grid" id="capabilities"></div>
+    <div class="flow-grid" id="pipelineFlow"></div>
+    <div class="grid2">
+      <div class="panel"><h3>当前文档 · 技术方向</h3><div id="overviewTech"></div></div>
+      <div class="panel"><h3>当前事件 · Topic</h3><div id="overviewTopics"></div></div>
+      <div class="panel"><h3>当前文档 · 逻辑来源</h3><div id="overviewSources"></div></div>
+      <div class="panel"><h3>全部证据 · 生命周期</h3><div id="overviewLifecycle"></div></div>
     </div>
-    <div style="overflow:auto; max-height:70vh">
-      <table>
-        <thead><tr>
-          <th data-k="title">标题</th>
-          <th data-k="tech">技术方向</th>
-          <th data-k="company">公司/模型</th>
-          <th data-k="etype">类型</th>
-          <th data-k="source">来源 / Endpoint</th>
-          <th data-k="record_status">状态</th>
-          <th data-k="published">时间</th>
-        </tr></thead>
-        <tbody id="rows"></tbody>
-      </table>
+  </section>
+
+  <section class="view" id="view-events" hidden>
+    <div class="section-head"><div><h2>事件情报</h2><p>确定性 M2.1 聚类结果；默认优先查看非 CVE 热点。</p></div></div>
+    <div class="cards" id="eventCards"></div>
+    <div class="grid3">
+      <div class="panel"><h3>事件 Topic</h3><div id="eventTopicBars"></div></div>
+      <div class="panel"><h3>EventVersion 变化类型</h3><div id="versionBars"></div></div>
+      <div class="panel"><h3>Claim 类型 / 状态</h3><div id="claimBars"></div></div>
     </div>
-    <div class="pager" id="pager"></div>
-  </div>
-</div>
+    <div class="panel">
+      <div class="toolbar">
+        <input type="search" id="eventQ" placeholder="搜索事件标题、摘要、指纹或来源…">
+        <select id="eventScope"><option value="non_cve">非 CVE 热点</option><option value="all">全部事件样本</option><option value="cve">仅 CVE</option></select>
+        <select id="eventTopic"><option value="">全部 Topic</option></select>
+        <select id="eventType"><option value="">全部事件类型</option></select>
+        <select id="eventScore"><option value="0">全部分数</option><option value="60">≥ 60</option><option value="80">≥ 80</option><option value="90">≥ 90</option></select>
+        <span class="count" id="eventCount"></span>
+      </div>
+      <div class="table-wrap">
+        <table><thead><tr><th>事件</th><th>分类</th><th>证据 / Claim</th><th>分数</th><th>版本</th><th>时间</th></tr></thead><tbody id="eventRows"></tbody></table>
+      </div>
+      <div class="pager" id="eventPager"></div>
+    </div>
+  </section>
+
+  <section class="view" id="view-m2" hidden>
+    <div class="section-head"><div><h2>M2.1 局部增量与候选复核</h2><p>持久签名、强身份、候选召回、局部组件重建和审计运行。</p></div></div>
+    <div class="cards" id="m2Cards"></div>
+    <div class="grid3">
+      <div class="panel"><h3>候选复核状态</h3><div id="reviewStatusBars"></div></div>
+      <div class="panel"><h3>候选类型</h3><div id="reviewKindBars"></div></div>
+      <div class="panel"><h3>强身份类型</h3><div id="identityBars"></div></div>
+    </div>
+    <div class="panel" style="margin-bottom:16px">
+      <h3>待人工复核候选 · Top 50</h3>
+      <div class="panel-note">SimHash/MinHash 只生成候选，不会直接自动合并；批准后仍受强标识冲突规则约束。</div>
+      <div class="table-wrap"><table><thead><tr><th>ID / 分数</th><th>左文档</th><th>右文档</th><th>特征</th><th>状态</th></tr></thead><tbody id="reviewRows"></tbody></table></div>
+    </div>
+    <div class="panel">
+      <h3>最近 M2 运行</h3>
+      <div class="table-wrap"><table><thead><tr><th>ID</th><th>阶段</th><th>模式 / 触发</th><th>输入</th><th>候选</th><th>影响</th><th>耗时</th><th>状态</th><th>开始时间</th></tr></thead><tbody id="runRows"></tbody></table></div>
+    </div>
+  </section>
+
+  <section class="view" id="view-semantic" hidden>
+    <div class="section-head"><div><h2>M2.2 语义影子层</h2><p>相关性、实体、原子事件、Claim 和逐字证据；当前结果不会修改正式 Event。</p></div></div>
+    <div class="banner" id="semanticBanner"></div>
+    <div class="cards" id="semanticCards"></div>
+    <div class="grid3">
+      <div class="panel"><h3>相关性 / 内容类型</h3><div id="semanticContentBars"></div></div>
+      <div class="panel"><h3>实体 / 原子事件类型</h3><div id="semanticEntityBars"></div></div>
+      <div class="panel"><h3>证据定位 / 模型状态</h3><div id="semanticEvidenceBars"></div></div>
+    </div>
+    <div class="grid2">
+      <div class="panel"><h3>模型运行参数</h3><div id="semanticConfig"></div></div>
+      <div class="panel"><h3>用量与延迟</h3><div id="semanticUsage"></div></div>
+    </div>
+    <div class="panel">
+      <h3>最近影子富化结果</h3>
+      <div id="enrichmentArea"></div>
+    </div>
+  </section>
+
+  <section class="view" id="view-sources" hidden>
+    <div class="section-head"><div><h2>信源与 Endpoint 健康</h2><p>显示逻辑来源、连接器、增量状态、最近成功时间及生命周期替代关系。</p></div></div>
+    <div class="cards" id="sourceCards"></div>
+    <div class="grid2">
+      <div class="panel"><h3>当前文档 · 来源分布</h3><div id="sourceBars"></div></div>
+      <div class="panel"><h3>Endpoint 状态</h3><div id="endpointStatusBars"></div></div>
+    </div>
+    <div class="endpoint-grid" id="endpointGrid"></div>
+  </section>
+
+  <section class="view" id="view-documents" hidden>
+    <div class="section-head"><div><h2>当前与历史文档</h2><p>浏览分类、生命周期、重复组件以及 M2 算法版本。</p></div></div>
+    <div class="cards" id="documentCards"></div>
+    <div class="grid2">
+      <div class="panel"><h3>分类方法</h3><div id="classifyBars"></div></div>
+      <div class="panel"><h3>公司与模型 Top 12</h3><div id="companyBars"></div></div>
+    </div>
+    <div class="panel">
+      <div class="toolbar">
+        <input type="search" id="docQ" placeholder="搜索标题或 CVE…">
+        <select id="docScope"><option value="current">当前语料</option><option value="history">仅历史/非当前</option><option value="all">全部内嵌证据</option></select>
+        <select id="docTech"><option value="">全部方向</option></select>
+        <select id="docType"><option value="">全部类型</option></select>
+        <select id="docSource"><option value="">全部来源</option></select>
+        <select id="docEndpoint"><option value="">全部 Endpoint</option></select>
+        <select id="docRecord"><option value="">全部上游状态</option></select>
+        <span class="count" id="docCount"></span>
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>文档</th><th>分类</th><th>公司 / 模型</th><th>来源</th><th>生命周期</th><th>M2 状态</th><th>时间</th></tr></thead><tbody id="docRows"></tbody></table></div>
+      <div class="pager" id="docPager"></div>
+    </div>
+  </section>
+</main>
 
 <script id="data" type="application/json">/*__DATA__*/</script>
 <script>
-const {docs, stats, techLabels} = JSON.parse(document.getElementById('data').textContent);
-
-// ---- helpers ----
+const payload = JSON.parse(document.getElementById('data').textContent);
+const {docs, events, reviews, runs, enrichments, stats, capabilities, techLabels} = payload;
+const {overview, m2, semantic} = stats;
 const $ = id => document.getElementById(id);
-const fmt = iso => iso ? iso.substring(0,10) : '';
-const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-  .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-
-function barHTML(data, colors, maxVal) {
-  return Object.entries(data).map(([k,v]) => {
-    const pct = Math.round(v/maxVal*100);
-    const col = colors[k] || '#4f8cff';
-    const label = techLabels[k] || k;
-    return `<div class="bar"><div class="name" title="${esc(k)}">${esc(label)}</div>
-      <div class="track"><div class="fill" style="width:${pct}%;background:${col}"></div></div>
-      <div class="v">${v}</div></div>`;
-  }).join('');
-}
-
-// ---- stats and source lifecycle ----
-const techMax = Math.max(...Object.values(stats.tech), 1);
-const etMax   = Math.max(...Object.values(stats.etype), 1);
-const coMax   = Math.max(...Object.values(stats.company), 1);
-const srcMax  = Math.max(...Object.values(stats.source), 1);
-const techColors = {cve:'#ff6b6b',llm:'#4f8cff',ai_for_security:'#f59e0b',security_for_ai:'#ffd166',agent:'#06d6a0',system_security:'#c77dff'};
-
-const sampleNote = stats.truncated ? ` · 浏览器内嵌 ${stats.embedded_total}/${stats.total} 条` : '';
-$('meta').textContent = `${stats.current_total} 篇当前文档 · ${stats.historical_total} 篇历史证据${sampleNote} · 生成于 ${stats.generated_at}`;
-$('statCards').innerHTML = [
-  [stats.current_total, '当前文档'],
-  [stats.historical_total, '历史/非当前证据'],
-  [stats.record_status.rejected || 0, 'Rejected 记录'],
-  [Object.keys(stats.source).length, '当前逻辑来源'],
-].map(([n,l])=>`<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`).join('');
-
-$('techBars').innerHTML = barHTML(stats.tech, techColors, techMax);
-$('etypeBars').innerHTML = barHTML(stats.etype, {}, etMax);
-$('sourceBars').innerHTML = barHTML(stats.source, {}, srcMax);
-const lifecycle = {
-  '当前有效': stats.current_total,
-  '本地 retired': stats.source_status.retired || 0,
-  '本地 superseded': stats.source_status.superseded || 0,
-  '本地 withdrawn': stats.source_status.withdrawn || 0,
-  '上游 rejected': stats.record_status.rejected || 0,
-  '上游 withdrawn': stats.record_status.withdrawn || 0,
+const nf = new Intl.NumberFormat('zh-CN');
+const num = value => nf.format(Number(value || 0));
+const esc = value => String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+const date = value => value ? String(value).replace('T',' ').substring(0,16) : '—';
+const shortDate = value => value ? String(value).substring(0,10) : '—';
+const safeUrl = value => {
+  try { const parsed = new URL(value); return ['http:','https:'].includes(parsed.protocol) ? esc(value) : '#'; }
+  catch { return '#'; }
 };
-$('lifecycleBars').innerHTML = barHTML(lifecycle, {}, Math.max(...Object.values(lifecycle),1));
-const co12 = Object.fromEntries(Object.entries(stats.company).slice(0,12));
-$('companyBars').innerHTML = barHTML(co12, {}, coMax);
-$('endpointList').innerHTML = stats.endpoints.map(e => {
-  const replacement = e.replacement ? ` · 替代为 ${esc(e.replacement)}` : '';
-  return `<div class="endpoint-item"><div class="id">${esc(e.source)} · ${esc(e.id)}</div>
-    <div class="detail">${esc(e.status)} · ${e.enabled?'enabled':'disabled'}${replacement}<br>
-    ${e.current_documents} 当前 / ${e.all_documents} 全部文档</div></div>`;
-}).join('');
+const card = (value,label,hint='') => `<div class="card"><div class="value">${esc(value)}</div><div class="label">${esc(label)}</div>${hint?`<div class="hint">${esc(hint)}</div>`:''}</div>`;
+const state = value => `<span class="state ${esc(value)}">${esc(value || 'unknown')}</span>`;
+const techTag = value => `<span class="tag ${esc(value)}">${esc(techLabels[value] || value)}</span>`;
+const empty = message => `<div class="empty">${esc(message)}</div>`;
 
-// ---- filter dropdowns ----
-const all_tech = [...new Set(docs.flatMap(d=>d.tech))].sort();
-const all_et   = [...new Set(docs.map(d=>d.etype).filter(Boolean))].sort();
-const all_co   = [...new Set(docs.flatMap(d=>d.company))].sort();
-const all_src  = [...new Set(docs.map(d=>d.source))].sort();
-const all_ep   = [...new Set(docs.map(d=>d.endpoint))].sort();
-const all_rec  = [...new Set(docs.map(d=>d.record_status))].sort();
-
-function populate(id, items) {
-  const el = $(id);
-  items.forEach(v => { const o=document.createElement('option'); o.value=o.textContent=v; el.appendChild(o); });
-}
-populate('fTech', all_tech);
-populate('fEtype', all_et);
-populate('fCompany', all_co);
-populate('fSource', all_src);
-populate('fEndpoint', all_ep);
-populate('fRecord', all_rec);
-
-// ---- table state ----
-let filtered = docs.slice();
-let page = 0;
-const PER = 50;
-let sortKey = 'published', sortAsc = false;
-
-function filter() {
-  const q     = $('q').value.toLowerCase();
-  const scope = $('fScope').value;
-  const ft    = $('fTech').value;
-  const fe    = $('fEtype').value;
-  const fc    = $('fCompany').value;
-  const fs    = $('fSource').value;
-  const fep   = $('fEndpoint').value;
-  const frec  = $('fRecord').value;
-  filtered = docs.filter(d =>
-    (scope === 'all' || (scope === 'current' ? d.current : !d.current)) &&
-    (!q || d.title.toLowerCase().includes(q)) &&
-    (!ft || d.tech.includes(ft)) &&
-    (!fe || d.etype === fe) &&
-    (!fc || d.company.includes(fc)) &&
-    (!fs || d.source === fs) &&
-    (!fep || d.endpoint === fep) &&
-    (!frec || d.record_status === frec)
-  );
-  page = 0;
-  render();
+function barHTML(data, limit=12) {
+  const entries = Object.entries(data || {}).slice(0, limit);
+  if (!entries.length) return empty('暂无数据');
+  const max = Math.max(...entries.map(([,value]) => Number(value)), 1);
+  return entries.map(([key,value]) => `<div class="bar">
+    <div class="name" title="${esc(key)}">${esc(techLabels[key] || key)}</div>
+    <div class="track"><div class="fill" style="width:${Math.max(1,Math.round(Number(value)/max*100))}%"></div></div>
+    <div class="number">${num(value)}</div></div>`).join('');
 }
 
-
-function sort(key) {
-  if (sortKey === key) sortAsc = !sortAsc; else { sortKey=key; sortAsc=false; }
-  filtered.sort((a,b) => {
-    let av=a[key]??'', bv=b[key]??'';
-    if (Array.isArray(av)) av=av.join(',');
-    if (Array.isArray(bv)) bv=bv.join(',');
-    return sortAsc ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+function populate(id, values) {
+  const select = $(id);
+  [...new Set(values.filter(Boolean))].sort().forEach(value => {
+    const option = document.createElement('option');
+    option.value = option.textContent = value;
+    select.appendChild(option);
   });
-  render();
 }
 
-function techTag(t) {
-  const lb = techLabels[t]||t;
-  return `<span class="tag ${t}">${esc(lb)}</span>`;
+function pagerHTML(page,totalPages,callbackName) {
+  if (totalPages <= 1) return '';
+  const low = Math.max(0,page-2), high = Math.min(totalPages-1,page+2);
+  let html = `<button ${page===0?'disabled':''} onclick="${callbackName}(${page-1})">‹</button>`;
+  if (low > 0) html += `<button onclick="${callbackName}(0)">1</button>${low>1?'<span>…</span>':''}`;
+  for (let index=low; index<=high; index++) html += `<button class="${index===page?'active':''}" onclick="${callbackName}(${index})">${index+1}</button>`;
+  if (high < totalPages-1) html += `${high<totalPages-2?'<span>…</span>':''}<button onclick="${callbackName}(${totalPages-1})">${totalPages}</button>`;
+  return html + `<button ${page===totalPages-1?'disabled':''} onclick="${callbackName}(${page+1})">›</button>`;
 }
 
-function render() {
-  const start = page*PER, end = Math.min(start+PER, filtered.length);
-  const slice = filtered.slice(start, end);
-  $('count').textContent = filtered.length
-    ? `共 ${filtered.length} 条，显示 ${start+1}–${end}`
-    : '共 0 条';
-  $('rows').innerHTML = slice.map(d => {
-    const techHtml   = d.tech.map(techTag).join('');
-    const coHtml     = d.company.map(c=>`<span class="tag co">${esc(c)}</span>`).join('');
-    const cveHtml    = d.cve.length ? `<div class="cve">${d.cve.slice(0,3).map(c=>esc(c)).join(' ')}</div>` : '';
-    const etHtml     = d.etype ? `<span class="tag et">${esc(d.etype)}</span>` : '';
-    const lifecycle = d.current ? 'current' : d.source_status;
-    const rawStatus = d.record_status_raw && d.record_status_raw !== d.record_status
-      ? ` · ${esc(d.record_status_raw)}` : '';
-    return `<tr>
-      <td class="title"><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title)}</a>${cveHtml}</td>
-      <td>${techHtml}</td>
-      <td>${coHtml}</td>
-      <td>${etHtml}</td>
-      <td class="src"><strong>${esc(d.source)}</strong><br>${esc(d.endpoint)}
-        ${d.replacement_endpoint?`<br>→ ${esc(d.replacement_endpoint)}`:''}</td>
-      <td><span class="state ${esc(lifecycle)}">${esc(lifecycle)}</span><br>
-        <span class="state ${esc(d.record_status)}">${esc(d.record_status)}${rawStatus}</span></td>
-      <td class="src">${esc(fmt(d.published))}</td>
-    </tr>`;
-  }).join('');
-
-  // pager
-  const total = Math.ceil(filtered.length/PER);
-  let pg = '';
-  pg += `<button ${page<=0?'disabled':''} onclick="goto(${page-1})">‹ 上一页</button>`;
-  const lo=Math.max(0,page-2), hi=Math.min(total-1,page+2);
-  if(lo>0) pg+=`<button onclick="goto(0)">1</button>${lo>1?'<span>…</span>':''}`;
-  for(let i=lo;i<=hi;i++) pg+=`<button ${i===page?'style="background:var(--acc);color:#fff"':''} onclick="goto(${i})">${i+1}</button>`;
-  if(hi<total-1) pg+=`${hi<total-2?'<span>…</span>':''}<button onclick="goto(${total-1})">${total}</button>`;
-  pg += `<button ${page>=total-1?'disabled':''} onclick="goto(${page+1})">下一页 ›</button>`;
-  $('pager').innerHTML = pg;
+function activateView(view) {
+  document.querySelectorAll('.view').forEach(section => section.hidden = section.id !== `view-${view}`);
+  document.querySelectorAll('#nav button').forEach(button => button.classList.toggle('active', button.dataset.view === view));
+  history.replaceState(null,'',`#${view}`);
+  window.scrollTo({top:0,behavior:'instant'});
 }
-function goto(p){ page=p; render(); window.scrollTo(0,document.querySelector('.panel').offsetTop-10); }
+document.querySelectorAll('#nav button').forEach(button => button.addEventListener('click', () => activateView(button.dataset.view)));
 
-// sort headers
-document.querySelectorAll('th[data-k]').forEach(th => {
-  th.addEventListener('click', () => sort(th.dataset.k));
-});
+// Header and overview
+const sampleNote = overview.truncated ? ` · 内嵌 ${num(overview.embedded_total)}/${num(overview.total)} 篇文档` : '';
+$('meta').textContent = `${num(overview.current_total)} 篇当前文档 · ${num(m2.detected_events)} 个当前事件${sampleNote} · ${overview.generated_at}`;
+$('headerPills').innerHTML = [
+  `<span class="pill ready">M1 运行中</span>`,
+  `<span class="pill ready">M2.1 ${esc(m2.dedupe_version)} / ${esc(m2.cluster_version)}</span>`,
+  `<span class="pill ${semantic.enabled?'ready':'shadow'}">M2.2 ${semantic.enabled?'已启用':'默认关闭'}</span>`
+].join('');
+$('overviewCards').innerHTML = [
+  card(num(overview.current_total),'当前文档',`${num(overview.historical_total)} 条历史证据`),
+  card(num(m2.detected_events),'当前事件',`${num(m2.event_status.superseded || 0)} 个 superseded`),
+  card(num(m2.event_evidence),'事件证据关系',`${num(Object.keys(overview.source).length)} 个逻辑来源`),
+  card(num(m2.near_duplicates),'近重复文档',`${num(m2.components)} 个稳定组件`),
+  card(num(m2.review_status.pending || 0),'待复核候选',`${num(m2.reviews)} 条候选审计`),
+  card(num(m2.event_versions),'事件版本',`${num(m2.claims)} 条 Claim`),
+  card(num(semantic.enrichments),'影子富化',semantic.enabled?'语义任务已启用':'当前未调用模型'),
+  card(num(overview.endpoints.length),'Endpoints',`${num(overview.endpoint_status.active || 0)} active`)
+].join('');
+$('capabilities').innerHTML = capabilities.map(item => `<div class="cap ${esc(item.status)}">
+  <div class="phase">${esc(item.phase)} · ${esc(item.status)}</div><div class="name">${esc(item.name)}</div>
+  <div class="detail">${esc(item.detail)}</div></div>`).join('');
+$('pipelineFlow').innerHTML = [
+  ['01 / M1','采集与清洗',`${num(overview.current_total)} 当前文档`],
+  ['02 / M1.3','分类与实体规则',`${num(Object.values(overview.tech).reduce((a,b)=>a+b,0))} 标签`],
+  ['03 / M2.1','局部去重与聚类',`${num(m2.detected_events)} 事件`],
+  ['04 / M2.2','影子语义抽取',semantic.enabled?`${num(semantic.enrichments)} 结果`:'开关关闭']
+].map(([step,name,detail]) => `<div class="flow"><div class="step">${esc(step)}</div><strong>${esc(name)}</strong><span>${esc(detail)}</span></div>`).join('');
+$('overviewTech').innerHTML = barHTML(overview.tech);
+$('overviewTopics').innerHTML = barHTML(m2.event_topic);
+$('overviewSources').innerHTML = barHTML(overview.source);
+const lifecycle = {
+  '当前有效': overview.current_total,
+  '本地 superseded': overview.source_status.superseded || 0,
+  '本地 retired': overview.source_status.retired || 0,
+  '本地 withdrawn': overview.source_status.withdrawn || 0,
+  '上游 rejected': overview.record_status.rejected || 0,
+  '上游 withdrawn': overview.record_status.withdrawn || 0
+};
+$('overviewLifecycle').innerHTML = barHTML(lifecycle);
 
-['q','fScope','fTech','fEtype','fCompany','fSource','fEndpoint','fRecord'].forEach(id => $(id).addEventListener('input', filter));
+// Event intelligence
+const nonCveEvents = m2.detected_events - (m2.event_topic.cve || 0);
+$('eventCards').innerHTML = [
+  card(num(m2.detected_events),'当前事件'),
+  card(num(nonCveEvents),'非 CVE 事件'),
+  card(num(m2.event_evidence),'证据关系'),
+  card(num(m2.event_versions),'不可变版本'),
+  card(num(m2.claims),'事件 Claim'),
+  card(num(m2.claim_evidence),'Claim 证据')
+].join('');
+$('eventTopicBars').innerHTML = barHTML(m2.event_topic);
+$('versionBars').innerHTML = barHTML(m2.version_change);
+$('claimBars').innerHTML = barHTML({...m2.claim_type,...Object.fromEntries(Object.entries(m2.claim_status).map(([k,v])=>[`状态:${k}`,v]))});
+populate('eventTopic',events.map(event => event.topic));
+populate('eventType',events.map(event => event.event_type));
+let eventFiltered = [], eventPage = 0;
+const EVENT_PER = 35;
+function filterEvents() {
+  const query = $('eventQ').value.trim().toLowerCase();
+  const scope = $('eventScope').value, topic = $('eventTopic').value, type = $('eventType').value;
+  const minScore = Number($('eventScore').value);
+  eventFiltered = events.filter(event => {
+    const haystack = [event.title,event.summary,event.fingerprint,event.representative?.source].join(' ').toLowerCase();
+    return (!query || haystack.includes(query)) &&
+      (scope === 'all' || (scope === 'cve' ? event.topic === 'cve' : event.topic !== 'cve')) &&
+      (!topic || event.topic === topic) && (!type || event.event_type === type) &&
+      Number(event.score || 0) >= minScore;
+  });
+  eventPage = 0; renderEvents();
+}
+function renderEvents() {
+  const start = eventPage*EVENT_PER, shown = eventFiltered.slice(start,start+EVENT_PER);
+  $('eventCount').textContent = `内嵌样本 ${num(eventFiltered.length)} / 当前事件 ${num(m2.detected_events)}`;
+  $('eventRows').innerHTML = shown.map(event => {
+    const rep = event.representative || {};
+    const title = event.title || rep.title || event.fingerprint;
+    const link = rep.url ? `<a href="${safeUrl(rep.url)}" target="_blank" rel="noopener"><strong>${esc(title)}</strong></a>` : `<strong>${esc(title)}</strong>`;
+    return `<tr><td class="title">${link}<div class="subtle">${esc(event.summary || '')}</div><div class="mono">${esc(event.fingerprint)}</div></td>
+      <td>${event.topic?techTag(event.topic):''}${event.event_type?`<span class="tag">${esc(event.event_type)}</span>`:''}<br>${state(event.evidence_level || 'unknown')}</td>
+      <td><strong>${num(event.document_count)}</strong> 文档 · <strong>${num(event.source_count)}</strong> 来源<br><span class="subtle">${num(event.claim_count)} Claim${rep.source?` · ${esc(rep.source)}`:''}</span></td>
+      <td><strong>${num(event.score)}</strong></td><td>v${num(event.version)}<div class="subtle">${esc(event.cluster_version || '')}</div></td>
+      <td>${shortDate(event.last_seen)}<div class="subtle">首次 ${shortDate(event.first_seen)}</div></td></tr>`;
+  }).join('') || `<tr><td colspan="6">${empty('当前筛选没有事件')}</td></tr>`;
+  $('eventPager').innerHTML = pagerHTML(eventPage,Math.ceil(eventFiltered.length/EVENT_PER),'gotoEventPage');
+}
+function gotoEventPage(page) { eventPage=page; renderEvents(); }
+window.gotoEventPage = gotoEventPage;
+['eventQ','eventScope','eventTopic','eventType','eventScore'].forEach(id => $(id).addEventListener('input',filterEvents));
 
-filter();
+// M2 incremental and reviews
+$('m2Cards').innerHTML = [
+  card(num(m2.signatures),'持久签名',`${num(m2.signature_due)} 待更新 · ${m2.signature_version}`),
+  card(num(m2.block_token_buckets),'候选 token 桶',`${num(m2.block_tokens)} token 关系`),
+  card(num(m2.identities),'强身份/实体索引',`${num(m2.event_key_identities)} 个事件键`),
+  card(num(m2.components),'稳定重复组件',`${num(m2.near_duplicates)} 近重复`),
+  card(num(m2.dedupe_due),'Dedupe 待办',`${num(m2.work_pending.dedupe || 0)} durable work`),
+  card(num(m2.cluster_due),'Cluster 待办',`${num(m2.work_pending.cluster || 0)} durable work`),
+  card(num(m2.review_status.pending || 0),'待人工复核',`${num(m2.review_status.rejected || 0)} 自动/人工拒绝`),
+  card(num(m2.failed_runs_24h),'24h 失败运行',`${num(m2.runs)} 次运行审计`)
+].join('');
+$('reviewStatusBars').innerHTML = barHTML(m2.review_status);
+$('reviewKindBars').innerHTML = barHTML(m2.review_kind);
+$('identityBars').innerHTML = barHTML(m2.identity_kind);
+const featureText = features => Object.entries(features || {}).map(([key,value]) =>
+  `${key.replaceAll('_',' ')}=${typeof value==='number'?Number(value).toFixed(2):value}`).join(' · ');
+$('reviewRows').innerHTML = reviews.map(review => `<tr>
+  <td><strong>#${num(review.id)}</strong><div class="subtle">${Number(review.score || 0).toFixed(3)}</div></td>
+  <td class="title"><a href="${safeUrl(review.left.url)}" target="_blank" rel="noopener">${esc(review.left.title)}</a><div class="mono">doc ${num(review.left.id)}</div></td>
+  <td class="title"><a href="${safeUrl(review.right.url)}" target="_blank" rel="noopener">${esc(review.right.title)}</a><div class="mono">doc ${num(review.right.id)}</div></td>
+  <td>${esc(featureText(review.features))}${review.conflict?`<div class="subtle">硬冲突: ${esc(review.conflict)}</div>`:''}</td>
+  <td>${state(review.status)}<div class="subtle">${esc(review.kind)} · ${esc(review.algorithm_version)}</div></td></tr>`).join('') ||
+  `<tr><td colspan="5">${empty('当前没有待复核候选')}</td></tr>`;
+$('runRows').innerHTML = runs.map(run => `<tr><td>#${num(run.id)}</td><td><strong>${esc(run.stage)}</strong><div class="mono">${esc(run.version)}</div></td>
+  <td>${esc(run.mode)}<div class="subtle">${esc(run.trigger)}</div></td><td>${num(run.input)}</td><td>${num(run.candidates)}</td><td>${num(run.affected)}</td>
+  <td>${run.duration_ms == null?'—':`${num(run.duration_ms)} ms`}</td><td>${state(run.status)}${run.error?`<div class="subtle">${esc(run.error)}</div>`:''}</td><td>${date(run.started)}</td></tr>`).join('');
+
+// Semantic shadow
+const semanticState = semantic.enabled ? 'enabled' : 'disabled';
+$('semanticBanner').className = `banner ${semanticState}`;
+$('semanticBanner').innerHTML = `<div><strong>${semantic.enabled?'影子语义任务已启用':'影子语义基础设施已安装，当前模型调用开关关闭'}</strong>
+  <div class="detail">${semantic.enabled?'结果仍只写 shadow 表，不修改正式 Event。':'这是预期的成本安全默认值，因此下方语义表当前可以为 0。'}</div></div>
+  <span class="pill ${semantic.enabled?'ready':'shadow'}">${semantic.enabled?'RUNNING':'DISABLED'}</span>`;
+$('semanticCards').innerHTML = [
+  card(num(semantic.enrichments),'文档富化'),
+  card(num(semantic.relevance['相关'] || 0),'相关文档'),
+  card(num(semantic.entities),'规范实体',`${num(semantic.mentions)} 次提及`),
+  card(num(semantic.atomic_events),'原子事件'),
+  card(num(semantic.extracted_claims),'抽取 Claim'),
+  card(num(semantic.model_metrics.runs),'模型运行'),
+  card(semantic.model_metrics.average_latency_ms==null?'—':`${num(semantic.model_metrics.average_latency_ms)}ms`,'平均延迟'),
+  card(semantic.model_metrics.p95_latency_ms==null?'—':`${num(semantic.model_metrics.p95_latency_ms)}ms`,'P95 延迟')
+].join('');
+$('semanticContentBars').innerHTML = barHTML({...semantic.relevance,...semantic.content_type});
+$('semanticEntityBars').innerHTML = barHTML({...semantic.entity_type,...Object.fromEntries(Object.entries(semantic.atomic_event_type).map(([k,v])=>[`事件:${k}`,v]))});
+$('semanticEvidenceBars').innerHTML = barHTML({...semantic.mention_evidence_field,...Object.fromEntries(Object.entries(semantic.model_status).map(([k,v])=>[`模型:${k}`,v]))});
+$('semanticConfig').innerHTML = [
+  ['显式开关',semantic.enabled?'true':'false'],['写入模式',semantic.mode],['Profile',semantic.profile || '默认'],
+  ['Provider',semantic.provider],['Model',semantic.model || '未配置'],['输出模式',semantic.response_format],['思考模式',semantic.thinking_mode],['API Key',semantic.api_key_configured?'已配置（未展示）':'未配置'],['每批上限',semantic.batch_size]
+].map(([name,value])=>`<div class="metric-line"><span>${esc(name)}</span><strong>${esc(value)}</strong></div>`).join('');
+const usageEntries = Object.entries(semantic.model_metrics.usage || {});
+$('semanticUsage').innerHTML = (usageEntries.length ? usageEntries.map(([name,value]) =>
+  `<div class="metric-line"><span>${esc(name)}</span><strong>${num(value)}</strong></div>`).join('') : empty('尚无 token 用量记录')) +
+  `<div class="subtle" style="margin-top:9px">当前未维护模型价格表，因此报告不会伪造货币成本；只展示真实 token 与延迟审计。</div>`;
+if (!enrichments.length) {
+  $('enrichmentArea').innerHTML = `<div class="empty">尚无影子富化结果。配置模型后可先运行 20～50 篇：<br><code>uv run intel semantic-enrich --limit 20 --force</code></div>`;
+} else {
+  $('enrichmentArea').innerHTML = `<div class="table-wrap"><table><thead><tr><th>文档</th><th>相关性</th><th>内容类型</th><th>结构化输出</th><th>模型</th><th>时间</th></tr></thead><tbody>
+    ${enrichments.map(item => `<tr><td class="title"><a href="${safeUrl(item.url)}" target="_blank" rel="noopener">${esc(item.title)}</a><div class="subtle">${esc(item.summary)}</div></td>
+      <td>${state(item.relevant?'relevant':'irrelevant')}<div class="subtle">${Number(item.relevance_confidence).toFixed(2)}</div></td><td><span class="tag">${esc(item.content_type)}</span></td>
+      <td>${num(item.atomic_events)} 原子事件 · ${num(item.entity_mentions)} 实体提及 · ${num(item.claims)} Claim</td>
+      <td>${esc(item.provider)} / ${esc(item.model)}<div class="mono">${esc(item.prompt_version)}</div></td><td>${date(item.created)}</td></tr>`).join('')}
+    </tbody></table></div>`;
+}
+
+// Sources
+const healthyEndpoints = overview.endpoints.filter(endpoint => endpoint.enabled && endpoint.status === 'active' && endpoint.failures === 0).length;
+const failedEndpoints = overview.endpoints.filter(endpoint => endpoint.failures > 0 || endpoint.status === 'degraded').length;
+$('sourceCards').innerHTML = [
+  card(num(Object.keys(overview.source).length),'当前逻辑来源'),
+  card(num(overview.endpoints.length),'Endpoints'),
+  card(num(healthyEndpoints),'健康 Endpoint'),
+  card(num(failedEndpoints),'有失败/降级'),
+  card(num(overview.endpoint_status.retired || 0),'已退役 Endpoint'),
+  card(num(overview.current_total),'当前有效文档')
+].join('');
+$('sourceBars').innerHTML = barHTML(overview.source,20);
+$('endpointStatusBars').innerHTML = barHTML(overview.endpoint_status);
+$('endpointGrid').innerHTML = overview.endpoints.map(endpoint => `<div class="endpoint">
+  <div class="row"><div><div class="name">${esc(endpoint.source)}</div><div class="id">${esc(endpoint.id)}</div></div>${state(endpoint.status)}</div>
+  <div class="details">${esc(endpoint.connector)} · ${endpoint.enabled?'enabled':'disabled'} · egress=${esc(endpoint.egress_route)}<br>
+  ${num(endpoint.current_documents)} 当前 / ${num(endpoint.all_documents)} 全部文档 · 连续失败 ${num(endpoint.failures)}<br>
+  最近成功 ${date(endpoint.last_success)}${endpoint.replacement?`<br>替代为 → ${esc(endpoint.replacement)}`:''}</div></div>`).join('');
+
+// Documents
+$('documentCards').innerHTML = [
+  card(num(overview.current_total),'当前文档'),
+  card(num(overview.historical_total),'历史/非当前证据'),
+  card(num(overview.record_status.rejected || 0),'上游 rejected'),
+  card(num(m2.near_duplicates),'近重复'),
+  card(num(overview.embedded_total),'内嵌浏览样本'),
+  card(num(Object.keys(overview.tech).length),'技术方向')
+].join('');
+$('classifyBars').innerHTML = barHTML(overview.classification_method);
+$('companyBars').innerHTML = barHTML(overview.company);
+populate('docTech',docs.flatMap(document => document.tech));
+populate('docType',docs.map(document => document.etype));
+populate('docSource',docs.map(document => document.source));
+populate('docEndpoint',docs.map(document => document.endpoint));
+populate('docRecord',docs.map(document => document.record_status));
+let docFiltered = [], docPage = 0;
+const DOC_PER = 45;
+function filterDocs() {
+  const query = $('docQ').value.trim().toLowerCase(), scope = $('docScope').value;
+  const tech = $('docTech').value, type = $('docType').value, source = $('docSource').value;
+  const endpoint = $('docEndpoint').value, record = $('docRecord').value;
+  docFiltered = docs.filter(document => {
+    const haystack = `${document.title} ${(document.cve || []).join(' ')}`.toLowerCase();
+    return (!query || haystack.includes(query)) &&
+      (scope === 'all' || (scope === 'current' ? document.current : !document.current)) &&
+      (!tech || document.tech.includes(tech)) && (!type || document.etype === type) &&
+      (!source || document.source === source) && (!endpoint || document.endpoint === endpoint) &&
+      (!record || document.record_status === record);
+  });
+  docPage=0; renderDocs();
+}
+function renderDocs() {
+  const start=docPage*DOC_PER, shown=docFiltered.slice(start,start+DOC_PER);
+  $('docCount').textContent = `内嵌 ${num(docFiltered.length)} 条${overview.truncated?` · 全库 ${num(overview.total)}`:''}`;
+  $('docRows').innerHTML = shown.map(document => `<tr>
+    <td class="title"><a href="${safeUrl(document.url)}" target="_blank" rel="noopener"><strong>${esc(document.title)}</strong></a>
+      ${document.cve?.length?`<div class="subtle">${document.cve.slice(0,4).map(esc).join(' ')}</div>`:''}
+      <div class="mono">doc ${num(document.id)} · quality ${Number(document.quality || 0).toFixed(2)}</div></td>
+    <td>${document.tech.map(techTag).join('')}${document.etype?`<br><span class="tag">${esc(document.etype)}</span>`:''}<div class="subtle">${esc(document.method || 'unclassified')}</div></td>
+    <td>${document.company.map(value=>`<span class="tag">${esc(value)}</span>`).join('')}</td>
+    <td>${esc(document.source)}<div class="subtle">${esc(document.endpoint)}</div></td>
+    <td>${state(document.current?'current':document.source_status)}<br>${state(document.record_status)}</td>
+    <td>${document.near_dup_of?`<span class="tag">dup → ${num(document.near_dup_of)}</span>`:'<span class="tag">master/unique</span>'}
+      <div class="mono">component ${document.component_id?num(document.component_id):'—'}<br>${esc(document.dedupe_version || 'dedupe pending')} / ${esc(document.cluster_version || 'cluster pending')}</div></td>
+    <td>${shortDate(document.published)}</td></tr>`).join('') || `<tr><td colspan="7">${empty('当前筛选没有文档')}</td></tr>`;
+  $('docPager').innerHTML = pagerHTML(docPage,Math.ceil(docFiltered.length/DOC_PER),'gotoDocPage');
+}
+function gotoDocPage(page) { docPage=page; renderDocs(); }
+window.gotoDocPage = gotoDocPage;
+['docQ','docScope','docTech','docType','docSource','docEndpoint','docRecord'].forEach(id => $(id).addEventListener('input',filterDocs));
+
+filterEvents();
+filterDocs();
+const initialView = location.hash.substring(1);
+activateView(['overview','events','m2','semantic','sources','documents'].includes(initialView) ? initialView : 'overview');
 </script>
 </body>
 </html>
