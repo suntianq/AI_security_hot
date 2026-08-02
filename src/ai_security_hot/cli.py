@@ -448,6 +448,16 @@ def cluster(
     typer.echo(json.dumps(run_cluster_stage(force=force, trigger="cli", scope=scope)))
 
 
+def _m2_stage_done(result: dict) -> bool:
+    """True when a pass (or the merged vuln+general pass) has no backlog left.
+
+    With scope="all" the merged ``status`` reflects the first sub-scope to run;
+    ``remaining`` carries the true combined backlog, so a "current" status alone
+    must not end the replay loop early.
+    """
+    return result.get("status") in {"current", "ok"} and result.get("remaining", 0) == 0
+
+
 def _run_m2_replay(max_batches: int, *, resume: bool = False) -> dict:
     from ai_security_hot.pipelines.stages import run_cluster_stage, run_dedupe_stage
     from ai_security_hot.storage import event_repository
@@ -463,9 +473,7 @@ def _run_m2_replay(max_batches: int, *, resume: bool = False) -> dict:
     while batches < max_batches:
         dedupe_result = run_dedupe_stage(trigger="replay")
         batches += 1
-        if dedupe_result.get("status") == "current" or (
-            dedupe_result.get("status") == "ok" and dedupe_result.get("remaining") == 0
-        ):
+        if _m2_stage_done(dedupe_result):
             break
     if dedupe_result.get("remaining", 0) or dedupe_result.get("status") == "indexing":
         return {
@@ -478,14 +486,9 @@ def _run_m2_replay(max_batches: int, *, resume: bool = False) -> dict:
     while batches < max_batches:
         cluster_result = run_cluster_stage(trigger="replay")
         batches += 1
-        if cluster_result.get("status") == "current" or (
-            cluster_result.get("status") == "ok" and cluster_result.get("remaining") == 0
-        ):
+        if _m2_stage_done(cluster_result):
             break
-    complete = bool(cluster_result) and (
-        cluster_result.get("status") == "current"
-        or (cluster_result.get("status") == "ok" and cluster_result.get("remaining", 0) == 0)
-    )
+    complete = bool(cluster_result) and _m2_stage_done(cluster_result)
     return {
         "status": "complete" if complete else "partial",
         "queued": queued,

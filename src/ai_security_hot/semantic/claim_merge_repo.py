@@ -1,9 +1,9 @@
-"""Repository layer for M2.4 claim merging (shadow → formal Claim, controlled).
+"""Repository layer for M2.4 claim merging (shadow only, no formal writes).
 
 Reads related atomic-event pairs from relation_verdicts, loads their extracted
-claims, merges them, and persists the merged claims onto the formal Event that
-owns those atomic events' documents. The promotion path (B2) decides WHEN a
-merged claim becomes a formal Event's claim.
+claims, and merges them for preview. Merged claims are never written to the
+formal Claim table here; the promotion path (B2) is intentionally gated and
+currently only produces a dry-run preview.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from ai_security_hot.models.semantic_tables import (
     ExtractedClaim,
     RelationVerdict,
 )
-from ai_security_hot.semantic.claim_merge import MergedClaim, SourceClaim, merge_related_pair
+from ai_security_hot.semantic.claim_merge import SourceClaim, merge_related_pair
 
 log = logging.getLogger("intel.claim_merge")
 
@@ -90,36 +90,3 @@ def run_claim_merge(
         "pairs_with_claims": pairs_with_claims,
         "merged_claims": merged_total,
     }
-
-
-def persist_merged_claims(
-    session: Session,
-    event_id: int,
-    merged_claims: list[MergedClaim],
-) -> int:
-    """Persist merged claims onto a formal Event via the existing upsert path."""
-    from ai_security_hot.storage.event_repository import upsert_manual_claim
-
-    written = 0
-    for mc in merged_claims:
-        upsert_manual_claim(
-            session,
-            event_id,
-            claim_key=mc.claim_key,
-            claim_type=mc.claim_type,
-            text=mc.text,
-            status="unverified",
-            evidence=[
-                {
-                    "document_id": doc_id,
-                    "stance": mc.stance,
-                    "evidence_level": None,
-                    "excerpt": mc.text[:500],
-                }
-                for doc_id in mc.sources
-            ],
-            confidence=mc.confidence,
-            normalized_value=mc.normalized_value,
-        )
-        written += 1
-    return written

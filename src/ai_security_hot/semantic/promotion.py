@@ -1,10 +1,10 @@
 """Controlled shadow→formal event promotion (M2.4, B2).
 
 Synthesizes an EventDraft from a related atomic-event pair's merged claims and
-applies a promotion gate. Defaults to SHADOW (dry-run) — it previews the event
-without writing to the formal ``events`` table. Only an explicit ``apply=True``
-call materializes it, and that path reuses the existing versioned
-``_apply_event_draft_local`` so any promotion/retraction is auditable.
+applies a promotion gate. It is SHADOW (dry-run) only: it previews the event
+without writing to the formal ``events`` table. The formal apply path is not
+implemented yet — promotion is disabled by default and requires an explicit
+design + gate before any shadow result can touch production events.
 """
 
 from __future__ import annotations

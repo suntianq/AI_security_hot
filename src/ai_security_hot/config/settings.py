@@ -110,6 +110,12 @@ class Settings(BaseSettings):
     # reproducible experiment batch tag (M2.2.1 1d)
     semantic_enrichment_batch_id: str | None = Field(default=None)
 
+    # --- API security ---
+    # Shared bearer token protecting every endpoint except /health. When unset
+    # the API fails closed (503) so an accidentally public port cannot serve or
+    # mutate the corpus. Token is environment-only, like the LLM API key.
+    api_token: str | None = Field(default=None, min_length=8)
+
     # --- delivery ---
     feishu_webhook_url: str | None = Field(default=None)
     smtp_url: str | None = Field(default=None)

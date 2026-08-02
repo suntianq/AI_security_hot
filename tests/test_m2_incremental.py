@@ -272,3 +272,20 @@ def test_quality_metrics_can_be_scoped_to_reviewed_labels() -> None:
     assert result["metrics_scope"] == "reviewed"
     assert result["labels_reviewed_only"] is True
     assert result["top_n_relevance"] == 1.0
+
+
+def test_m2_stage_done_requires_zero_remaining_for_current() -> None:
+    """replay-m2 must not treat a merged 'current' status as finished when the
+    other scope still has backlog (regression: vuln drained first stopped the
+    general pass from ever running)."""
+    from ai_security_hot.cli import _m2_stage_done
+
+    # Single-scope pass: "current" has no remaining key and is done.
+    assert _m2_stage_done({"status": "current", "due": 0})
+    assert _m2_stage_done({"status": "ok", "remaining": 0})
+    # Merged scope="all" pass: first sub-scope current, second still backlogged.
+    assert not _m2_stage_done({"status": "current", "remaining": 300000})
+    assert not _m2_stage_done({"status": "current", "remaining": 1})
+    # Indexing and locked states are never done.
+    assert not _m2_stage_done({"status": "indexing", "remaining": 0})
+    assert not _m2_stage_done({"status": "locked"})

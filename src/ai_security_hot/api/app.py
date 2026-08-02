@@ -1,16 +1,21 @@
 """FastAPI read/ops API (MVP §12 subset for M0).
 
 Read-only views over the pipeline plus manual triggers for ops. The heavy
-lifting lives in the worker; the API never fetches inline.
+lifting lives in the worker; the API never fetches inline. Every endpoint
+except ``/health`` is protected by a shared bearer token (``INTEL_API_TOKEN``)
+and fails closed with 503 when no token is configured.
 """
 
 from __future__ import annotations
 
+import secrets
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy import desc, func, select
 
+from ai_security_hot.config.settings import get_settings
 from ai_security_hot.domain.enums import PipelineStage
 from ai_security_hot.jobs.self_check import run_self_check
 from ai_security_hot.models.base import session_scope
@@ -34,6 +39,28 @@ from ai_security_hot.pipelines.stages import (
 from ai_security_hot.storage import repositories as repo
 
 app = FastAPI(title="AI Security Hot — Intel Backend", version="0.2.0")
+
+
+@app.middleware("http")
+async def _require_bearer_token(request: Request, call_next) -> Response:
+    """Protect every route except /health with the shared INTEL_API_TOKEN.
+
+    Fails closed: with no token configured the API is unusable (503) rather
+    than silently serving or mutating the corpus on a public port.
+    """
+    if request.url.path == "/health":
+        return await call_next(request)
+    token = get_settings().api_token
+    if not token:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "INTEL_API_TOKEN is not configured"},
+        )
+    header = request.headers.get("Authorization", "")
+    provided = header[7:] if header.startswith("Bearer ") else header
+    if not secrets.compare_digest(provided, token):
+        return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+    return await call_next(request)
 
 
 @app.get("/health")

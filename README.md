@@ -169,15 +169,16 @@ uv run python scripts/gen_report.py report.html 50000  # 可选：调整浏览�
 
 报告中的全库统计始终精确；文档明细按上限保留最新当前记录及最多 5,000 条历史记录。页面同时展示能力地图、事件/证据/版本/Claim、M2 候选复核和运行审计、语义影子状态及信源健康；事件样本最多 4,000 条，并优先保留 75% 非 CVE 热点。
 
-验证 API：
+验证 API（除 `/health` 外都需要 `INTEL_API_TOKEN`，未配置时接口返回 503）：
 
 ```bash
 curl localhost:8000/health
-curl localhost:8000/stats
-curl "localhost:8000/documents?min_quality=1&limit=5"
-curl "localhost:8000/events?topic=cve&min_score=80&limit=5"
-curl localhost:8000/events/1
-curl localhost:8000/sources
+TOKEN=change-me-to-a-real-value
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/stats
+curl -H "Authorization: Bearer $TOKEN" "localhost:8000/documents?min_quality=1&limit=5"
+curl -H "Authorization: Bearer $TOKEN" "localhost:8000/events?topic=cve&min_score=80&limit=5"
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/events/1
+curl -H "Authorization: Bearer $TOKEN" localhost:8000/sources
 ```
 
 ## 测试
@@ -207,7 +208,7 @@ curl localhost:8000/health        # {"status":"ok"}
 
 已有数据库升级到本版本时必须应用到 head `2b19e8eb334b`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。M2.1 迁移回填稳定组件 ID，并新增签名/身份/token 及 token 桶计数索引、局部 work/run、人工复核、EventVersion、Claim 和 ClaimEvidence 表；M2.2 新增默认关闭的影子语义工作队列、富化、实体、原子事件和抽取 Claim 表，并追加语义审计列（raw_response/finish_reason/usage/batch_id/max_attempts）与 relation_verdicts（M2.3）；事件表新增 `category` 列（vuln_db/general）。M2.0 遗留事件会保存 `baseline_import` 快照并明确更早历史不可还原，不删除文档或旧事件。大库首次升级后应执行 `m2-index --all` 和 `replay-m2`，并观察 self-check 直至 v2 积压归零。
 
-> 当前 API 未实现认证，且包含 `/ops/tick` 运维写操作。部署时应只绑定可信内网或在前置网关完成认证与访问控制。
+> API 由共享 Bearer Token 保护（`INTEL_API_TOKEN`，环境变量注入）；未配置时除 `/health` 外所有接口返回 503（fail-closed），避免在公开端口上无认证读写语料。仍包含 `/ops/tick` 运维写操作，部署时建议同时只绑定可信内网或在前置网关做访问控制。
 
 动态网页兜底目前尚未实现。Compose 中的 `playwright` Profile 只是预留运行位，当前镜像不包含 Playwright 浏览器和 Connector，不应作为生产抓取能力启用。
 

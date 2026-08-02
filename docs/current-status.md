@@ -96,7 +96,7 @@
 - LLM 输出当前不能修改正式分类、`near_dup_of` 或 `Event`，也不能越过不同漏洞、版本、发布、事故等强身份冲突。
 - 人工双人金标不是继续开发的前置条件；可选 reviewed 样本用于困难案例诊断。LLM-as-judge 只能作为代理指标，不能命名为真实 precision/recall/F1。
 - `report.html` 是离线观察面，不是稳定业务 API；它展示全库状态和影子结果，但不承担按日期冻结热点的语义。
-- 当前 API 未认证，且含运维写入口，不能直接暴露到公网。
+- API 由 `INTEL_API_TOKEN` Bearer Token 保护（除 `/health` 外全部要求，未配置时 fail-closed 返回 503）；仍含 `/ops/tick` 运维写入口，暴露公网时仍需前置网关访问控制与限流。
 - API key 只能从环境变量或部署 Secret 注入，不能写入 YAML、Markdown、日志或 Git。
 
 ## 5. 已知不足
