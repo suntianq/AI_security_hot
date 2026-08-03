@@ -166,6 +166,13 @@ def run_semantic_enrichment_stage(
                     latency_ms=latency_ms,
                     usage=result.usage,
                 )
+                semantic_repository.record_model_attempts(
+                    session,
+                    work_item_id=item.work_item_id,
+                    document_id=item.document_id,
+                    work_attempt=item.attempts,
+                    attempts=result.attempts,
+                )
                 semantic_repository.complete_document_work(
                     session,
                     work_item_id=item.work_item_id,
@@ -193,8 +200,13 @@ def run_semantic_enrichment_stage(
             error = f"{type(exc).__name__}: {exc}"
             retry_seconds = min(86400, 60 * (2 ** min(item.attempts, 10)))
             # audit the failed call: usage + finish_reason if the runner had them
-            failed_usage = result.usage if result is not None else None
-            failed_finish = result.finish_reason if result is not None else None
+            failed_usage = result.usage if result is not None else getattr(exc, "usage", None)
+            failed_finish = (
+                result.finish_reason if result is not None else getattr(exc, "finish_reason", None)
+            )
+            failed_attempts = (
+                result.attempts if result is not None else getattr(exc, "attempts", ())
+            )
             try:
                 with session_scope() as session:
                     repo.record_model_run(
@@ -209,6 +221,13 @@ def run_semantic_enrichment_stage(
                         latency_ms=round((monotonic() - started) * 1000),
                         usage=failed_usage,
                         error=error,
+                    )
+                    semantic_repository.record_model_attempts(
+                        session,
+                        work_item_id=item.work_item_id,
+                        document_id=item.document_id,
+                        work_attempt=item.attempts,
+                        attempts=failed_attempts,
                     )
                     semantic_repository.fail_document_work(
                         session,

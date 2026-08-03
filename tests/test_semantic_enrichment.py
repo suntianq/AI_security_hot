@@ -224,18 +224,18 @@ def test_runner_repairs_invalid_output_once() -> None:
     assert result.finish_reason == "stop"
 
 
-def test_runner_repair_disabled_raises_validation_error() -> None:
-    from pydantic import ValidationError
-
-    from ai_security_hot.llm.tasks import ValidatedModelTaskRunner
+def test_runner_repair_disabled_retains_failed_attempt() -> None:
+    from ai_security_hot.llm.tasks import ModelTaskFailure, ValidatedModelTaskRunner
 
     provider = _RepairProvider(_semantic_output())
     task = DocumentSemanticTask()
     runner = ValidatedModelTaskRunner(provider)
     prepared = runner.prepare(task.spec, task.payload(_document()))
 
-    with pytest.raises(ValidationError):
-        runner.run(prepared, repair_once=False)  # no repair => validation error surfaces
+    with pytest.raises(ModelTaskFailure) as caught:
+        runner.run(prepared, repair_once=False)
+    assert caught.value.attempts[0].status == "validation_failed"
+    assert caught.value.attempts[0].raw_response
 
 
 def test_benchmark_is_a_valid_entity_type() -> None:
@@ -296,12 +296,26 @@ def test_stratified_sampling_is_source_balanced() -> None:
 def test_relation_adjudication_same_fingerprint() -> None:
     from ai_security_hot.semantic.relations import AtomicEventRef, adjudicate
 
-    left = AtomicEventRef(id=1, document_id=10, fingerprint="fp-abc",
-                          subject="Anthropic", action="released", object="Claude 5",
-                          time_text="2026-08-01", published_at=None)
-    right = AtomicEventRef(id=2, document_id=11, fingerprint="fp-abc",
-                           subject="Anthropic", action="released", object="Claude 5",
-                           time_text="2026-08-01", published_at=None)
+    left = AtomicEventRef(
+        id=1,
+        document_id=10,
+        fingerprint="fp-abc",
+        subject="Anthropic",
+        action="released",
+        object="Claude 5",
+        time_text="2026-08-01",
+        published_at=None,
+    )
+    right = AtomicEventRef(
+        id=2,
+        document_id=11,
+        fingerprint="fp-abc",
+        subject="Anthropic",
+        action="released",
+        object="Claude 5",
+        time_text="2026-08-01",
+        published_at=None,
+    )
     verdict = adjudicate(left, right)
     assert verdict.decision == "same_event"
     assert verdict.reason == "identical_atomic_fingerprint"
@@ -313,12 +327,26 @@ def test_relation_adjudication_shared_entity_close_time() -> None:
     from ai_security_hot.semantic.relations import AtomicEventRef, adjudicate
 
     now = datetime.now(UTC)
-    left = AtomicEventRef(id=1, document_id=10, fingerprint="fp-1",
-                          subject="OpenAI", action="announced", object="GPT-5",
-                          time_text=None, published_at=now)
-    right = AtomicEventRef(id=2, document_id=11, fingerprint="fp-2",
-                           subject="OpenAI", action="released", object="GPT-5.5",
-                           time_text=None, published_at=now + timedelta(days=3))
+    left = AtomicEventRef(
+        id=1,
+        document_id=10,
+        fingerprint="fp-1",
+        subject="OpenAI",
+        action="announced",
+        object="GPT-5",
+        time_text=None,
+        published_at=now,
+    )
+    right = AtomicEventRef(
+        id=2,
+        document_id=11,
+        fingerprint="fp-2",
+        subject="OpenAI",
+        action="released",
+        object="GPT-5.5",
+        time_text=None,
+        published_at=now + timedelta(days=3),
+    )
     verdict = adjudicate(left, right, shared_entities={"entity:5"})
     assert verdict.decision == "related_event"
     assert verdict.shared_entity == "entity:5"
@@ -330,12 +358,26 @@ def test_relation_adjudication_different() -> None:
     from ai_security_hot.semantic.relations import AtomicEventRef, adjudicate
 
     now = datetime.now(UTC)
-    left = AtomicEventRef(id=1, document_id=10, fingerprint="fp-1",
-                          subject="Anthropic", action="released", object="Claude",
-                          time_text=None, published_at=now)
-    right = AtomicEventRef(id=2, document_id=11, fingerprint="fp-2",
-                           subject="Google", action="released", object="Gemini",
-                           time_text=None, published_at=now + timedelta(days=60))
+    left = AtomicEventRef(
+        id=1,
+        document_id=10,
+        fingerprint="fp-1",
+        subject="Anthropic",
+        action="released",
+        object="Claude",
+        time_text=None,
+        published_at=now,
+    )
+    right = AtomicEventRef(
+        id=2,
+        document_id=11,
+        fingerprint="fp-2",
+        subject="Google",
+        action="released",
+        object="Gemini",
+        time_text=None,
+        published_at=now + timedelta(days=60),
+    )
     verdict = adjudicate(left, right, shared_entities=set())
     assert verdict.decision == "different_event"
 
@@ -343,12 +385,26 @@ def test_relation_adjudication_different() -> None:
 def test_claim_merge_groups_by_type_and_value() -> None:
     from ai_security_hot.semantic.claim_merge import SourceClaim, merge_related_pair
 
-    left = SourceClaim(atomic_event_id=1, document_id=10, claim_type="action",
-                       text="OpenAI released GPT-5", normalized_value={"action": "release"},
-                       confidence=0.9, evidence_excerpt="released", evidence_field="body")
-    right = SourceClaim(atomic_event_id=2, document_id=11, claim_type="action",
-                        text="OpenAI launched GPT-5", normalized_value={"action": "release"},
-                        confidence=0.85, evidence_excerpt="launched", evidence_field="body")
+    left = SourceClaim(
+        atomic_event_id=1,
+        document_id=10,
+        claim_type="action",
+        text="OpenAI released GPT-5",
+        normalized_value={"action": "release"},
+        confidence=0.9,
+        evidence_excerpt="released",
+        evidence_field="body",
+    )
+    right = SourceClaim(
+        atomic_event_id=2,
+        document_id=11,
+        claim_type="action",
+        text="OpenAI launched GPT-5",
+        normalized_value={"action": "release"},
+        confidence=0.85,
+        evidence_excerpt="launched",
+        evidence_field="body",
+    )
     merged = merge_related_pair([left], [right])
     assert len(merged) == 1  # same type + normalized_value → one merged claim
     assert merged[0].sources == [10, 11]  # both documents preserved
@@ -359,23 +415,43 @@ def test_claim_merge_groups_by_type_and_value() -> None:
 def test_claim_merge_detects_contradiction() -> None:
     from ai_security_hot.semantic.claim_merge import SourceClaim, merge_claims
 
-    high = SourceClaim(atomic_event_id=1, document_id=10, claim_type="status",
-                       text="Exploited in the wild", normalized_value={"status": "exploited"},
-                       confidence=0.95, evidence_excerpt="exploited", evidence_field="body")
-    low = SourceClaim(atomic_event_id=2, document_id=11, claim_type="status",
-                      text="Not exploited", normalized_value={"status": "exploited"},
-                      confidence=0.3, evidence_excerpt="not exploited", evidence_field="body")
+    high = SourceClaim(
+        atomic_event_id=1,
+        document_id=10,
+        claim_type="status",
+        text="Exploited in the wild",
+        normalized_value={"status": "exploited"},
+        confidence=0.95,
+        evidence_excerpt="exploited",
+        evidence_field="body",
+    )
+    low = SourceClaim(
+        atomic_event_id=2,
+        document_id=11,
+        claim_type="status",
+        text="Not exploited",
+        normalized_value={"status": "not_exploited"},
+        confidence=0.3,
+        evidence_excerpt="not exploited",
+        evidence_field="body",
+    )
     merged = merge_claims([high, low])
-    assert len(merged) == 1
-    assert merged[0].stance == "contradict"  # 0.95 vs 0.3 spread > 0.5
+    assert len(merged) == 2
+    assert all(item.status == "disputed" for item in merged)
+    assert all(item.conflicts_with for item in merged)
 
 
 def test_promotion_gate_blocks_single_document() -> None:
     from ai_security_hot.semantic.promotion import build_promotion_preview
 
     preview = build_promotion_preview(
-        fingerprint="fp-1", title="Event", summary="s", event_type="incident",
-        topic="security_for_ai", category="general", document_ids=[10],
+        fingerprint="fp-1",
+        title="Event",
+        summary="s",
+        event_type="incident",
+        topic="security_for_ai",
+        category="general",
+        document_ids=[10],
         merged_claim_count=3,
     )
     assert preview.gated is False  # only 1 doc < PROMOTE_MIN_DOCUMENTS=2
@@ -385,8 +461,13 @@ def test_promotion_gate_met_with_two_documents() -> None:
     from ai_security_hot.semantic.promotion import build_promotion_preview
 
     preview = build_promotion_preview(
-        fingerprint="fp-2", title="Event", summary="s", event_type="incident",
-        topic="security_for_ai", category="general", document_ids=[10, 11],
+        fingerprint="fp-2",
+        title="Event",
+        summary="s",
+        event_type="incident",
+        topic="security_for_ai",
+        category="general",
+        document_ids=[10, 11],
         merged_claim_count=2,
     )
     assert preview.gated is True

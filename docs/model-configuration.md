@@ -105,16 +105,14 @@ uv run intel semantic-enrich --limit 5 --force --retry-only
 ## 5. Docker Compose
 
 镜像内包含默认配置，同时 Compose 把宿主机 `./config` 只读挂载到
-`/app/config`。修改 `config/models.yaml` 后重启进程即可重新加载：
+`/app/config`。修改 `config/models.yaml` 或 `.env` 后，应使用同一个
+构建版本重建整套应用服务，避免 API/worker 版本错位：
 
 ```bash
-docker compose restart api worker
-```
-
-修改 `.env` 后需要重建容器环境，而不是只 restart：
-
-```bash
-docker compose up -d --force-recreate api worker
+export INTEL_BUILD_SHA="$(git rev-parse --short HEAD)"
+docker compose build
+docker compose up -d
+docker compose ps -a
 ```
 
 模型 Profile、URL 或输出模式变化会产生新的端点感知缓存命名空间和语义

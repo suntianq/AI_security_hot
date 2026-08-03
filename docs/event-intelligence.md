@@ -150,7 +150,7 @@ Self-check 的 `m2_incremental` 报告 signature_due、各阶段 work_pending、
 
 ## 8. 迁移、测试与部署
 
-迁移 head 为 `d2c5d53a7a76`。迁移创建上述索引、队列、版本、事实表和持久 token 桶计数，并从 M2.0 的 `near_dup_of/id` 回填稳定 component ID；不删除 Document、Event 或旧证据。迁移已验证：全新数据库 upgrade、downgrade 到上一版本、再次 upgrade 均成功。
+当前迁移 head 为 `2b19e8eb334b`。迁移创建上述索引、队列、版本、事实表和持久 token 桶计数，并从 M2.0 的 `near_dup_of/id` 回填稳定 component ID；不删除 Document、Event 或旧证据。迁移已验证：全新数据库 upgrade、downgrade 到上一版本、再次 upgrade 均成功。
 
 GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签名确定性、相似候选、人工批准、强冲突不可越过、新强身份、质量指标、局部退役重选主、未受影响事件不改版本、EventVersion 和 Claim 支持/反驳证据。
 
@@ -169,11 +169,33 @@ GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签�
 - 结构化 model/package/incident/campaign 强键已经可用，但召回率取决于上游 Parser/实体抽取是否提供对应 `entities`；后续应以漏合并样本驱动实体抽取扩充。
 - pgvector/embedding 未启用。影子实验确认召回质量、成本和延迟可接受后可作为候选层加入，但仍不能自动绕过强冲突。
 - 自动 Claim 目前只覆盖事件摘要和强身份；影响范围、已利用状态、修复版本等领域 Claim 需要在后续抽取/管理接口中逐项增加。
-- M2.2 已增加默认关闭的影子语义富化、实体、原子事件和抽取 Claim 表，但尚未影响生产 Event；详见 [`semantic-enrichment.md`](semantic-enrichment.md)。
-- 按指定日期返回去重、聚类后热点的 API 仍未实现；应在原子事件输出契约和查询版本语义稳定后接入。
+- M2.2 已增加默认关闭的影子语义富化、实体、原子事件和抽取 Claim 表，但尚未影响生产 Event。
+- M2.3 已有共享实体候选和确定性关系裁决影子表；Embedding、LLM 裁决和增量候选队列仍未实现。
+- M2.4 只有 Claim 合并与提升预览；正式事件写入、回滚和正确的冲突语义仍未实现。
+- 日期热点 API 已能按当前 `last_seen_at` 查询；冻结日报、`as_of` 和历史排名尚未实现。
 
 各里程碑完成度、首轮实验口径和推荐实施顺序统一见 [项目当前状态与后续路线](./current-status.md)。
 
 ## 10. M2.0 历史基线快照
 
 2026-07-30 的 v1 回填用于量级对照：362,479 份 current 文档、1,520 份近重复、360,674 个 current 事件、403,132 条 current 证据关系。v1 的一次去重约 2 分 40 秒、聚类约 2 分 16 秒；这些是旧全局算法数据，不代表 v2 局部增量的单次成本。
+
+
+## M2.3/M2.4 lifecycle hardening (2026-08-03)
+
+- Every LLM initial/repair call is recorded in `semantic_model_attempts`, including full safe response text, usage, finish reason, validation/provider error, durable retry number and call ordinal. API keys and request headers are never stored.
+- `ontology_version` is a JSON-Schema constant (`semantic-onto-v1`); mismatched model output fails validation and enters the audited repair/retry path.
+- Relation recall uses `relation_scan_states` plus leased `relation_candidates`. `relation-scan` scans only new atomic events, applies seed/pair/bucket bounds, and recovers expired leases with bounded exponential retry.
+- Claim confidence is no longer treated as polarity. Only explicit incompatible boolean or known opposite proposition values become `disputed`; identical propositions remain supporting evidence regardless of confidence spread.
+- `event-promote` remains preview-only by default. `--apply` writes `semantic_promotions`, Event/EventDocument/Claim/Evidence/EventVersion in one transaction. Identical retries are no-ops; `event-promotion-rollback --promotion-id ID` refuses rollback if a newer event version exists.
+- `daily-snapshot --date YYYY-MM-DD` freezes ranked payloads with their event versions. `/v1/daily-hotspots?...&as_of=<RFC3339>` returns the latest stored revision at or before that instant and never reconstructs from mutable current Events.
+
+Operational examples:
+
+```bash
+uv run ai-security-hot relation-scan --limit 100
+uv run ai-security-hot event-promote --limit 50
+uv run ai-security-hot event-promote --limit 50 --apply
+uv run ai-security-hot event-promotion-rollback --promotion-id 123
+uv run ai-security-hot daily-snapshot --date 2026-08-03 --tz Asia/Shanghai
+```

@@ -296,7 +296,7 @@ rate_limit:
 
 模型只提出“合并建议”；当事件类型、版本或时间明显冲突时由规则拒绝。高风险事件的错误合并和错误拆分都进入人工复核队列。
 
-当前 M2.1 已实现持久化 URL/标题/正文 hash、RapidFuzz 自动规则、SimHash/MinHash 候选、稳定重复组件、局部候选/事件图重算，以及 CVE/GHSA/CNVD/arXiv/GitHub release/模型或包发布/事故/campaign 强键。低置信候选可人工裁决，强身份冲突不能被相似度或人工批准越过；EventVersion、Claim 和支持/反驳 Evidence 已落库。M2.2 已完成首轮 100 篇非 CVE 影子抽取，但尚未实现 Embedding/pgvector 候选和跨文档关系裁决，影子结果也未提升到正式 Event；详见 [当前状态与路线](./current-status.md) 和 [M2 事件情报](./event-intelligence.md)。
+当前 M2.1 已实现持久化 URL/标题/正文 hash、RapidFuzz 自动规则、SimHash/MinHash 候选、稳定重复组件、局部候选/事件图重算，以及 CVE/GHSA/CNVD/arXiv/GitHub release/模型或包发布/事故/campaign 强键。低置信候选可人工裁决，强身份冲突不能被相似度或人工批准越过；EventVersion、Claim 和支持/反驳 Evidence 已落库。M2.2 已完成非 CVE 影子抽取和分层实验；M2.3 有共享实体确定性关系裁决，M2.4 有 Claim 合并/提升预览。Embedding/pgvector、LLM 关系裁决和正式 Event 提升仍未实现；详见 [当前状态与路线](./current-status.md) 和 [M2 事件情报](./event-intelligence.md)。
 
 ### 6.3 事件更新而非重复发布
 

@@ -1813,7 +1813,7 @@ def run_local_cluster(
         for value in session.execute(
             select(Event.fingerprint)
             .join(EventDocument, EventDocument.event_id == Event.id)
-            .where(EventDocument.document_id.in_(seed_ids))
+            .where(EventDocument.document_id.in_(seed_ids), ~Event.fingerprint.like("semantic:%"))
             .distinct()
         ).scalars()
     )

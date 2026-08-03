@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI × 安全 情报数据总览</title>
+<style>
+  :root{
+    --bg:#0d1017;--panel:#161a22;--panel2:#1e232d;--line:#2a303c;
+    --fg:#e8ecf3;--mut:#8b94a3;--acc:#5b9bff;
+    --c1:#ff6b6b;--c2:#ffd166;--c3:#06d6a0;--c4:#c77dff;--c5:#4dd0e1;--c6:#f78c6b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.55 -apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+  a{color:inherit}
+  header{padding:22px 26px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#171c26,#12151c)}
+  header h1{margin:0 0 4px;font-size:21px;letter-spacing:.3px}
+  header .meta{color:var(--mut);font-size:12px}
+  .wrap{max-width:1240px;margin:0 auto;padding:22px 26px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:22px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .kpi .n{font-size:28px;font-weight:750;line-height:1.1}
+  .kpi .l{color:var(--mut);font-size:12px;margin-top:4px}
+  .kpi .s{color:var(--acc);font-size:11px;margin-top:3px}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px}
+  .row.three{grid-template-columns:1fr 1fr 1fr}
+  @media(max-width:880px){.row,.row.three{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .card h3{margin:0 0 14px;font-size:13px;color:var(--mut);font-weight:600;
+    text-transform:uppercase;letter-spacing:.5px}
+  .bar{display:flex;align-items:center;gap:10px;margin:7px 0;cursor:default}
+  .bar .name{width:140px;font-size:12.5px;flex-shrink:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bar .track{flex:1;background:var(--panel2);border-radius:5px;height:18px;overflow:hidden;position:relative}
+  .bar .fill{height:100%;border-radius:5px;transition:width .3s}
+  .bar .v{width:64px;text-align:right;font-size:12px;color:var(--mut);flex-shrink:0;font-variant-numeric:tabular-nums}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chip{background:var(--panel2);border:1px solid var(--line);border-radius:20px;padding:5px 12px;font-size:12.5px}
+  .chip b{color:var(--fg)}
+  .toolbar{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;align-items:center}
+  .toolbar input,.toolbar select{background:var(--panel2);border:1px solid var(--line);color:var(--fg);
+    border-radius:9px;padding:9px 11px;font-size:13px}
+  .toolbar input[type=search]{flex:1;min-width:200px}
+  .toolbar label{font-size:12.5px;color:var(--mut);display:flex;align-items:center;gap:6px;cursor:pointer}
+  .count{color:var(--mut);font-size:12px;margin-left:auto}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--mut);font-size:12px;font-weight:600;position:sticky;top:0;background:var(--panel);cursor:pointer;user-select:none}
+  th:hover{color:var(--fg)}
+  td.t a{color:var(--fg);text-decoration:none;font-weight:450}
+  td.t a:hover{color:var(--acc);text-decoration:underline}
+  .tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;margin:1px 3px 1px 0;white-space:nowrap;border:1px solid}
+  .tag.cve{color:var(--c1);border-color:var(--c1);background:rgba(255,107,107,.12)}
+  .tag.llm{color:var(--c5);border-color:var(--c5);background:rgba(77,208,225,.12)}
+  .tag.ai_for_security{color:var(--c3);border-color:var(--c3);background:rgba(6,214,160,.12)}
+  .tag.security_for_ai{color:var(--c2);border-color:var(--c2);background:rgba(255,209,102,.12)}
+  .tag.agent{color:var(--c4);border-color:var(--c4);background:rgba(199,125,255,.12)}
+  .tag.system_security{color:var(--c6);border-color:var(--c6);background:rgba(247,140,107,.12)}
+  .tag.co{color:var(--mut);border-color:var(--line);background:var(--panel2)}
+  .tag.et{color:var(--acc);border-color:var(--acc);background:rgba(91,155,255,.1)}
+  .src{color:var(--mut);font-size:11.5px;white-space:nowrap}
+  .cve{color:var(--c1);font-size:11px;margin-top:2px}
+  .pager{display:flex;gap:8px;justify-content:center;align-items:center;margin:16px 0;flex-wrap:wrap}
+  .pager button{background:var(--panel2);border:1px solid var(--line);color:var(--fg);border-radius:8px;padding:6px 12px;cursor:pointer;font-size:12.5px}
+  .pager button:disabled{opacity:.35;cursor:default}
+  .score{display:inline-block;min-width:30px;text-align:center;border-radius:6px;padding:1px 6px;font-size:12px;font-weight:600}
+</style>
+</head>
+<body>
+<header>
+  <h1>AI × 安全 情报数据总览</h1>
+  <div class="meta" id="meta"></div>
+</header>
+<div class="wrap">
+  <div class="kpis" id="kpis"></div>
+
+  <div class="row">
+    <div class="card"><h3>信息源分布</h3><div id="sourceBars"></div></div>
+    <div class="card"><h3>技术方向（可多标签）</h3><div id="techBars"></div>
+      <h3 style="margin-top:18px">内容类型</h3><div id="etypeBars"></div></div>
+  </div>
+
+  <div class="row">
+    <div class="card"><h3>公司与模型 Top 12</h3><div id="companyBars"></div></div>
+    <div class="card"><h3>语言</h3><div id="langBars"></div>
+      <h3 style="margin-top:18px">热点事件 Top 10</h3><div id="topEvents"></div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px">
+    <h3>语义富化（影子）</h3>
+    <div class="chips" id="semChips"></div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+      <div><div class="src" style="margin-bottom:6px">内容类型</div><div id="semCtBars"></div></div>
+      <div><div class="src" style="margin-bottom:6px">工作状态</div><div id="semWorkBars"></div></div>
+    </div>
+    <div style="margin-top:12px"><div class="src" style="margin-bottom:6px">来源分布</div><div id="semSrcBars"></div></div>
+    <div style="margin-top:12px"><div class="src" style="margin-bottom:6px">M2.3 跨文档关系裁决</div><div id="semRelBars"></div></div>
+  </div>
+
+  <div class="card">
+    <h3>文档浏览</h3>
+    <div class="toolbar">
+      <input type="search" id="q" placeholder="搜索标题…">
+      <select id="fSource"><option value="">全部来源</option></select>
+      <select id="fTech"><option value="">全部技术方向</option></select>
+      <select id="fEtype"><option value="">全部类型</option></select>
+      <select id="fCompany"><option value="">全部公司</option></select>
+      <span class="count" id="count"></span>
+    </div>
+    <div style="overflow:auto;max-height:72vh">
+      <table>
+        <thead><tr>
+          <th data-k="title">标题</th>
+          <th data-k="tech">技术方向</th>
+          <th data-k="company">公司/模型</th>
+          <th data-k="etype">类型</th>
+          <th data-k="source">来源</th>
+          <th data-k="pub">时间</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <div class="pager" id="pager"></div>
+  </div>
+</div>
+
+<script id="data" type="application/json">/*__DATA__*/</script>
+<script>
+const D = JSON.parse(document.getElementById('data').textContent);
+const L = D.labels;
+const $ = id => document.getElementById(id);
+const esc = s => String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const num = n => n.toLocaleString('en-US');
+const fmtDate = iso => iso ? iso.substring(0,10) : '';
+const techColor = {cve:'var(--c1)',llm:'var(--c5)',ai_for_security:'var(--c3)',
+  security_for_ai:'var(--c2)',agent:'var(--c4)',system_security:'var(--c6)'};
+
+function bars(el, data, opt={}) {
+  const entries = Object.entries(data);
+  const max = Math.max(...entries.map(e=>e[1]), 1);
+  el.innerHTML = entries.map(([k,v]) => {
+    const label = (opt.labels && opt.labels[k]) || k;
+    const col = (opt.colors && opt.colors[k]) || opt.color || 'var(--acc)';
+    const pct = Math.max(2, Math.round(v/max*100));
+    return `<div class="bar"><div class="name" title="${esc(k)}">${esc(label)}</div>
+      <div class="track"><div class="fill" style="width:${pct}%;background:${col}"></div></div>
+      <div class="v">${num(v)}</div></div>`;
+  }).join('');
+}
+
+// ---- KPIs ----
+const t = D.totals;
+$('meta').textContent = `${num(t.documents)} 篇文档  ·  ${num(t.events)} 个资讯事件  ·  ${num(t.cve_events)} 个漏洞库事件  ·  ${t.sources} 个信息源  ·  生成于 ${D.generated_at}`;
+$('kpis').innerHTML = [
+  [num(t.documents_reading), '资讯/研究文档', '不含批量漏洞库'],
+  [num(t.documents_bulk), '漏洞库条目', 'NVD 等'],
+  [num(t.events), '资讯事件', '不含 CVE'],
+  [num(t.cve_events), '漏洞库事件', 'CVE 单独统计'],
+  [num(t.sources), '活跃信息源', ''],
+].map(([n,l,s])=>`<div class="kpi"><div class="n">${n}</div><div class="l">${l}</div>${s?`<div class="s">${s}</div>`:''}</div>`).join('');
+
+// ---- charts ----
+const srcData = Object.fromEntries(D.sources.map(s=>[s.id, s.n]));
+bars($('sourceBars'), srcData, {labels: L.source, color:'var(--acc)'});
+bars($('techBars'), D.tech, {labels: L.tech, colors: techColor});
+bars($('etypeBars'), D.etype, {labels: L.etype, color:'#7c8aff'});
+bars($('companyBars'), Object.fromEntries(Object.entries(D.company).slice(0,12)), {color:'#06d6a0'});
+bars($('langBars'), D.lang, {labels:{en:'英文',zh:'中文','?':'未知'}, color:'#c77dff'});
+
+// top events
+$('topEvents').innerHTML = D.events.slice(0,10).map(e=>{
+  const sc = e.score ?? 0;
+  const col = sc>=70?'var(--c1)':sc>=45?'var(--c2)':'var(--panel2)';
+  const fg = sc>=45?'#1a1d24':'var(--mut)';
+  return `<div class="bar"><span class="score" style="background:${col};color:${fg}">${sc}</span>
+    <div class="name" style="width:auto;flex:1" title="${esc(e.title)}">${esc(e.title)}</div>
+    <div class="src">${esc(fmtDate(e.last))}</div></div>`;
+}).join('') || '<div class="src">暂无事件</div>';
+
+// ---- semantic enrichment (M2.2) ----
+const sem = D.semantic;
+if (sem && sem.total > 0) {
+  const ctLabels = {news:'新闻',research:'研究',release:'发布',advisory:'公告',
+    incident:'事故',opinion:'观点',other:'其他'};
+  const workLabels = {pending:'待处理',running:'运行中',retry:'重试',succeeded:'成功',
+    failed:'失败',cancelled:'已取消'};
+  const pct = Math.round(sem.relevant/sem.total*100);
+  $('semChips').innerHTML = [
+    ['已富化文档', sem.total],
+    ['相关', `${sem.relevant} (${pct}%)`],
+    ['不相关', sem.irrelevant],
+    ['原子事件', sem.atomic_events],
+    ['抽取Claim', sem.claims],
+    ['带batch标签', sem.with_batch],
+    ['带usage', sem.with_usage],
+    ['带finish_reason', sem.with_finish_reason],
+  ].map(([l,v])=>`<span class="chip"><b>${v}</b> ${l}</span>`).join('');
+  bars($('semCtBars'), sem.content_types, {labels:ctLabels, color:'var(--c5)'});
+  bars($('semWorkBars'), sem.work_status, {labels:workLabels, color:'var(--c3)'});
+  if (sem.by_source && Object.keys(sem.by_source).length) {
+    bars($('semSrcBars'), sem.by_source, {labels: L.source, color:'var(--c2)'});
+  }
+  if (sem.relations && Object.keys(sem.relations).length) {
+    const relLabels = {same_event:'同一事件', related_event:'相关事件', different_event:'不同事件'};
+    bars($('semRelBars'), sem.relations, {labels:relLabels, color:'var(--c4)'});
+  }
+}
+
+// ---- table ----
+const docs = D.docs;
+function opts(sel, items, labels) {
+  items.forEach(v=>{ const o=document.createElement('option'); o.value=v;
+    o.textContent=(labels&&labels[v])||v; sel.appendChild(o); });
+}
+opts($('fSource'), [...new Set(docs.map(d=>d.source))].sort(), L.source);
+opts($('fTech'), [...new Set(docs.flatMap(d=>d.tech))].sort(), L.tech);
+opts($('fEtype'), [...new Set(docs.map(d=>d.etype).filter(Boolean))].sort(), L.etype);
+opts($('fCompany'), [...new Set(docs.flatMap(d=>d.company))].sort());
+
+let filtered = docs.slice(), page = 0, sortK='pub', sortAsc=false;
+const PER = 60;
+
+function apply() {
+  const q=$('q').value.toLowerCase(), fs=$('fSource').value, ft=$('fTech').value,
+    fe=$('fEtype').value, fc=$('fCompany').value;
+  filtered = docs.filter(d =>
+    (!q||d.title.toLowerCase().includes(q)) &&
+    (!fs||d.source===fs) && (!ft||d.tech.includes(ft)) &&
+    (!fe||d.etype===fe) && (!fc||d.company.includes(fc)));
+  page=0; render();
+}
+function sort(k){ if(sortK===k) sortAsc=!sortAsc; else {sortK=k;sortAsc=false;}
+  filtered.sort((a,b)=>{ let av=a[k]??'',bv=b[k]??'';
+    if(Array.isArray(av))av=av.join(); if(Array.isArray(bv))bv=bv.join();
+    return sortAsc?String(av).localeCompare(bv):String(bv).localeCompare(av); });
+  render();
+}
+function techTags(arr){ return arr.map(x=>`<span class="tag ${x}">${esc(L.tech[x]||x)}</span>`).join(''); }
+
+function render(){
+  const s=page*PER, e=Math.min(s+PER, filtered.length);
+  $('count').textContent = `共 ${num(filtered.length)} 条，显示 ${s+1}–${e}`;
+  $('rows').innerHTML = filtered.slice(s,e).map(d=>{
+    const cve = d.cve.length?`<div class="cve">${d.cve.slice(0,3).map(esc).join(' ')}</div>`:'';
+    const co = d.company.map(c=>`<span class="tag co">${esc(c)}</span>`).join('');
+    const et = d.etype?`<span class="tag et">${esc(L.etype[d.etype]||d.etype)}</span>`:'';
+    return `<tr>
+      <td class="t"><a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title)}</a>${cve}</td>
+      <td>${techTags(d.tech)}</td><td>${co}</td><td>${et}</td>
+      <td class="src">${esc(L.source[d.source]||d.source)}</td>
+      <td class="src">${esc(fmtDate(d.pub))}</td></tr>`;
+  }).join('');
+  const total=Math.ceil(filtered.length/PER)||1;
+  let p=`<button ${page<=0?'disabled':''} onclick="goto(${page-1})">‹</button>`;
+  const lo=Math.max(0,page-2),hi=Math.min(total-1,page+2);
+  if(lo>0)p+=`<button onclick="goto(0)">1</button>${lo>1?'…':''}`;
+  for(let i=lo;i<=hi;i++)p+=`<button ${i===page?'style="background:var(--acc);color:#0d1017;font-weight:700"':''} onclick="goto(${i})">${i+1}</button>`;
+  if(hi<total-1)p+=`${hi<total-2?'…':''}<button onclick="goto(${total-1})">${total}</button>`;
+  p+=`<button ${page>=total-1?'disabled':''} onclick="goto(${page+1})">›</button>`;
+  $('pager').innerHTML=p;
+}
+window.goto=p=>{ page=p; render(); };
+document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>sort(th.dataset.k));
+['q','fSource','fTech','fEtype','fCompany'].forEach(id=>$(id).addEventListener('input',apply));
+apply();
+</script>
+</body>
+</html>

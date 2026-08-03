@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -21,6 +22,13 @@ from ai_security_hot.pipelines.stages import (
 from ai_security_hot.storage import repositories as repo
 
 log = logging.getLogger("intel.scheduler")
+
+
+def worker_heartbeat_tick() -> None:
+    """Prove that APScheduler is still dispatching jobs inside the container."""
+    heartbeat_file = Path(get_settings().worker_heartbeat_file)
+    heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
+    heartbeat_file.touch()
 
 
 def fetch_tick() -> None:
@@ -111,6 +119,15 @@ def run_worker() -> None:
     settings = get_settings()
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
     first_run = datetime.now(UTC)
+    worker_heartbeat_tick()
+    scheduler.add_job(
+        worker_heartbeat_tick,
+        "interval",
+        seconds=30,
+        id="worker_heartbeat",
+        max_instances=1,
+        coalesce=True,
+    )
     scheduler.add_job(
         fetch_tick,
         "interval",

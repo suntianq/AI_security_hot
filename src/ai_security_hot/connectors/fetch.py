@@ -26,6 +26,29 @@ from ai_security_hot.domain.models import FetchResult
 # Status codes httpx treats as redirects. We follow them manually so every hop
 # passes the same SSRF validation as the original request.
 _REDIRECT_CODES = {301, 302, 303, 307, 308}
+_SENSITIVE_REDIRECT_HEADERS = {"authorization", "cookie", "proxy-authorization"}
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parsed = httpx.URL(url)
+    return parsed.scheme, parsed.host, parsed.port
+
+
+def _redirect_headers(headers: dict[str, str], source_url: str, target_url: str) -> dict[str, str]:
+    """Never forward credentials or cookies to a different origin."""
+    if _origin(source_url) == _origin(target_url):
+        return headers
+    return {
+        name: value
+        for name, value in headers.items()
+        if name.lower() not in _SENSITIVE_REDIRECT_HEADERS
+    }
+
+
+def _validate_target(url: str) -> None:
+    """Validate both the URL and its resolved addresses, including proxy routes."""
+    validate_url(url)
+    validate_resolved(httpx.URL(url).host)
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -198,21 +221,24 @@ class FetchContext:
             # validation as the original URL. httpx auto-follow would silently
             # fetch whatever the first response points at.
             current_url = url
+            current_headers = headers
             for _ in range(max(1, policy.fetch.max_redirects + 1)):
-                validate_url(current_url)
-                if not proxy:
-                    validate_resolved(httpx.URL(current_url).host)
+                _validate_target(current_url)
                 with client.stream(
                     "GET",
                     current_url,
-                    headers=headers,
+                    headers=current_headers,
                     timeout=policy.fetch.timeout_seconds,
                 ) as resp:
                     if resp.status_code in _REDIRECT_CODES:
                         location = resp.headers.get("location")
                         if location is None:
                             break  # 3xx without Location — treat as unresolvable
-                        current_url = str(resp.url.join(location))
+                        target_url = str(resp.url.join(location))
+                        current_headers = _redirect_headers(
+                            current_headers, current_url, target_url
+                        )
+                        current_url = target_url
                         continue
                     if resp.status_code == 304:
                         return FetchResult(
@@ -276,21 +302,24 @@ class FetchContext:
             client = self._async_client(policy, proxy)
             # Same manual per-hop validation as the sync path.
             current_url = url
+            current_headers = headers
             for _ in range(max(1, policy.fetch.max_redirects + 1)):
-                validate_url(current_url)
-                if not proxy:
-                    validate_resolved(httpx.URL(current_url).host)
+                _validate_target(current_url)
                 async with client.stream(
                     "GET",
                     current_url,
-                    headers=headers,
+                    headers=current_headers,
                     timeout=policy.fetch.timeout_seconds,
                 ) as resp:
                     if resp.status_code in _REDIRECT_CODES:
                         location = resp.headers.get("location")
                         if location is None:
                             break  # 3xx without Location — treat as unresolvable
-                        current_url = str(resp.url.join(location))
+                        target_url = str(resp.url.join(location))
+                        current_headers = _redirect_headers(
+                            current_headers, current_url, target_url
+                        )
+                        current_url = target_url
                         continue
                     if resp.status_code == 304:
                         return FetchResult(

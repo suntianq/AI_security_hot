@@ -1,19 +1,22 @@
 """FastAPI read/ops API (MVP §12 subset for M0).
 
-Read-only views over the pipeline plus manual triggers for ops. The heavy
-lifting lives in the worker; the API never fetches inline. Every endpoint
-except ``/health`` is protected by a shared bearer token (``INTEL_API_TOKEN``)
-and fails closed with 503 when no token is configured.
+Read-only views over the pipeline plus manual triggers for ops. Read routes use
+``INTEL_API_TOKEN``; privileged ``/ops/*`` routes use the separate
+``INTEL_ADMIN_API_TOKEN``. Health probes remain unauthenticated.
 """
 
 from __future__ import annotations
 
 import secrets
 from datetime import datetime
+from functools import lru_cache
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from ai_security_hot.config.settings import get_settings
 from ai_security_hot.domain.enums import PipelineStage
@@ -41,33 +44,69 @@ from ai_security_hot.storage import repositories as repo
 app = FastAPI(title="AI Security Hot — Intel Backend", version="0.2.0")
 
 
+_PUBLIC_HEALTH_PATHS = {"/health", "/health/live", "/health/ready"}
+
+
 @app.middleware("http")
 async def _require_bearer_token(request: Request, call_next) -> Response:
-    """Protect every route except /health with the shared INTEL_API_TOKEN.
-
-    Fails closed: with no token configured the API is unusable (503) rather
-    than silently serving or mutating the corpus on a public port.
-    """
-    if request.url.path == "/health":
+    """Use separate fail-closed tokens for read and administrative routes."""
+    if request.url.path in _PUBLIC_HEALTH_PATHS:
         return await call_next(request)
-    token = get_settings().api_token
+
+    settings = get_settings()
+    is_admin = request.url.path.startswith("/ops/")
+    token = settings.admin_api_token if is_admin else settings.api_token
+    token_name = "INTEL_ADMIN_API_TOKEN" if is_admin else "INTEL_API_TOKEN"
     if not token:
         return JSONResponse(
             status_code=503,
-            content={"detail": "INTEL_API_TOKEN is not configured"},
+            content={"detail": f"{token_name} is not configured"},
         )
+
     header = request.headers.get("Authorization", "")
-    provided = header[7:] if header.startswith("Bearer ") else header
-    if not secrets.compare_digest(provided, token):
+    if not header.startswith("Bearer "):
+        return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+    provided = header.removeprefix("Bearer ")
+    if not provided or not secrets.compare_digest(provided, token):
         return JSONResponse(status_code=401, content={"detail": "unauthorized"})
     return await call_next(request)
 
 
+@lru_cache
+def _expected_schema_heads() -> frozenset[str]:
+    config = Config("alembic.ini")
+    return frozenset(ScriptDirectory.from_config(config).get_heads())
+
+
 @app.get("/health")
-def health() -> dict:
-    with session_scope() as session:
-        session.execute(select(1))
-    return {"status": "ok"}
+@app.get("/health/live")
+def health_live() -> dict:
+    """Process liveness only; it stays independent from database availability."""
+    return {"status": "ok", "build_sha": get_settings().build_sha}
+
+
+@app.get("/health/ready")
+def health_ready() -> dict:
+    """Readiness requires database connectivity and this image's exact schema."""
+    try:
+        with session_scope() as session:
+            current = frozenset(
+                session.execute(text("SELECT version_num FROM alembic_version")).scalars().all()
+            )
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="database unavailable") from None
+
+    expected = _expected_schema_heads()
+    if current != expected:
+        raise HTTPException(
+            status_code=503,
+            detail={"schema": "mismatch", "current": sorted(current), "expected": sorted(expected)},
+        )
+    return {
+        "status": "ready",
+        "build_sha": get_settings().build_sha,
+        "schema_heads": sorted(current),
+    }
 
 
 @app.get("/sources")
@@ -236,57 +275,39 @@ def daily_hotspots(
     date: str = Query(..., description="natural day YYYY-MM-DD"),
     tz: str = Query("Asia/Shanghai"),
     category: str | None = Query(None, description="general | vuln_db"),
+    as_of: datetime | None = Query(  # noqa: B008
+        None, description="latest frozen snapshot at or before this instant"
+    ),
     limit: int = Query(20, ge=1, le=100),
     min_score: int = Query(0, ge=0, le=100),
 ) -> list[dict]:
-    """Return top events whose last activity falls on a natural day, in tz.
-
-    Filters to detected (non-superseded) events, groups by the natural day of
-    last_seen_at in the requested timezone, and returns the highest-scoring
-    events for that day. category=general|vuln_db narrows the scope.
-    """
+    """Read immutable snapshot data; as_of never recomputes historical state."""
     from zoneinfo import ZoneInfo
 
-    try:
-        tzinfo = ZoneInfo(tz)
-    except Exception:
-        raise HTTPException(status_code=422, detail=f"unknown timezone: {tz!r}") from None
-    try:
-        day_start = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=tzinfo)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=f"invalid date: {date!r}") from exc
-    day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=999999)
+    from ai_security_hot.snapshots import read_daily_snapshot
 
+    try:
+        ZoneInfo(tz)
+        natural_date = datetime.strptime(date, "%Y-%m-%d").date()
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"invalid date/timezone: {exc}") from exc
+    if as_of is not None and as_of.tzinfo is None:
+        raise HTTPException(status_code=422, detail="as_of must include a timezone offset")
     with session_scope() as session:
-        stmt = (
-            select(
-                Event,
-                func.count(EventDocument.id),
-                func.count(func.distinct(SourceEndpoint.source_id)),
-            )
-            .join(EventDocument, EventDocument.event_id == Event.id)
-            .join(Document, Document.id == EventDocument.document_id)
-            .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
-            .where(
-                Event.status == "detected",
-                Event.score >= min_score,
-                Event.last_seen_at >= day_start,
-                Event.last_seen_at <= day_end,
-                *repo.current_document_conditions(),
-            )
+        snapshot, items = read_daily_snapshot(
+            session,
+            natural_date=natural_date,
+            timezone=tz,
+            category=category,
+            as_of=as_of,
+            limit=limit,
+            min_score=min_score,
         )
-        if category:
-            stmt = stmt.where(Event.category == category)
-        stmt = (
-            stmt.group_by(Event.id)
-            .order_by(desc(Event.score), desc(Event.last_seen_at), desc(Event.id))
-            .limit(limit)
-        )
-        rows = session.execute(stmt).all()
-        return [
-            _event_payload(event, document_count=int(doc_count), source_count=int(source_count))
-            for event, doc_count, source_count in rows
-        ]
+        if snapshot is None:
+            raise HTTPException(
+                status_code=404, detail="no frozen snapshot exists for the requested date/as_of"
+            )
+        return items
 
 
 @app.get("/events/{event_id}")

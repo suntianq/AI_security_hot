@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     # --- scheduler ---
     tick_interval_seconds: int = Field(default=60)
     self_check_interval_seconds: int = Field(default=600)
+    worker_heartbeat_file: str = Field(default="data/.worker-heartbeat")
     lease_seconds: int = Field(
         default=900, ge=60, description="Endpoint fetch crash-recovery lease duration"
     )
@@ -110,11 +111,11 @@ class Settings(BaseSettings):
     # reproducible experiment batch tag (M2.2.1 1d)
     semantic_enrichment_batch_id: str | None = Field(default=None)
 
-    # --- API security ---
-    # Shared bearer token protecting every endpoint except /health. When unset
-    # the API fails closed (503) so an accidentally public port cannot serve or
-    # mutate the corpus. Token is environment-only, like the LLM API key.
+    # --- API security / build identity ---
+    # Read and administrative operations use separate environment-only tokens.
     api_token: str | None = Field(default=None, min_length=8)
+    admin_api_token: str | None = Field(default=None, min_length=8)
+    build_sha: str = Field(default="dev")
 
     # --- delivery ---
     feishu_webhook_url: str | None = Field(default=None)

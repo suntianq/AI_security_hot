@@ -22,6 +22,25 @@ class ModelResponse:
     finish_reason: str | None = None
 
 
+class ModelProviderError(RuntimeError):
+    """Provider failure with the complete safe response audit context."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        raw_response: str | None = None,
+        status_code: int | None = None,
+        usage: dict | None = None,
+        finish_reason: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.raw_response = raw_response
+        self.status_code = status_code
+        self.usage = usage or {}
+        self.finish_reason = finish_reason
+
+
 class ModelProvider(Protocol):
     name: str
     model: str
@@ -61,9 +80,7 @@ class OpenAICompatibleProvider:
             f"{OPENAI_COMPATIBLE_ADAPTER_VERSION}\0{self.base_url}\0"
             f"{response_format}\0{thinking_mode}"
         ).encode()
-        self.cache_namespace = (
-            f"{self.name}:{hashlib.sha256(endpoint_identity).hexdigest()[:12]}"
-        )
+        self.cache_namespace = f"{self.name}:{hashlib.sha256(endpoint_identity).hexdigest()[:12]}"
 
     @property
     def chat_completions_url(self) -> str:
@@ -86,9 +103,7 @@ class OpenAICompatibleProvider:
         schema_name = re.sub(r"[^A-Za-z0-9_-]", "_", raw_schema_name)[:64]
         effective_system = system
         if self.response_format != "json_schema":
-            schema_json = json.dumps(
-                output_schema, ensure_ascii=False, separators=(",", ":")
-            )
+            schema_json = json.dumps(output_schema, ensure_ascii=False, separators=(",", ":"))
             effective_system = (
                 f"{system}\n\nReturn exactly one JSON object matching this complete "
                 "JSON Schema. Include every required field, including fields whose value "
@@ -118,17 +133,54 @@ class OpenAICompatibleProvider:
         elif self.response_format == "json_object":
             payload["response_format"] = {"type": "json_object"}
 
-        with httpx.Client(timeout=self.timeout_seconds, headers=headers) as client:
-            response = client.post(self.chat_completions_url, json=payload)
-            response.raise_for_status()
+        try:
+            with httpx.Client(timeout=self.timeout_seconds, headers=headers) as client:
+                response = client.post(self.chat_completions_url, json=payload)
+        except httpx.RequestError as exc:
+            raise ModelProviderError(f"transport error: {exc}") from exc
+        raw_http = response.text
+        try:
             data = response.json()
-        content = data["choices"][0]["message"]["content"]
+        except ValueError as exc:
+            raise ModelProviderError(
+                "provider returned invalid JSON",
+                raw_response=raw_http,
+                status_code=response.status_code,
+            ) from exc
+        usage = (
+            data.get("usage")
+            if isinstance(data, dict) and isinstance(data.get("usage"), dict)
+            else {}
+        )
+        choices = data.get("choices") if isinstance(data, dict) else None
+        choice = (
+            choices[0]
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict)
+            else {}
+        )
+        finish = choice.get("finish_reason")
+        if response.is_error:
+            raise ModelProviderError(
+                f"provider HTTP {response.status_code}",
+                raw_response=raw_http,
+                status_code=response.status_code,
+                usage=usage,
+                finish_reason=str(finish) if finish is not None else None,
+            )
+        try:
+            content = choice["message"]["content"]
+        except (KeyError, TypeError) as exc:
+            raise ModelProviderError(
+                "provider response missing message content",
+                raw_response=raw_http,
+                status_code=response.status_code,
+                usage=usage,
+                finish_reason=str(finish) if finish is not None else None,
+            ) from exc
         if not isinstance(content, str):
             raise ValueError("model returned non-text content")
         content = _unwrap_json_fence(content)
-        usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
-        choice = data["choices"][0] if data.get("choices") else {}
-        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        finish_reason = finish
         return ModelResponse(
             content=content,
             usage=usage,

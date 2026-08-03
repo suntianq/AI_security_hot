@@ -23,6 +23,7 @@ from ai_security_hot.models.semantic_tables import (
     EntityMention,
     ExtractedClaim,
     SemanticEntity,
+    SemanticModelAttempt,
     SemanticWorkItem,
 )
 from ai_security_hot.models.tables import Document, RawItem
@@ -155,18 +156,20 @@ def _reconcile_orphan_succeeded_work(
     crash or partial write completed the work status before persisting the
     enrichment. Leaving them 'succeeded' hides them from both retry and audit.
     """
-    orphan_ids = session.execute(
-        select(SemanticWorkItem.id)
-        .outerjoin(
-            DocumentEnrichment, DocumentEnrichment.work_item_id == SemanticWorkItem.id
+    orphan_ids = (
+        session.execute(
+            select(SemanticWorkItem.id)
+            .outerjoin(DocumentEnrichment, DocumentEnrichment.work_item_id == SemanticWorkItem.id)
+            .where(
+                SemanticWorkItem.task == task,
+                SemanticWorkItem.execution_version == execution_version,
+                SemanticWorkItem.status == "succeeded",
+                DocumentEnrichment.id.is_(None),
+            )
         )
-        .where(
-            SemanticWorkItem.task == task,
-            SemanticWorkItem.execution_version == execution_version,
-            SemanticWorkItem.status == "succeeded",
-            DocumentEnrichment.id.is_(None),
-        )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     if not orphan_ids:
         return
     session.execute(
@@ -361,6 +364,31 @@ def _add_entity_mention(
             evidence_end=location.end,
         )
     )
+
+
+def record_model_attempts(
+    session: Session, *, work_item_id: int, document_id: int, work_attempt: int, attempts
+) -> None:
+    """Idempotently retain every initial/repair provider attempt, including failures."""
+    for attempt in attempts or ():
+        session.execute(
+            pg_insert(SemanticModelAttempt)
+            .values(
+                work_item_id=work_item_id,
+                document_id=document_id,
+                work_attempt=work_attempt,
+                call_ordinal=attempt.ordinal,
+                phase=attempt.phase,
+                status=attempt.status,
+                raw_response=attempt.raw_response,
+                usage=attempt.usage or {},
+                finish_reason=attempt.finish_reason,
+                validation_error=attempt.validation_error,
+                provider_error=attempt.provider_error,
+            )
+            .on_conflict_do_nothing(constraint="uq_semantic_model_attempt")
+        )
+    session.flush()
 
 
 def complete_document_work(

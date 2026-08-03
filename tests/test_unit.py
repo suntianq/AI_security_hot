@@ -117,6 +117,39 @@ def test_fetch_follows_safe_redirect(monkeypatch) -> None:
         ctx.close()
 
 
+def test_cross_origin_redirect_strips_authorization(monkeypatch) -> None:
+    """Credentials must never follow a redirect to another origin."""
+    from ai_security_hot.connectors.fetch import FetchContext
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) == 1:
+            return httpx.Response(
+                302,
+                headers={"location": "https://1.1.1.1/final"},
+                request=request,
+            )
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    ctx = FetchContext()
+    monkeypatch.setattr(ctx, "_sync_client", lambda policy, proxy: _redirect_mock_client(handler))
+    try:
+        result = ctx.get(
+            "http://93.184.216.34/start",
+            _redirect_test_policy(),
+            extra_headers={"Authorization": "Bearer secret", "Cookie": "session=secret"},
+        )
+        assert result.status_code == 200
+        assert seen[0].headers["Authorization"] == "Bearer secret"
+        assert "Authorization" not in seen[1].headers
+        assert "Cookie" not in seen[1].headers
+        assert "User-Agent" in seen[1].headers
+    finally:
+        ctx.close()
+
+
 def test_source_registry_key_endpoints() -> None:
     from ai_security_hot.config.sources import load_registry
 

@@ -1,44 +1,78 @@
 name: ai-security-hot
 
+x-app-image: &app-image
+  image: "${INTEL_IMAGE:-ai-security-hot:local}"
+  build:
+    context: .
+    args:
+      INTEL_BUILD_SHA: "${INTEL_BUILD_SHA:-dev}"
+
+x-app-environment: &app-environment
+  INTEL_DATABASE_URL: "${INTEL_CONTAINER_DATABASE_URL:-postgresql+psycopg://intel:intel@postgres:5432/intel}"
+  INTEL_BUILD_SHA: "${INTEL_BUILD_SHA:-dev}"
+
 services:
   postgres:
     image: postgres:18
     environment:
-      POSTGRES_USER: intel
-      POSTGRES_PASSWORD: intel
-      POSTGRES_DB: intel
+      POSTGRES_USER: "${POSTGRES_USER:-intel}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-intel}"
+      POSTGRES_DB: "${POSTGRES_DB:-intel}"
     ports:
-      - "${POSTGRES_HOST_PORT:-5432}:5432"
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U intel -d intel"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-intel} -d ${POSTGRES_DB:-intel}"]
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
 
-  api:
-    build: .
-    command: ["api"]
-    environment:
-      INTEL_DATABASE_URL: postgresql+psycopg://intel:intel@postgres:5432/intel
+  migrate:
+    <<: *app-image
+    command: ["migrate"]
+    environment: *app-environment
     env_file:
       - path: .env
         required: false
-    ports:
-      - "8000:8000"
     volumes:
       - ./config:/app/config:ro
     depends_on:
       postgres:
         condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *app-image
+    command: ["api"]
+    environment: *app-environment
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_HOST_PORT:-8000}:8000"
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
 
   worker:
-    build: .
+    <<: *app-image
     command: ["worker"]
-    environment:
-      INTEL_DATABASE_URL: postgresql+psycopg://intel:intel@postgres:5432/intel
-      RUN_MIGRATIONS: "1"
+    environment: *app-environment
     env_file:
       - path: .env
         required: false
@@ -46,19 +80,29 @@ services:
       - blobdata:/app/data/blobs
       - ./config:/app/config:ro
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "from pathlib import Path; import os,sys,time; p=Path(os.getenv('INTEL_WORKER_HEARTBEAT_FILE','data/.worker-heartbeat')); sys.exit(0 if p.exists() and time.time()-p.stat().st_mtime < 120 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
 
   # Dynamic-page fallback — profile-gated, not a default dependency (MVP 4.1)
   playwright:
-    build: .
+    <<: *app-image
     command: ["worker"]
     profiles: ["playwright"]
-    environment:
-      INTEL_DATABASE_URL: postgresql+psycopg://intel:intel@postgres:5432/intel
+    environment: *app-environment
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   pgdata:

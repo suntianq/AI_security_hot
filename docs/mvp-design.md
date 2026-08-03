@@ -808,7 +808,7 @@ MVP 使用结构化日志、`/health`、`/stats` 和 self-check；self-check 已
 - JSONL 评测器和 `M2Run` 审计已接通；PostgreSQL advisory lock 保证阶段单写。
 - Worker、`intel eventize`、`/events` 列表/详情、`/stats` 和 self-check 已接通。
 
-M2.1 基础完成标准已达到。M2.2 的严格 Schema、证据定位、影子落库和首轮 100 篇真实实验也已完成，但独立 judge、分层批次、Embedding 候选、关系裁决、Claim 合并与生产提升尚未实现。下一步先做语义运行稳定化，再扩展分层影子评测；按日期热点 API 在事件和排序契约稳定后实现。详见 [当前状态与后续路线](./current-status.md) 和 [M2 事件情报实现说明](./event-intelligence.md)。
+M2.1 基础完成标准已达到。M2.2 已具备严格 Schema、证据定位、影子落库和分层实验；M2.3 已有确定性关系裁决影子版本，M2.4 已有 Claim 合并与提升预览，日期热点 API 已提供当前态查询。Embedding/LLM 裁决、正确的 Claim 冲突合并、正式事件提升和冻结日报仍未实现。详见 [当前状态与后续路线](./current-status.md) 和 [M2 事件情报实现说明](./event-intelligence.md)。
 
 ### M3：日报与推送
 

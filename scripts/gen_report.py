@@ -13,7 +13,6 @@ the default which this script points at 5433.
 
 from __future__ import annotations
 
-import json
 import sys
 from collections import Counter
 from datetime import UTC, datetime
@@ -31,6 +30,7 @@ from ai_security_hot.models.semantic_tables import (
     SemanticWorkItem,
 )
 from ai_security_hot.models.tables import Document, Event, SourceEndpoint
+from ai_security_hot.reporting import json_for_html_script
 
 # Friendly labels for the two-layer taxonomy (keeps the report readable).
 TECH_LABELS = {
@@ -291,7 +291,7 @@ def main() -> None:
     max_rows = int(sys.argv[2]) if len(sys.argv) > 2 else MAX_ROWS_DEFAULT
     with session_scope() as session:
         data = collect(session, max_rows)
-    payload = json.dumps(data, ensure_ascii=False)
+    payload = json_for_html_script(data)
     template = (Path(__file__).parent / "report_template.html").read_text(encoding="utf-8")
     html = template.replace("/*__DATA__*/", payload)
     out.write_text(html, encoding="utf-8")

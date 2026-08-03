@@ -2,7 +2,7 @@
 
 把 AI/安全情报的采集能力融为一个稳定、可扩展的后端。基于 `docs/` 设计文档
 （[当前状态与路线](docs/current-status.md) · [MVP 设计](docs/mvp-design.md) · [整体蓝图](docs/system-design.md) ·
-[信源注册表](docs/source-registry.md) · [M1 增量与分类](docs/m1-data-pipeline.md) · [M2 事件情报](docs/event-intelligence.md) · [M2.2 语义富化](docs/semantic-enrichment.md) · [模型与 DeepSeek 配置](docs/model-configuration.md)）实现的
+[信源注册表](docs/source-registry.md) · [M1 增量与分类](docs/m1-data-pipeline.md) · [M2 事件情报](docs/event-intelligence.md) · [模型与 DeepSeek 配置](docs/model-configuration.md) · [部署与冷启动](docs/deployment.md)）实现的
 **M0 工程骨架 + M1 结构化采集 + M2.1 事件情报底座 + M2.2 影子语义富化 + M2.3 关系裁决 + M2.4 提升预览 + NVD 隔离**。
 
 ## 已实现
@@ -63,7 +63,7 @@
 - **默认关闭且仅影子模式**：升级不会自动调用模型，也不会改变现有 Event/聚类；提升预览默认 dry-run。
 - **可切换模型 Profile**：M1.3 与 M2.2 共用 `config/models.yaml`；环境变量优先覆盖 URL/模型，API Key 只允许从环境注入；兼容 `json_schema/json_object/prompt_only`。
 
-98 篇平衡样本评测：相关率 61.2%、证据精确命中 86%、结构失败 0。结果默认只写影子表，未参与正式事件。当前完成度与推荐实施顺序见 [项目当前状态与后续路线](docs/current-status.md)；实现和上线门槛见 [M2.2 语义富化](docs/semantic-enrichment.md)，接入 DeepSeek 或私有网关见 [模型配置](docs/model-configuration.md)。
+98 篇平衡样本评测：相关率 61.2%、证据精确命中 86%、结构失败 0。结果默认只写影子表，未参与正式事件。当前完成度与推荐实施顺序见 [项目当前状态与后续路线](docs/current-status.md)，接入 DeepSeek 或私有网关见 [模型配置](docs/model-configuration.md)。
 
 ### 八类 Connector + Parser
 
@@ -169,11 +169,12 @@ uv run python scripts/gen_report.py report.html 50000  # 可选：调整浏览�
 
 报告中的全库统计始终精确；文档明细按上限保留最新当前记录及最多 5,000 条历史记录。页面同时展示能力地图、事件/证据/版本/Claim、M2 候选复核和运行审计、语义影子状态及信源健康；事件样本最多 4,000 条，并优先保留 75% 非 CVE 热点。
 
-验证 API（除 `/health` 外都需要 `INTEL_API_TOKEN`，未配置时接口返回 503）：
+验证 API。健康探针无需认证；读取接口和 `/ops/*` 分别使用只读、管理员 Token：
 
 ```bash
-curl localhost:8000/health
-TOKEN=change-me-to-a-real-value
+curl localhost:8000/health/live
+curl localhost:8000/health/ready
+TOKEN=change-me-to-a-real-read-token
 curl -H "Authorization: Bearer $TOKEN" localhost:8000/stats
 curl -H "Authorization: Bearer $TOKEN" "localhost:8000/documents?min_quality=1&limit=5"
 curl -H "Authorization: Bearer $TOKEN" "localhost:8000/events?topic=cve&min_score=80&limit=5"
@@ -190,25 +191,30 @@ uv run ruff check . && uv run pyright                   # 质量门禁
 uv run alembic upgrade head && uv run alembic check     # 迁移 + ORM 元数据漂移门禁
 ```
 
-当前测试共 93 项，其中 89 项非 live；覆盖 M1 增量语义、不同强身份冲突、持久化签名、高频候选桶保护、SimHash/MinHash 候选、人工批准、reviewed 评测范围、局部退役重选主、EventVersion 和 Claim 支持/反驳证据，以及语义 Schema、原子事件、实体/Claim 证据定位、NVD fan-out 修复、抽样平衡、关系裁决、Claim 合并与提升门禁和 PostgreSQL 事务落库。数据库集成测试需要已迁移的 `INTEL_DATABASE_URL`；`live` 只有显式设置 `INTEL_RUN_LIVE=1` 才访问真实信源。
+测试覆盖 M1 增量语义、不同强身份冲突、持久化签名、高频候选桶保护、SimHash/MinHash 候选、人工批准、局部退役重选主、EventVersion/Claim/Evidence、语义 Schema、关系裁决、提升门禁、API 分权认证和 PostgreSQL 事务落库。数据库集成测试需要已迁移的 `INTEL_DATABASE_URL`；真实信源测试只在手工触发的 `Live source checks` 工作流或显式设置 `INTEL_RUN_LIVE=1` 时运行，避免外部网站波动阻断每次提交。
 
 ## 部署（Docker Compose）
 
 ```bash
-docker compose up -d --build
-docker compose ps                 # api/worker 应为 Up，postgres 应为 healthy
-curl localhost:8000/health        # {"status":"ok"}
+cp .env.example .env
+# 填写数据库密码、只读/管理员 Token 和可选 LLM Key
+export INTEL_BUILD_SHA="$(git rev-parse --short HEAD)"
+docker compose build --pull
+docker compose up -d
+docker compose ps -a
+curl localhost:8000/health/live
+curl localhost:8000/health/ready
 ```
 
-容器启动时自动完成初始化：
+`postgres` 健康后，独立的一次性 `migrate` 服务执行 `alembic upgrade head`
+和 `intel sync`；只有它成功退出后，API 与 worker 才会启动。三个应用服务使用
+同一个带构建 SHA 的镜像，API/worker 不再隐式修改 schema。worker heartbeat、
+API liveness/readiness 和 `restart: unless-stopped` 用于发现并恢复进程故障。
 
-- **迁移只由 `worker` 跑一次**（`RUN_MIGRATIONS=1`），`api` 等待 schema 就绪后再启动。
-- `worker` 随后 `intel sync` 载入 `sources.yaml`，并按调度持续抓取。
-- 数据持久化在 `pgdata` 卷，网页快照存 `blobdata` 卷。
-
-已有数据库升级到本版本时必须应用到 head `2b19e8eb334b`：Compose 重建后由 `worker` 自动执行 `alembic upgrade head`；宿主机部署应在启动新代码前手工运行。M2.1 迁移回填稳定组件 ID，并新增签名/身份/token 及 token 桶计数索引、局部 work/run、人工复核、EventVersion、Claim 和 ClaimEvidence 表；M2.2 新增默认关闭的影子语义工作队列、富化、实体、原子事件和抽取 Claim 表，并追加语义审计列（raw_response/finish_reason/usage/batch_id/max_attempts）与 relation_verdicts（M2.3）；事件表新增 `category` 列（vuln_db/general）。M2.0 遗留事件会保存 `baseline_import` 快照并明确更早历史不可还原，不删除文档或旧事件。大库首次升级后应执行 `m2-index --all` 和 `replay-m2`，并观察 self-check 直至 v2 积压归零。
-
-> API 由共享 Bearer Token 保护（`INTEL_API_TOKEN`，环境变量注入）；未配置时除 `/health` 外所有接口返回 503（fail-closed），避免在公开端口上无认证读写语料。仍包含 `/ops/tick` 运维写操作，部署时建议同时只绑定可信内网或在前置网关做访问控制。
+默认 PostgreSQL 和 API 只绑定宿主机 `127.0.0.1`。读取接口使用
+`INTEL_API_TOKEN`，`/ops/*` 使用独立的 `INTEL_ADMIN_API_TOKEN`；两者均
+未配置时 fail-closed。完整的 Linux/macOS 冷启动、升级和验收步骤见
+[部署与冷启动](docs/deployment.md)。
 
 动态网页兜底目前尚未实现。Compose 中的 `playwright` Profile 只是预留运行位，当前镜像不包含 Playwright 浏览器和 Connector，不应作为生产抓取能力启用。
 
@@ -220,17 +226,19 @@ curl localhost:8000/health        # {"status":"ok"}
 - 海外 VM 抓国内源 → 设 `INTEL_PROXY_POOL_CN`
 - 未配代理池时自动回退直连。
 
-Docker 容器里的 `127.0.0.1` 指向容器自身，不能直接填写宿主机仅监听
-loopback 的代理地址。若宿主机代理只监听 `127.0.0.1:7897`，可在该项目
-Docker 网桥的 gateway 上建立一个受限 TCP bridge，再在 `.env` 中填写：
+Docker 容器里的 `127.0.0.1` 指向容器自身。Linux 可在项目 Docker 网桥
+gateway 上建立受限 TCP bridge；macOS Docker Desktop 使用
+`host.docker.internal`：
 
 ```dotenv
+# Linux（地址按实际项目网桥调整）
 INTEL_PROXY_POOL_GLOBAL=http://172.18.0.1:17897
+# macOS
+INTEL_PROXY_POOL_GLOBAL=http://host.docker.internal:7897
 ```
 
-这里的 IP、端口应按实际 Compose 网络调整。bridge 只应监听项目 Docker
-网桥的 gateway，不要监听 `0.0.0.0`，避免把本机代理暴露到外部网络。修改
-`.env` 后需重建 `worker`，使新的代理环境变量进入容器。
+bridge 或宿主代理只应允许可信 Docker 网络访问，不要直接监听公网。修改
+`.env` 后需重建 worker，使新的代理变量进入容器。
 
 ### 部署踩坑速查
 
@@ -238,7 +246,7 @@ INTEL_PROXY_POOL_GLOBAL=http://172.18.0.1:17897
 |---|---|---|
 | `postgres` 启动 exit 1 | postgres:18 改用 `/var/lib/postgresql` | compose volume 挂 `/var/lib/postgresql` |
 | 构建失败 `Readme file does not exist` | Dockerfile 未 COPY `README.md` | Dockerfile 已 `COPY README.md` |
-| `api` 崩溃 `duplicate key ... alembic_version` | 多容器并发跑迁移竞态 | 迁移归 `worker` 独占 |
+| `migrate` 非 0 退出、API/worker 未启动 | schema 或配置同步失败 | 查看 migrate 日志，修复后重新 `docker compose up -d` |
 | 依赖安装极慢 | 容器内走代理拉 PyPI 慢 | 已配清华镜像源 |
 | 海外源报 `Network is unreachable` | 宿主代理只监听 loopback，容器不可达 | 仅在 Docker gateway 建受限 bridge，并配置对应 proxy pool |
 
@@ -294,3 +302,15 @@ tests/          unit / smoke / event intelligence + semantic + PostgreSQL integr
 - Parser 漂移检测。均由实际指标触发，不提前引入。
 
 详细完成度、已知问题、启动条件和阶段验收标准统一维护在 [项目当前状态与后续路线](docs/current-status.md)。
+
+
+### Frozen daily hotspot snapshots
+
+Generate a revision after clustering/promotion, then serve it immutably:
+
+```bash
+uv run ai-security-hot daily-snapshot --date 2026-08-03 --tz Asia/Shanghai
+curl "http://localhost:8000/v1/daily-hotspots?date=2026-08-03&tz=Asia/Shanghai&as_of=2026-08-03T23:59:59%2B08:00"
+```
+
+A missing snapshot returns 404 intentionally; run the snapshot command (or schedule it) rather than silently reading mutable current event state.

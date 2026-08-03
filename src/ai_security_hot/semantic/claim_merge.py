@@ -32,8 +32,10 @@ class MergedClaim:
     text: str  # representative text (highest-confidence source)
     sources: list[int] = field(default_factory=list)  # document ids
     confidences: list[float] = field(default_factory=list)
-    stance: str = "support"  # support | contradict (mixed high/low confidence)
+    stance: str = "support"
     confidence: float = 0.0
+    status: str = "supported"
+    conflicts_with: list[str] = field(default_factory=list)
 
     @property
     def claim_key(self) -> str:
@@ -64,9 +66,8 @@ def merge_claims(claims: list[SourceClaim]) -> list[MergedClaim]:
         document_ids = sorted({c.document_id for c in group})
         confidences = [c.confidence for c in group]
         avg_conf = sum(confidences) / len(confidences)
-        # stance: high consistency -> support; strong disagreement -> contradict
-        spread = max(confidences) - min(confidences)
-        stance = "contradict" if spread > 0.5 and len(confidences) >= 2 else "support"
+        # Confidence measures certainty, not polarity. Same propositions always support.
+        stance = "support"
         merged.append(
             MergedClaim(
                 claim_type=best.claim_type,
@@ -78,6 +79,35 @@ def merge_claims(claims: list[SourceClaim]) -> list[MergedClaim]:
                 confidence=round(avg_conf, 3),
             )
         )
+    # Contradiction requires proposition-level incompatible values, never a
+    # confidence spread. Restrict automatic conflicts to explicit booleans and
+    # known positive/negative scalar pairs to avoid inventing exclusivity.
+    opposites = {
+        ("exploited", "not_exploited"),
+        ("affected", "unaffected"),
+        ("patched", "unpatched"),
+        ("confirmed", "denied"),
+        ("active", "inactive"),
+    }
+    for index, left in enumerate(merged):
+        for right in merged[index + 1 :]:
+            if (
+                left.claim_type != right.claim_type
+                or left.normalized_value == right.normalized_value
+            ):
+                continue
+            conflict = False
+            for key in set(left.normalized_value) & set(right.normalized_value):
+                lv, rv = left.normalized_value[key], right.normalized_value[key]
+                if isinstance(lv, bool) and isinstance(rv, bool) and lv != rv:
+                    conflict = True
+                pair = (str(lv).casefold(), str(rv).casefold())
+                if pair in opposites or pair[::-1] in opposites:
+                    conflict = True
+            if conflict:
+                left.status = right.status = "disputed"
+                left.conflicts_with.append(right.claim_key)
+                right.conflicts_with.append(left.claim_key)
     return merged
 
 

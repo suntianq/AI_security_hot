@@ -64,12 +64,45 @@ class PreparedModelTask[OutputT: BaseModel]:
 
 
 @dataclass(frozen=True)
+class ModelTaskAttempt:
+    ordinal: int
+    phase: str
+    status: str
+    raw_response: str | None = None
+    usage: dict = None  # type: ignore[assignment]
+    finish_reason: str | None = None
+    validation_error: str | None = None
+    provider_error: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.usage is None:
+            object.__setattr__(self, "usage", {})
+
+
+class ModelTaskFailure(RuntimeError):
+    """Failed model task retaining every provider and repair attempt."""
+
+    def __init__(self, message: str, attempts: list[ModelTaskAttempt]) -> None:
+        super().__init__(message)
+        self.attempts = tuple(attempts)
+        usage: dict = {}
+        for attempt in attempts:
+            usage = _merge_usage(usage, attempt.usage)
+        self.usage = usage
+        self.finish_reason = next(
+            (a.finish_reason for a in reversed(attempts) if a.finish_reason), None
+        )
+        self.raw_response = attempts[-1].raw_response if attempts else None
+
+
+@dataclass(frozen=True)
 class ModelTaskResult[OutputT: BaseModel]:
     output: OutputT
     usage: dict
     prepared: PreparedModelTask[OutputT]
     finish_reason: str | None = None
     raw_response: str | None = None
+    attempts: tuple[ModelTaskAttempt, ...] = ()
 
 
 class ValidatedModelTaskRunner:
@@ -106,72 +139,98 @@ class ValidatedModelTaskRunner:
         )
 
     def run[OutputT: BaseModel](
-        self,
-        prepared: PreparedModelTask[OutputT],
-        *,
-        repair_once: bool = True,
+        self, prepared: PreparedModelTask[OutputT], *, repair_once: bool = True
     ) -> ModelTaskResult[OutputT]:
-        """Invoke the provider and validate; on schema failure do one bounded
-        repair (re-prompt with the invalid response + validation errors) before
-        giving up and letting the caller schedule a retry."""
-        response = self.provider.complete(
-            system=prepared.spec.system_prompt,
-            user=prepared.input_json,
-            output_schema=prepared.spec.output_model.model_json_schema(),
-            max_output_tokens=prepared.spec.max_output_tokens,
-        )
+        attempts: list[ModelTaskAttempt] = []
+        response = self._complete(prepared, prepared.input_json, "initial", attempts)
         try:
             output = prepared.spec.output_model.model_validate_json(response.content)
-            return ModelTaskResult(
-                output=output,
-                usage=response.usage,
-                prepared=prepared,
-                finish_reason=response.finish_reason,
-                raw_response=response.content,
+        except ValidationError as error:
+            attempts.append(
+                ModelTaskAttempt(
+                    1,
+                    "initial",
+                    "validation_failed",
+                    response.content,
+                    response.usage,
+                    response.finish_reason,
+                    _validation_summary(error),
+                )
             )
-        except ValidationError as first_error:
             if not repair_once:
-                raise
-            repair_result = self._repair(
-                prepared,
-                invalid_raw=response.content,
-                validation_summary=_validation_summary(first_error),
-                prior_usage=response.usage,
+                raise ModelTaskFailure("model output failed schema validation", attempts) from error
+            repair_user = (
+                f"{prepared.input_json}\n\nYour previous JSON response failed schema validation.\n"
+                f"<invalid_response>{response.content[:4000]}</invalid_response>\n"
+                f"<validation_errors>{_validation_summary(error)}</validation_errors>\n"
+                "Return only a corrected JSON object matching the original schema."
             )
-            return repair_result
-
-    def _repair[OutputT: BaseModel](
-        self,
-        prepared: PreparedModelTask[OutputT],
-        *,
-        invalid_raw: str,
-        validation_summary: str,
-        prior_usage: dict,
-    ) -> ModelTaskResult[OutputT]:
-        repair_user = (
-            f"{prepared.input_json}\n\n"
-            "Your previous JSON response failed schema validation and must be "
-            "corrected. Here is what you produced (invalid):\n"
-            f"<invalid_response>{invalid_raw[:4000]}</invalid_response>\n"
-            "Validation errors:\n"
-            f"<validation_errors>{validation_summary[:2000]}</validation_errors>\n"
-            "Return the corrected JSON object matching the original schema. "
-            "Do not include the invalid response in the output."
+            repaired = self._complete(prepared, repair_user, "repair", attempts)
+            try:
+                output = prepared.spec.output_model.model_validate_json(repaired.content)
+            except ValidationError as repair_error:
+                attempts.append(
+                    ModelTaskAttempt(
+                        2,
+                        "repair",
+                        "validation_failed",
+                        repaired.content,
+                        repaired.usage,
+                        repaired.finish_reason,
+                        _validation_summary(repair_error),
+                    )
+                )
+                raise ModelTaskFailure(
+                    "model repair failed schema validation", attempts
+                ) from repair_error
+            attempts.append(
+                ModelTaskAttempt(
+                    2, "repair", "success", repaired.content, repaired.usage, repaired.finish_reason
+                )
+            )
+            return ModelTaskResult(
+                output,
+                _merge_usage(response.usage, repaired.usage),
+                prepared,
+                repaired.finish_reason,
+                repaired.content,
+                tuple(attempts),
+            )
+        attempts.append(
+            ModelTaskAttempt(
+                1, "initial", "success", response.content, response.usage, response.finish_reason
+            )
         )
-        response = self.provider.complete(
-            system=prepared.spec.system_prompt,
-            user=repair_user,
-            output_schema=prepared.spec.output_model.model_json_schema(),
-            max_output_tokens=prepared.spec.max_output_tokens,
-        )
-        output = prepared.spec.output_model.model_validate_json(response.content)
         return ModelTaskResult(
-            output=output,
-            usage=_merge_usage(prior_usage, response.usage),
-            prepared=prepared,
-            finish_reason=response.finish_reason,
-            raw_response=response.content,
+            output,
+            response.usage,
+            prepared,
+            response.finish_reason,
+            response.content,
+            tuple(attempts),
         )
+
+    def _complete(self, prepared, user: str, phase: str, attempts: list[ModelTaskAttempt]):
+        try:
+            return self.provider.complete(
+                system=prepared.spec.system_prompt,
+                user=user,
+                output_schema=prepared.spec.output_model.model_json_schema(),
+                max_output_tokens=prepared.spec.max_output_tokens,
+            )
+        except Exception as error:
+            attempts.append(
+                ModelTaskAttempt(
+                    len(attempts) + 1,
+                    phase,
+                    "provider_failed",
+                    getattr(error, "raw_response", None),
+                    getattr(error, "usage", {}),
+                    getattr(error, "finish_reason", None),
+                    provider_error=f"{type(error).__name__}: {error}",
+                )
+            )
+            raise ModelTaskFailure("model provider call failed", attempts) from error
 
     @staticmethod
     def validate_cached[OutputT: BaseModel](

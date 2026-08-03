@@ -180,9 +180,7 @@ def semantic_eval(
     from ai_security_hot.semantic.evaluation import evaluate_batch
 
     _setup_logging()
-    typer.echo(
-        json.dumps(evaluate_batch(batch, manifest=manifest), ensure_ascii=False, indent=2)
-    )
+    typer.echo(json.dumps(evaluate_batch(batch, manifest=manifest), ensure_ascii=False, indent=2))
 
 
 @app.command("claim-merge")
@@ -199,9 +197,11 @@ def claim_merge(limit: int = typer.Option(200, min=1)) -> None:
 @app.command("event-promote")
 def event_promote(
     limit: int = typer.Option(50, min=1),
-    dry_run: bool = typer.Option(True, "--dry-run", help="preview (default, shadow-only)"),
+    apply: bool = typer.Option(
+        False, "--apply", help="persist gated promotions; preview is default"
+    ),
 ) -> None:
-    """Preview semantic promotions from related pairs (M2.4). Default shadow."""
+    """Preview by default; --apply persists gated promotions transactionally."""
     from sqlalchemy import select
 
     from ai_security_hot.models.base import session_scope
@@ -210,15 +210,19 @@ def event_promote(
         _load_claims_for_atomics,
         merge_related_pair,
     )
-    from ai_security_hot.semantic.promotion import build_promotion_preview
+    from ai_security_hot.semantic.promotion import apply_promotion, build_promotion_preview
 
     _setup_logging()
     with session_scope() as session:
-        verdicts = session.execute(
-            select(RelationVerdict).where(
-                RelationVerdict.decision.in_(["related_event", "same_event"])
-            ).limit(limit)
-        ).scalars().all()
+        verdicts = (
+            session.execute(
+                select(RelationVerdict)
+                .where(RelationVerdict.decision.in_(["related_event", "same_event"]))
+                .limit(limit)
+            )
+            .scalars()
+            .all()
+        )
         atomic_ids = {v.left_atomic_id for v in verdicts} | {v.right_atomic_id for v in verdicts}
         claims = _load_claims_for_atomics(session, atomic_ids)
         previews = []
@@ -233,18 +237,21 @@ def event_promote(
             doc_ids = sorted(left_docs | right_docs)
             title = merged[0].text[:80] if merged else "Merged semantic event"
             summary = " ".join(m.text for m in merged[:3])[:500]
-            previews.append(
-                build_promotion_preview(
-                    fingerprint=f"semantic:{verdict.left_atomic_id}:{verdict.right_atomic_id}",
-                    title=title,
-                    summary=summary,
-                    event_type="incident",
-                    topic="security_for_ai",
-                    category="general",
-                    document_ids=doc_ids,
-                    merged_claim_count=len(merged),
-                ).as_dict()
+            preview = build_promotion_preview(
+                fingerprint=f"semantic:{verdict.left_atomic_id}:{verdict.right_atomic_id}",
+                title=title,
+                summary=summary,
+                event_type="incident",
+                topic="security_for_ai",
+                category="general",
+                document_ids=doc_ids,
+                merged_claim_count=len(merged),
             )
+            payload = preview.as_dict()
+            if apply and preview.gated:
+                promotion, changed = apply_promotion(session, preview, merged)
+                payload.update({"promotion_id": promotion.id, "applied": changed})
+            previews.append(payload)
         gated = sum(1 for p in previews if p["gated"])
         typer.echo(
             json.dumps(
@@ -262,22 +269,14 @@ def relation_scan(
 ) -> None:
     """Scan cross-document atomic-event candidate pairs and adjudicate (M2.3, shadow)."""
     from ai_security_hot.models.base import session_scope
-    from ai_security_hot.semantic.candidate_scan import (
-        adjudicate_candidates,
-        persist_verdicts,
-        scan_candidate_pairs,
-    )
 
     _setup_logging()
     with session_scope() as session:
-        candidates = scan_candidate_pairs(session, min_documents=min_documents, limit=limit)
-        verdicts = adjudicate_candidates(session, candidates)
-        persisted = persist_verdicts(session, verdicts)
-        summary = {"candidates": len(candidates), "verdicts": len(verdicts), "persisted": persisted}
-        if verdicts:
-            summary["same_event"] = sum(v.decision == "same_event" for v in verdicts)
-            summary["related_event"] = sum(v.decision == "related_event" for v in verdicts)
-            summary["different_event"] = sum(v.decision == "different_event" for v in verdicts)
+        from ai_security_hot.semantic.candidate_scan import run_incremental_relation_scan
+
+        summary = run_incremental_relation_scan(
+            session, seed_limit=limit, pair_limit=limit, work_limit=limit
+        )
         typer.echo(json.dumps(summary, ensure_ascii=False))
 
 
@@ -319,9 +318,7 @@ def llm_config() -> None:
     summary = model_config.public_summary()
     summary["provider_registered"] = model_config.provider in provider_names()
     summary["status"] = (
-        "ready"
-        if summary["ready"] and summary["provider_registered"]
-        else "not_ready"
+        "ready" if summary["ready"] and summary["provider_registered"] else "not_ready"
     )
     typer.echo(json.dumps(summary, ensure_ascii=False, indent=2))
 
@@ -648,6 +645,47 @@ def stats() -> None:
             }
         )
     )
+
+
+@app.command("event-promotion-rollback")
+def event_promotion_rollback(promotion_id: int = typer.Option(..., "--promotion-id")) -> None:
+    """Rollback the exact event version written by one semantic promotion."""
+    from ai_security_hot.models.base import session_scope
+    from ai_security_hot.semantic.promotion import rollback_promotion
+
+    with session_scope() as session:
+        promotion, changed = rollback_promotion(session, promotion_id)
+        typer.echo(json.dumps({"promotion_id": promotion.id, "rolled_back": changed}))
+
+
+@app.command("daily-snapshot")
+def daily_snapshot(
+    date_value: str = typer.Option(..., "--date"),
+    tz: str = typer.Option("Asia/Shanghai"),
+    category: str | None = typer.Option(None),
+    limit: int = typer.Option(100, min=1, max=500),
+) -> None:
+    """Freeze one reproducible daily-hotspot revision (idempotent by content)."""
+    from datetime import date as date_type
+
+    from ai_security_hot.models.base import session_scope
+    from ai_security_hot.snapshots import generate_daily_snapshot
+
+    natural_date = date_type.fromisoformat(date_value)
+    with session_scope() as session:
+        row = generate_daily_snapshot(
+            session, natural_date=natural_date, timezone=tz, category=category, limit=limit
+        )
+        typer.echo(
+            json.dumps(
+                {
+                    "snapshot_id": row.id,
+                    "revision": row.revision,
+                    "items": row.item_count,
+                    "as_of": row.generated_at.isoformat(),
+                }
+            )
+        )
 
 
 def main() -> None:

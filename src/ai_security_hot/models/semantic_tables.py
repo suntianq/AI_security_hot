@@ -8,7 +8,18 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.schema import UniqueConstraint
@@ -210,3 +221,94 @@ class RelationVerdict(Base):
     shared_entity: Mapped[str | None] = mapped_column(String(64), nullable=True)
     algorithm_version: Mapped[str] = mapped_column(String(32), default="relation-v1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SemanticModelAttempt(Base):
+    __tablename__ = "semantic_model_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "work_item_id", "work_attempt", "call_ordinal", name="uq_semantic_model_attempt"
+        ),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    work_item_id: Mapped[int] = mapped_column(
+        ForeignKey("semantic_work_items.id", ondelete="CASCADE"), index=True
+    )
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    work_attempt: Mapped[int] = mapped_column(Integer)
+    call_ordinal: Mapped[int] = mapped_column(Integer)
+    phase: Mapped[str] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(24))
+    raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    usage: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    finish_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RelationScanState(Base):
+    __tablename__ = "relation_scan_states"
+    algorithm_version: Mapped[str] = mapped_column(String(32), primary_key=True)
+    last_atomic_id: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RelationCandidate(Base):
+    __tablename__ = "relation_candidates"
+    __table_args__ = (
+        CheckConstraint("left_atomic_id < right_atomic_id", name="ck_relation_candidate_order"),
+        UniqueConstraint(
+            "left_atomic_id",
+            "right_atomic_id",
+            "algorithm_version",
+            name="uq_relation_candidate_version",
+        ),
+        Index("ix_relation_candidate_claim", "status", "next_retry_at", "lease_until"),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    left_atomic_id: Mapped[int] = mapped_column(
+        ForeignKey("atomic_events.id", ondelete="CASCADE"), index=True
+    )
+    right_atomic_id: Mapped[int] = mapped_column(
+        ForeignKey("atomic_events.id", ondelete="CASCADE"), index=True
+    )
+    shared_entity: Mapped[str] = mapped_column(String(64))
+    algorithm_version: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5, server_default="5")
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SemanticPromotion(Base):
+    __tablename__ = "semantic_promotions"
+    __table_args__ = (
+        UniqueConstraint(
+            "component_key", "algorithm_version", name="uq_semantic_promotion_component"
+        ),
+    )
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    component_key: Mapped[str] = mapped_column(String(64))
+    algorithm_version: Mapped[str] = mapped_column(String(32))
+    draft_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(16), default="prepared")
+    event_id: Mapped[int | None] = mapped_column(
+        ForeignKey("events.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    event_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    atomic_ids: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    document_ids: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    draft: Mapped[dict] = mapped_column(JSONB)
+    claims: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

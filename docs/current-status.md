@@ -1,182 +1,165 @@
 # 项目当前状态与后续路线
 
-> 状态快照：2026-08-02  
-> 用途：本页是“现在做到哪里、哪些尚未完成、接下来按什么顺序做”的唯一状态入口。专题文档负责解释设计和操作细节；若进度表述不一致，以本页为准。
+> 状态快照：2026-08-03
+> 本页是项目完成度、已知边界和实施顺序的唯一状态入口。
 
 ## 1. 当前结论
 
-项目已经具备可持续增量采集、文档生命周期、分类、局部去重、确定性事件聚类、证据与版本审计、LLM 影子语义抽取、跨文档关系裁决、Claim 合并与受控提升预览、日期热点 API。M0、M1、M2.1、M2.2.1、M2.2.2、M2.3、M2.4（影子阶段）与 NVD 隔离均已落地。
+项目已经具备 19 个 endpoint 配置（18 active + 1 retired）、增量采集、文档
+生命周期、规则/混合分类、M2.1 局部去重与确定性事件聚类、EventVersion /
+Claim / Evidence、M2.2 LLM 影子抽取、M2.3 关系裁决骨架、M2.4 提升预览和
+日期热点查询。
 
-当前仍不是完整的“LLM 驱动事件情报产品”。语义结果默认写影子表，不修改正式 `Event`、去重关系或现有分类；影子→正式提升默认为预览（dry-run）。Embedding 召回、LLM 三分类增强、正式提升启用、日报投递尚未实现。
+当前还不能称为完整的 LLM 事件情报产品：
+
+- M2.2 默认只写影子表，不修改正式分类、去重或 Event。
+- M2.3 只有共享实体 + 时间窗的确定性候选/裁决，没有 Embedding 或 LLM 裁决。
+- M2.4 只有 pair 级 Claim 合并和 dry-run 提升预览，没有正式持久化提升。
+- 日期热点 API 查询当前 Event 状态，不是冻结的历史日报快照。
+- M2.3/M2.4 主要由手工 CLI 驱动，尚未进入 durable 自动任务链。
 
 ```text
-信源
-  → 增量抓取 / 规范化 / 正文 / 分类
-  → 确定性局部去重与事件聚类（NVD/KEV 单独隔离）
-  → Event / EventVersion / Claim / Evidence / 日期热点 API
-  → 现有查询 API 与离线 report
+Source
+  → fetch / normalize / fulltext / classify
+  → M2.1 local dedupe / deterministic cluster
+  → Event / EventVersion / Claim / Evidence
+  → query API / offline report
 
-当前 duplicate master（非 CVE）
-  → LLM 语义抽取（M2.2 平衡样本已评测）
-  → DocumentEnrichment / Entity / AtomicEvent / ExtractedClaim
-  → M2.3 跨文档关系裁决（RelationVerdict）
-  → M2.4 Claim 合并 + 受控提升预览（默认 dry-run）
-  ── 正式提升默认关闭，需显式启用
+current non-CVE duplicate master
+  → M2.2 LLM shadow extraction
+  → Entity / AtomicEvent / ExtractedClaim
+  → M2.3 candidate + relation verdict (shadow)
+  → M2.4 claim merge + promotion preview (shadow)
+  ── formal event promotion not implemented
 ```
 
 ## 2. 里程碑完成度
 
-| 里程碑 | 状态 | 已完成 | 尚未包含 |
+| 里程碑 | 状态 | 已完成 | 主要边界 |
 |---|---|---|---|
-| M0 工程骨架 | 完成 | PostgreSQL/Alembic、API/Worker、阶段队列、统一网络出口、BlobStore、测试与 CI | 动态网页 Playwright 仍只是预留位 |
-| M1.1 规则分类 | 完成 | CVE 独立标签；新闻/论文主题分类；分类溯源 | 规则不能替代深层语义判断 |
-| M1.2.x 增量与生命周期 | 完成 | 19 个 endpoint 配置、18 active；AI HOT changes、NVD 时间窗、CISA 快照、Anthropic 双通道；撤回/退役/修订审计 | 上游保留窗口之外的历史不自动恢复；NVD 120 天以前需独立 backfill |
-| M1.3 混合分类 | 机制完成 | 可替换 Provider、严格 Schema、缓存、审计、重试、规则 fallback；CVE bypass | 当前存量及首轮 100 篇实验目标的正式分类仍是 `rule`，尚未做一次受控 HybridClassifier 重放 |
-| M2.1 局部事件情报 | 完成 | 持久化签名/强身份/blocking、稳定重复组件、局部重算、硬冲突、候选复核、EventVersion/Claim/Evidence、事件查询 API | 现有非强身份事件主要依赖确定性 fallback，不等同于语义事件合并 |
-| M2.2.1 语义稳定化 | 完成 | 失败响应审计（raw_response/finish_reason/usage）、有界修复、本体版本化（benchmark+ONTO_VERSION）、batch 可重放（batch_id） | 延迟 p50/p95 未持久化（需 started_at） |
-| M2.2.2 分层评测 | 完成 | 分层抽样（16 源平衡）、语义评测聚合器、`semantic-eval`/`semantic-sample` CLI、报告语义区 | LLM-as-judge 未启用；抽样规模当前 100 篇 |
-| M2.2 平衡样本评测 | 完成 | 98 篇平衡样本，相关率 61.2%，证据命中 86%，结构失败 0 | 相关率随来源差异大（arxiv 100% vs google-blog 0%） |
-| M2.3 语义候选与裁决 | 完成（影子） | 跨文档原子事件候选召回（共享实体）、确定性三分类裁决、`RelationVerdict` 表、`relation-scan` CLI | Embedding 召回、LLM 三分类增强默认关 |
-| M2.4 事实合并与受控提升 | 完成（影子阶段） | Claim 合并（436 合并/139 对）、提升门禁、`event-promote --dry-run` 预览 | 正式提升默认关；与正式事件命名空间对齐待设计 |
-| NVD 单独去重/聚类 | 完成 | NVD+KEV 完全隔离、`Event.category`（vuln_db/general）、旧 `cve:` 事件 supersede 清理 | 多 CVE 文档仍合理产生多事件（非 bug） |
-| 日期热点 API | 完成 | `/v1/daily-hotspots?date&tz&category` 按天+时区+分类返回 | `as_of` 历史快照未做（仅当前状态按天分组） |
-| M3 日报与投递 | 未开始 | 目标和适配器边界已有设计 | 日报冻结/版本化、邮件/飞书、幂等与更正通知 |
+| M0 工程与部署 | 基础完成，正在硬化 | PostgreSQL/Alembic、API、worker、CLI、CI；统一镜像、独立 migrate、健康探针、macOS DB-free CI | Playwright 仍只是预留；当前旧容器需在本批代码完成后重新部署 |
+| M1.1 规则分类 | 完成 | CVE 独立类别；新闻/论文主题分类；分类溯源 | 深层语义仍需模型 |
+| M1.2 增量与生命周期 | 完成 | AI HOT changes、NVD cursor、CISA 快照、Anthropic 双通道、修订/撤回/退役审计 | RSS 等源无法恢复上游窗口外历史 |
+| M1.3 混合分类 | 机制完成 | Provider、Schema、缓存、运行审计、租约、fallback；CVE bypass | 存量正式分类没有全部经 LLM 重跑 |
+| M2.1 局部事件情报 | 完成 | 持久签名/强身份/blocking、稳定组件、局部重算、硬冲突、EventVersion/Claim/Evidence | fallback 事件不等同于语义事件合并 |
+| M2.2 语义抽取 | 影子机制完成 | 严格输出契约、证据定位、租约、缓存、实体/原子事件/Claim、分层抽样和聚合评测 | 失败调用审计不完整；本体版本未在输出字段上强约束；无独立 judge |
+| M2.3 关系裁决 | 早期影子版 | 共享实体候选、same/related/different 确定性裁决、RelationVerdict | 候选扫描非增量且大桶 O(n²)；无 Embedding/LLM；审计字段不足 |
+| M2.4 Claim 与提升 | 预览版 | exact-value Claim 合并、提升门禁、dry-run preview | 当前“置信度差=矛盾”语义错误；无事件组件合并、正式写入、回滚 |
+| NVD/KEV 隔离 | 完成 | vuln_db/general 隔离，旧 cve 事件 supersede | `min_cve_year` 会漏掉最近更新的旧编号 CVE |
+| 日期热点 API | 当前态查询完成 | `/v1/daily-hotspots?date&tz&category` | 无日报冻结、`as_of`、历史排名和分页 |
+| M3 日报与投递 | 未开始 | 设计边界已存在 | 快照、生成、投递、更正通知均未实现 |
 
-“机制完成”不表示所有历史文档已经由 LLM 重跑，也不表示影子结果已经参与生产事件。
+“机制完成”不表示历史数据全部用模型重跑，也不表示影子结果已进入正式事件。
 
-## 2.1 本阶段（2026-07-31 至 08-02）关键结果
+## 3. 2026-08-03 部署硬化
 
-### 数据口径修复：NVD 过度拆分
-- **根因**：NVD 解析器从描述正文扫描次要 CVE/GHSA/CNVD，一个记录 fan-out 成多个事件；且 NVD 隔离迁移后旧 `cve:` 事件未清理，同一 CVE 双事件。
-- **修复**：解析器只保留记录自身 CVE 身份；supersede 40,683 个旧 `cve:` 事件（保留 EventVersion 历史）。
-- **结果**：vuln_db 活跃事件 64,979 → **24,296**；单 CVE 文档对应活跃事件 1 个（30,984 文档）。
+本批已在代码仓实现：
 
-### M2.2.2 平衡样本评测（98 篇）
-| 指标 | 值 |
-|---|---:|
-| 相关率 | 61.2%（60/98） |
-| 证据精确命中 | 86%（685 mentions + 322 claims） |
-| 结构失败率 | 0% |
-| 成本 | 405,681 tokens |
-| 按来源相关率 | arxiv 100% · portswigger 100% · anthropic 86% · google-blog 0% |
+- API、worker、migrate 使用同一镜像和 `INTEL_BUILD_SHA`。
+- Alembic 与 source sync 归独立一次性 `migrate` 服务；失败时 API/worker 不启动。
+- API 增加 `/health/live`、`/health/ready`，readiness 校验数据库和 Alembic head。
+- worker 每 30 秒刷新 heartbeat，Compose 可发现调度器停止派发。
+- PostgreSQL/API 默认只绑定 `127.0.0.1`，容器增加重启策略。
+- 读取与 `/ops/*` 分别使用 `INTEL_API_TOKEN`、`INTEL_ADMIN_API_TOKEN`。
+- 抓取器跨 origin 重定向会删除 Authorization/Cookie；代理路线也执行 DNS 私网校验。
+- report 模板正式进入 Git，并对嵌入 JSON 做 script 终止字符转义。
+- 默认 CI 使用 PostgreSQL 18；真实信源测试改为手工工作流；增加 macOS DB-free 门禁。
 
-### M2.3 关系裁决（影子）
-- 376 个跨文档候选对 → **139 related_event** + 232 different（共享实体 + 时间窗）。
-- `relation_verdicts` 表持久化，`intel relation-scan` 驱动。
+运行中的旧 API/worker 不会因代码文件变化自动升级。完成测试和提交后必须用同一
+Git SHA 重建整套应用服务，不能只重建其中一个。
 
-### M2.4 Claim 合并与提升预览（影子）
-- 139 对相关对 → **436 合并 claims**。
-- `event-promote --dry-run` 生成 50 个 promotion 预览，全部 gate_met（≥2 文档）。
+## 4. 已知问题
 
-### 日期热点 API
-- `/v1/daily-hotspots?date&tz&category` 按自然日+时区返回去重热点，general/vuln_db 可分别筛选。
+### 4.1 部署和 API
 
-## 3. 首轮 100 篇影子实验说明
+- `/ops/tick` 虽已使用管理员 Token，仍在 HTTP 请求内同步执行完整流水线；
+  后续应改成持久任务入队并返回 202，同时禁止重复并发执行。
+- 健康检查可以发现 worker 停止派发，但尚未提供跨实例历史 heartbeat/告警表。
+- Docker 基础镜像已固定 uv 版本，但 Python/PostgreSQL 仍是浮动 minor tag；
+  发布流程还应记录最终镜像 digest。
+- 当前没有稳定的 API response schema、游标分页和统一 `/v1` 路径。
 
-本轮固定执行版本为 `662ed8fa2adde5d8e03357aa8131d4a7`，Prompt 为 `m2.2-document-semantic-v2`。目标是 100 篇 current、非 CVE/GHSA/CNVD、当前去重主文档。
+### 4.2 M2.2 语义运行
+
+- Schema 修复最终失败时，异常没有携带全部原始无效响应、finish reason 和 usage；
+  失败成本与模型行为无法完整审计。
+- `ontology_version` 仍由模型输出普通字符串，应由服务端固定或使用 Literal 校验。
+- 抽样会将大量 eligible 文档加载进 Python；真正的大库抽样应转为数据库分层查询。
+- 语义评测 p50/p95 尚未稳定持久化，LLM-as-judge 仍未实现。
+
+### 4.3 M2.3 候选和裁决
+
+- 当前先读取所有共享实体，再在桶内两两配对；高频实体会造成 O(n²)。
+- 缺少实体类型/角色/置信度过滤、候选时间窗预过滤、大桶保护和扫描游标。
+- 没有优先排除已裁决 pair，候选顺序也不稳定。
+- pair 没有统一 canonical orientation，algorithm_version 更新审计不完整。
+- 没有强身份冲突解释、Embedding 候选和 LLM 三分类审计。
+
+### 4.4 M2.4 Claim 和正式事件
+
+- 相同规范值只因置信度差距大就标记 contradict，这是错误语义。
+- 真正不同的规范值被分到不同组，反而不会进行冲突判断。
+- 只处理单个 pair，没有 relation component 的传递合并。
+- preview 使用临时事件属性和当前时间；无正式 apply、幂等、回滚和版本审计。
+
+### 4.5 日期热点和存储
+
+- 日期接口按当前 `last_seen_at` 过滤，后续更新可能使事件从旧日期移动到新日期。
+- 需要 `daily_hotspot_snapshot/items` 保存排名、EventVersion、证据和算法版本。
+- 当前数据库约 6.3 GB；最大表是 block token、raw item、document 和 event version。
+  冷启动前应实现 raw 保留、无变化版本抑制、候选复核归档和大表增长监控。
+
+## 5. 已完成的真实实验
+
+DeepSeek V4 Flash 首轮固定 100 篇 current、非 CVE duplicate master：
 
 | 指标 | 结果 |
 |---|---:|
-| 成功 / 仍待重试 | 98 / 2 |
-| 成功结果中的相关 / 不相关 | 26 / 72 |
-| 实体 / 原子事件 / 抽取 Claim | 157 / 106 / 179 |
-| 实体证据精确命中率 | 98.4% |
-| Claim 证据精确命中率 | 92.2% |
+| 成功 / retry | 98 / 2 |
+| 相关 / 不相关 | 26 / 72 |
+| 实体 / 原子事件 / Claim | 157 / 106 / 179 |
 | 已记录成功调用 token | 294,250 |
 | 平均 / P95 延迟 | 5,284 ms / 16,148 ms |
 
-这组数据的正确解释是：语义链路已经真实跑通，并暴露了可修复的问题；它不是人工金标 F1，也不能证明语义事件聚类已完成。样本中 90 篇来自 ITHome，来源分层不足。两篇失败样本稳定输出了当前本体不接受的 `benchmark` 实体类型，说明本体和 Schema 的演进需要版本化治理。完整实验记录见 [DeepSeek V4 Flash 首轮 100 篇影子实验](./semantic-experiment-2026-07-31.md)。
+后续 98 篇来源平衡样本：相关率 61.2%、证据精确命中 86%、结构失败 0。
+这些是工程与代理质量指标，不是人工金标 precision/recall/F1。
 
-离线 `report.html` 的语义总数可能包含首轮实验之前的诊断调用，因此全库报告数字不应直接当作这 100 篇固定批次的实验指标。
+## 6. 后续实施顺序
 
-## 4. 当前明确边界
+1. 完成本批部署硬化测试、clean-clone 验证和文档收敛。
+2. 修复 M2.2 失败审计与本体版本强约束。
+3. 将 M2.3 改为有界、确定性、可恢复的增量候选队列，再加入 Embedding。
+4. 增加有审计记录的 LLM relation adjudicator，强冲突继续硬阻断。
+5. 重写 Claim 冲突/支持语义，按 relation component 合并并持久化。
+6. 实现 shadow → formal Event 的幂等提升、版本、回滚与门禁。
+7. 实现每日热点快照和 `as_of` API。
+8. 增加数据保留/归档策略，完成一次 Apple Silicon 冷启动演练。
+9. M3 再接日报生成、邮件/飞书投递和更正通知。
 
-- `INTEL_SEMANTIC_ENRICHMENT_ENABLED=false` 应继续保持默认值；除非显式执行命令，否则 Worker 不持续调用模型。
-- LLM 只处理当前非 CVE 去重主文档。结构化 CVE 保持规则与强标识路径，不交给语义模型合并。
-- LLM 输出当前不能修改正式分类、`near_dup_of` 或 `Event`，也不能越过不同漏洞、版本、发布、事故等强身份冲突。
-- 人工双人金标不是继续开发的前置条件；可选 reviewed 样本用于困难案例诊断。LLM-as-judge 只能作为代理指标，不能命名为真实 precision/recall/F1。
-- `report.html` 是离线观察面，不是稳定业务 API；它展示全库状态和影子结果，但不承担按日期冻结热点的语义。
-- API 由 `INTEL_API_TOKEN` Bearer Token 保护（除 `/health` 外全部要求，未配置时 fail-closed 返回 503）；仍含 `/ops/tick` 运维写入口，暴露公网时仍需前置网关访问控制与限流。
-- API key 只能从环境变量或部署 Secret 注入，不能写入 YAML、Markdown、日志或 Git。
+## 7. 冷启动迁移门槛
 
-## 5. 已知不足
+新服务器不恢复旧数据库是推荐路径，但发布版本必须满足：
 
-### 5.1 语义运行时
+- clean clone 中 report 模板存在且可生成页面；
+- 空 PostgreSQL 18 可从零升级到 Alembic head；
+- migrate 成功后 API/worker 使用相同 Git SHA；
+- API/worker 均 healthy，worker 能持续刷新来源状态；
+- PostgreSQL 不暴露公网，read/admin Token 分离；
+- Linux、macOS DB-free CI 和全部非 live 数据库测试通过；
+- 最高严重级别抓取与报告注入问题已修复。
 
-- 当前实体本体缺少已在真实输出中出现的 `benchmark` 类型；新增类型前需要明确语义、规范化规则以及是否只作候选 token。
-- 失败调用没有完整持久化原始无效响应、`finish_reason` 和失败调用 token，问题复盘与成本核算不完整。
-- Schema 校验失败后只有整次重试，尚无受约束的 JSON/枚举修复步骤。
-- `execution_version` 已覆盖任务、Prompt、Provider namespace 和模型，但本体/Schema 版本还需成为显式指纹的一部分。
-
-### 5.2 评测与样本
-
-- 首轮 100 篇按最新顺序选取，90% 来自单一来源，不能代表 18 个 active endpoint。
-- 当前没有持久化的实验 `batch_id`/样本清单；执行版本可以识别任务版本，但不能单独表达一次固定抽样。
-- 严格 Schema、证据定位、成本和延迟已有数据；独立 LLM-as-judge 及其聚合报告尚未实现。
-- 失败调用用量未保存，因此实验 token 是成功调用的下界，不是完整账单值。
-
-### 5.3 事件智能
-
-- 语义实体和原子事件尚未用于候选召回。
-- 没有向量/Embedding 层，也没有跨文档三分类关系裁决。
-- 没有把多个文档 Claim 合成为支持、反驳和随时间变化的正式事实。
-- 没有新颖性、影响、紧急性和可信度的独立判断与排序门禁。
-- 72 篇被影子模型判为不相关的文档仍保留确定性 fallback Event，说明生产事件与语义相关性之间尚未建立受控桥梁。
-
-## 6. 推荐实施顺序
-
-### M2.2.1：语义运行稳定化
-
-1. 版本化 Entity/Claim 本体与 Schema，并决定 `benchmark` 等实体的边界。
-2. 保存失败原始响应、`finish_reason`、用量与可安全展示的错误摘要。
-3. 增加一次有界结构修复；修复仍失败才进入退避重试。
-4. 增加显式实验 batch、固定样本清单和可重复导出。
-
-完成条件：失败可解释、成本可完整核算、同一固定批次可重放，且本体升级不会污染旧结果。
-
-### M2.2.2：分层影子评测
-
-1. 按来源、内容类型、主题和发布时间分层抽取 300～500 篇，继续排除 CVE。
-2. 实现独立 judge 任务与聚合器，报告相关性代理分、证据命中、无证据 Claim、结构失败、成本和延迟。
-3. 保留少量人工抽查作为诊断，不把人工金标设为开发阻塞项。
-
-完成条件：样本不再由单一来源主导，关键指标可以按来源和内容类型拆解。
-
-### M2.3：候选召回与关系裁决
-
-1. 由强标识、实体、时间窗和 Embedding 共同召回候选；任何一种弱信号都不直接合并。
-2. 对候选输出 `same_event / related_event / different_event`、置信度、理由和证据。
-3. 强身份冲突始终硬阻断；中置信结果进入复核队列。
-
-完成条件：候选和裁决全程影子运行，能统计召回规模、裁决分布、冲突率、成本与延迟。
-
-### M2.4：Claim 合并与受控提升
-
-1. 合并同一事件中的支持、反驳和更新 Claim，保留来源及时间线。
-2. 分别计算影响、新颖性、紧急性和可信度，禁止用一个总分掩盖不同含义。
-3. 设计影子 AtomicEvent 到正式 Event 的可回滚提升策略，并只在达到门禁后启用。
-
-完成条件：任一正式结论都可追溯到原文证据；更正或撤回生成新的 EventVersion，不覆盖历史。
-
-### 日期热点 API 与 M3
-
-语义事件和排序语义稳定后，实现按自然日、时区和 `as_of` 返回去重聚类后的热点快照，再建设日报冻结、生成和投递。API 契约应先于邮件/飞书适配器，避免展示层反向定义事件模型。
-
-## 7. 下一次开发启动条件
-
-下一次动手建议只启动 **M2.2.1 语义运行稳定化**，不同时铺开 Embedding、关系裁决和日期 API。开始前确认：
-
-- 本页的里程碑排序获得认可；
-- `benchmark` 是通用评测/基准实体，还是仅作为模型/数据集的属性；
-- 失败原始响应的保存期限和脱敏要求；
-- 下一轮实验仍使用 `deepseek-v4-flash`，且继续保持 Worker 自动语义调度关闭。
+操作说明见 [部署与冷启动](./deployment.md)。
 
 ## 8. 相关文档
 
-- [README](../README.md)：安装、运行、命令和能力概览。
-- [M1 增量采集与分类](./m1-data-pipeline.md)：采集、生命周期和 HybridClassifier 契约。
-- [M2.1 事件情报](./event-intelligence.md)：确定性局部去重、事件、版本和证据。
-- [M2.2 语义富化](./semantic-enrichment.md)：影子表、任务契约和安全边界。
+- [README](../README.md)：能力概览、常用命令。
+- [部署与冷启动](./deployment.md)：Linux/macOS 配置、启动、升级、验收。
+- [M1 增量采集与分类](./m1-data-pipeline.md)：采集、生命周期和分类契约。
+- [M2.1 事件情报](./event-intelligence.md)：局部去重、事件、版本和证据。
 - [模型与 DeepSeek 配置](./model-configuration.md)：Profile、环境变量和密钥规则。
-- [100 篇影子实验](./semantic-experiment-2026-07-31.md)：固定实验口径与实测结果。
-- [评测目录说明](../evaluation/README.md)：确定性回归、可选 reviewed 样本和语义标注模板。
+- [评测目录](../evaluation/README.md)：确定性回归与可选 reviewed 样本。
+
+
+## 2026-08-03 hardening status
+
+Implemented in code and migration `33e4be894d94`: complete semantic call-attempt audit, strict ontology version, incremental recoverable relation queue, proposition-aware Claim conflicts, transactional/idempotent/version-guarded promotion rollback, and immutable daily snapshots with as-of lookup. The production/runtime database has not been migrated or restarted by this change.

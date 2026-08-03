@@ -8,6 +8,7 @@ data/
 .ruff_cache/
 report.html
 report*.html
+!scripts/report_template.html
 exports/
 *.csv
 *.jsonl

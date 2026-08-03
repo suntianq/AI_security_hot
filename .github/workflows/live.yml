@@ -1,0 +1,40 @@
+name: Live source checks
+
+on:
+  workflow_dispatch:
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: intel
+          POSTGRES_PASSWORD: intel
+          POSTGRES_DB: intel
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U intel -d intel"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      INTEL_DATABASE_URL: postgresql+psycopg://intel:intel@localhost:5432/intel
+      INTEL_RUN_LIVE: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Sync and migrate
+        run: uv sync --frozen && uv run alembic upgrade head
+
+      - name: Run real-source tests
+        run: uv run pytest -m live -v
