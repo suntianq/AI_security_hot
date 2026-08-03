@@ -147,11 +147,8 @@ class OpenAICompatibleProvider:
                 raw_response=raw_http,
                 status_code=response.status_code,
             ) from exc
-        usage = (
-            data.get("usage")
-            if isinstance(data, dict) and isinstance(data.get("usage"), dict)
-            else {}
-        )
+        usage_value = data.get("usage") if isinstance(data, dict) else None
+        usage: dict = dict(usage_value) if isinstance(usage_value, dict) else {}
         choices = data.get("choices") if isinstance(data, dict) else None
         choice = (
             choices[0]

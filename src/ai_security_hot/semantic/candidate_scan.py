@@ -226,7 +226,7 @@ def enqueue_candidate_pairs(
             ).all()
             for other_id, _doc_id in matches:
                 left, right = sorted((int(seed.id), int(other_id)))
-                result = session.execute(
+                inserted_id = session.execute(
                     pg_insert(RelationCandidate)
                     .values(
                         left_atomic_id=left,
@@ -235,8 +235,9 @@ def enqueue_candidate_pairs(
                         algorithm_version=RELATION_VERSION,
                     )
                     .on_conflict_do_nothing(constraint="uq_relation_candidate_version")
-                )
-                inserted += int(result.rowcount or 0)
+                    .returning(RelationCandidate.id)
+                ).scalar_one_or_none()
+                inserted += int(inserted_id is not None)
                 if inserted >= pair_limit:
                     seed_complete = False
                     break
