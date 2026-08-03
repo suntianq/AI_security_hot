@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from ai_security_hot.models.semantic_tables import (
@@ -27,6 +28,7 @@ from ai_security_hot.semantic.relations import (
     RelationVerdict,
     adjudicate,
 )
+from ai_security_hot.semantic.versions import RELATION_VERSION
 
 log = logging.getLogger("intel.relations")
 
@@ -34,6 +36,7 @@ log = logging.getLogger("intel.relations")
 def _atomic_refs(session: Session, atomic_ids: list[int]) -> dict[int, AtomicEventRef]:
     """Build AtomicEventRef for a set of atomic-event ids, joining published time."""
     from ai_security_hot.models.tables import Document
+    from ai_security_hot.storage.repositories import current_document_conditions
 
     rows = session.execute(
         select(
@@ -47,7 +50,7 @@ def _atomic_refs(session: Session, atomic_ids: list[int]) -> dict[int, AtomicEve
             Document.published_at_utc,
         )
         .join(Document, Document.id == AtomicEvent.document_id)
-        .where(AtomicEvent.id.in_(atomic_ids))
+        .where(AtomicEvent.id.in_(atomic_ids), *current_document_conditions())
     ).all()
     refs: dict[int, AtomicEventRef] = {}
     for row in rows:
@@ -72,11 +75,16 @@ def scan_candidate_pairs(
 ) -> list[tuple[int, int, str]]:
     """Return candidate (left_atomic_id, right_atomic_id, shared_entity) pairs
     where two atomic events from DIFFERENT documents share a strong entity."""
-    # Entities appearing in >= min_documents distinct documents.
+    from ai_security_hot.models.tables import Document
+    from ai_security_hot.storage.repositories import current_document_conditions
+
+    # Entities appearing in >= min_documents distinct current documents.
     shared_entity_ids = (
         session.execute(
             select(SemanticEntity.id)
             .join(EntityMention, EntityMention.entity_id == SemanticEntity.id)
+            .join(Document, Document.id == EntityMention.document_id)
+            .where(*current_document_conditions())
             .group_by(SemanticEntity.id)
             .having(func.count(func.distinct(EntityMention.document_id)) >= min_documents)
         )
@@ -90,7 +98,9 @@ def scan_candidate_pairs(
         rows = session.execute(
             select(EntityMention.entity_id, AtomicEvent.id, AtomicEvent.document_id)
             .join(AtomicEvent, AtomicEvent.id == EntityMention.atomic_event_id)
+            .join(Document, Document.id == AtomicEvent.document_id)
             .where(
+                *current_document_conditions(),
                 EntityMention.entity_id.in_(shared_entity_ids),
                 EntityMention.atomic_event_id.is_not(None),
             )
@@ -131,45 +141,54 @@ def adjudicate_candidates(
     return verdicts
 
 
-def persist_verdicts(session: Session, verdicts: list[RelationVerdict]) -> int:
-    """Upsert shadow relation verdicts. Returns number of rows written."""
+def persist_verdicts(
+    session: Session,
+    verdicts: list[RelationVerdict],
+    *,
+    algorithm_version: str,
+) -> int:
+    """Upsert a versioned verdict without overwriting prior algorithm runs."""
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from ai_security_hot.models.semantic_tables import RelationVerdict as RelationVerdictRow
 
-    if not verdicts:
-        return 0
-    rows = [
-        {
-            "left_atomic_id": v.left_atomic_id,
-            "right_atomic_id": v.right_atomic_id,
-            "decision": v.decision,
-            "confidence": v.confidence,
-            "reason": v.reason,
-            "shared_entity": v.shared_entity,
-            "algorithm_version": "relation-v1",
-        }
-        for v in verdicts
-    ]
-    # Insert row-by-row: a multi-row ON CONFLICT DO UPDATE is ambiguous when two
-    # excluded rows could update the same target (CardinalityViolation).
-    for row in rows:
-        stmt = pg_insert(RelationVerdictRow).values(**row)
-        stmt = stmt.on_conflict_do_update(
-            index_elements=["left_atomic_id", "right_atomic_id"],
-            set_={
-                "decision": stmt.excluded.decision,
-                "confidence": stmt.excluded.confidence,
-                "reason": stmt.excluded.reason,
-                "shared_entity": stmt.excluded.shared_entity,
-            },
+    for verdict in verdicts:
+        stmt = pg_insert(RelationVerdictRow).values(
+            left_atomic_id=verdict.left_atomic_id,
+            right_atomic_id=verdict.right_atomic_id,
+            decision=verdict.decision,
+            confidence=verdict.confidence,
+            reason=verdict.reason,
+            shared_entity=verdict.shared_entity,
+            algorithm_version=algorithm_version,
         )
-        session.execute(stmt)
+        session.execute(
+            stmt.on_conflict_do_update(
+                constraint="uq_relation_pair_version",
+                set_={
+                    "decision": stmt.excluded.decision,
+                    "confidence": stmt.excluded.confidence,
+                    "reason": stmt.excluded.reason,
+                    "shared_entity": stmt.excluded.shared_entity,
+                },
+            )
+        )
+    if verdicts:
+        from ai_security_hot.semantic.components import enqueue_component_work
+
+        enqueue_component_work(
+            session,
+            {
+                atomic_id
+                for verdict in verdicts
+                for atomic_id in (verdict.left_atomic_id, verdict.right_atomic_id)
+            },
+            reason="relation_verdict_changed",
+        )
     session.flush()
-    return len(rows)
+    return len(verdicts)
 
 
-RELATION_VERSION = "relation-v2"
 STRONG_ENTITY_TYPES = {
     "model_version",
     "package",
@@ -181,26 +200,55 @@ STRONG_ENTITY_TYPES = {
 }
 
 
+@dataclass(frozen=True)
+class CandidateLease:
+    id: int
+    left_atomic_id: int
+    right_atomic_id: int
+    shared_entity: str
+    attempts: int
+    lease_token: str
+
+
+def _locked_scan_state(session: Session) -> RelationScanState:
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    session.execute(
+        pg_insert(RelationScanState)
+        .values(algorithm_version=RELATION_VERSION, last_atomic_id=0)
+        .on_conflict_do_nothing(index_elements=["algorithm_version"])
+    )
+    return session.execute(
+        select(RelationScanState)
+        .where(RelationScanState.algorithm_version == RELATION_VERSION)
+        .with_for_update()
+    ).scalar_one()
+
+
 def enqueue_candidate_pairs(
     session: Session, *, seed_limit: int = 100, pair_limit: int = 500, bucket_limit: int = 100
 ) -> dict:
-    """Incrementally scan only new AtomicEvents and durably enqueue bounded pairs."""
+    """Scan new current-document AtomicEvents with a serialized durable cursor."""
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    state = session.get(RelationScanState, RELATION_VERSION)
-    if state is None:
-        state = RelationScanState(algorithm_version=RELATION_VERSION, last_atomic_id=0)
-        session.add(state)
-        session.flush()
+    from ai_security_hot.models.tables import Document
+    from ai_security_hot.storage.repositories import current_document_conditions
+
+    state = _locked_scan_state(session)
     seeds = list(
         session.execute(
             select(AtomicEvent)
-            .where(AtomicEvent.id > state.last_atomic_id)
+            .join(Document, Document.id == AtomicEvent.document_id)
+            .where(
+                AtomicEvent.id > state.last_atomic_id,
+                *current_document_conditions(),
+            )
             .order_by(AtomicEvent.id)
             .limit(seed_limit)
         ).scalars()
     )
     inserted = 0
+    processed = 0
     for seed in seeds:
         seed_complete = True
         mentions = session.execute(
@@ -214,17 +262,19 @@ def enqueue_candidate_pairs(
         ).all()
         for entity_id, entity_key in mentions:
             matches = session.execute(
-                select(AtomicEvent.id, AtomicEvent.document_id)
+                select(AtomicEvent.id)
                 .join(EntityMention, EntityMention.atomic_event_id == AtomicEvent.id)
+                .join(Document, Document.id == AtomicEvent.document_id)
                 .where(
                     EntityMention.entity_id == entity_id,
                     AtomicEvent.id != seed.id,
                     AtomicEvent.document_id != seed.document_id,
+                    *current_document_conditions(),
                 )
                 .order_by(AtomicEvent.id.desc())
                 .limit(bucket_limit)
-            ).all()
-            for other_id, _doc_id in matches:
+            ).scalars()
+            for other_id in matches:
                 left, right = sorted((int(seed.id), int(other_id)))
                 inserted_id = session.execute(
                     pg_insert(RelationCandidate)
@@ -244,20 +294,35 @@ def enqueue_candidate_pairs(
             if not seed_complete:
                 break
         if not seed_complete:
-            # Do not advance past a partially scanned seed. On the next run,
-            # conflict-safe inserts skip prior pairs and resume without loss.
             break
         state.last_atomic_id = seed.id
         state.updated_at = datetime.now(UTC)
+        processed += 1
     session.flush()
-    return {"seeds": len(seeds), "enqueued": inserted, "cursor": int(state.last_atomic_id)}
+    return {"seeds": processed, "enqueued": inserted, "cursor": int(state.last_atomic_id)}
 
 
-def process_candidate_queue(
+def claim_candidate_queue(
     session: Session, *, limit: int = 100, lease_seconds: int = 300
-) -> dict:
-    """Lease queue rows with SKIP LOCKED; expired leases are recoverable."""
+) -> list[CandidateLease]:
+    """Claim and fence work; the caller must commit before adjudication."""
     now = datetime.now(UTC)
+    session.execute(
+        update(RelationCandidate)
+        .where(
+            RelationCandidate.status == "running",
+            RelationCandidate.lease_until < now,
+            RelationCandidate.attempts >= RelationCandidate.max_attempts,
+        )
+        .values(
+            status="failed",
+            lease_token=None,
+            lease_until=None,
+            next_retry_at=None,
+            error="lease expired after maximum attempts",
+            updated_at=now,
+        )
+    )
     token = token_urlsafe(24)
     eligible = or_(
         RelationCandidate.status.in_(["pending", "retry"]),
@@ -279,38 +344,103 @@ def process_candidate_queue(
             .with_for_update(skip_locked=True)
         ).scalars()
     )
+    leases = []
     for row in rows:
         row.status = "running"
         row.lease_token = token
         row.lease_until = now + timedelta(seconds=lease_seconds)
         row.attempts += 1
+        row.updated_at = now
+        leases.append(
+            CandidateLease(
+                int(row.id),
+                int(row.left_atomic_id),
+                int(row.right_atomic_id),
+                row.shared_entity,
+                int(row.attempts),
+                token,
+            )
+        )
     session.flush()
-    candidates = [
-        (int(row.left_atomic_id), int(row.right_atomic_id), row.shared_entity) for row in rows
-    ]
-    try:
-        verdicts = adjudicate_candidates(session, candidates)
-        persist_verdicts(session, verdicts)
-        for row in rows:
-            row.status = "succeeded"
-            row.lease_token = None
-            row.lease_until = None
-            row.error = None
-            row.updated_at = datetime.now(UTC)
-        return {"claimed": len(rows), "persisted": len(verdicts)}
-    except Exception as exc:
-        for row in rows:
-            row.status = "failed" if row.attempts >= row.max_attempts else "retry"
-            row.next_retry_at = now + timedelta(seconds=min(3600, 30 * 2**row.attempts))
-            row.error = f"{type(exc).__name__}: {exc}"
-            row.lease_token = None
-            row.lease_until = None
-        raise
+    return leases
+
+
+def complete_candidate(session: Session, lease: CandidateLease) -> int:
+    """Adjudicate one fenced candidate and atomically write its verdict/status."""
+    row = session.execute(
+        select(RelationCandidate)
+        .where(
+            RelationCandidate.id == lease.id,
+            RelationCandidate.status == "running",
+            RelationCandidate.lease_token == lease.lease_token,
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if row is None:
+        raise RuntimeError(f"relation candidate lease lost: {lease.id}")
+    verdicts = adjudicate_candidates(
+        session, [(lease.left_atomic_id, lease.right_atomic_id, lease.shared_entity)]
+    )
+    written = persist_verdicts(session, verdicts, algorithm_version=RELATION_VERSION)
+    row.status = "succeeded"
+    row.lease_token = None
+    row.lease_until = None
+    row.next_retry_at = None
+    row.error = None
+    row.updated_at = datetime.now(UTC)
+    session.flush()
+    return written
+
+
+def fail_candidate(
+    session: Session, lease: CandidateLease, error: Exception, *, retry_base_seconds: int = 30
+) -> bool:
+    """Persist retry/terminal failure only when the fencing token is still owned."""
+    row = session.execute(
+        select(RelationCandidate)
+        .where(
+            RelationCandidate.id == lease.id,
+            RelationCandidate.status == "running",
+            RelationCandidate.lease_token == lease.lease_token,
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if row is None:
+        return False
+    now = datetime.now(UTC)
+    terminal = row.attempts >= row.max_attempts
+    row.status = "failed" if terminal else "retry"
+    row.next_retry_at = (
+        None
+        if terminal
+        else now + timedelta(seconds=min(3600, retry_base_seconds * 2 ** int(row.attempts)))
+    )
+    row.error = f"{type(error).__name__}: {error}"[:2000]
+    row.lease_token = None
+    row.lease_until = None
+    row.updated_at = now
+    session.flush()
+    return True
 
 
 def run_incremental_relation_scan(
-    session: Session, *, seed_limit: int = 100, pair_limit: int = 500, work_limit: int = 100
+    *, seed_limit: int = 100, pair_limit: int = 500, work_limit: int = 100
 ) -> dict:
-    queued = enqueue_candidate_pairs(session, seed_limit=seed_limit, pair_limit=pair_limit)
-    processed = process_candidate_queue(session, limit=work_limit)
-    return {**queued, **processed}
+    """Run enqueue, durable claim, then per-item isolated completion/failure transactions."""
+    from ai_security_hot.models.base import session_scope
+
+    with session_scope() as session:
+        queued = enqueue_candidate_pairs(session, seed_limit=seed_limit, pair_limit=pair_limit)
+    with session_scope() as session:
+        leases = claim_candidate_queue(session, limit=work_limit)
+    persisted = failed = 0
+    for lease in leases:
+        try:
+            with session_scope() as session:
+                persisted += complete_candidate(session, lease)
+        except Exception as exc:
+            failed += 1
+            with session_scope() as session:
+                fail_candidate(session, lease, exc)
+            log.exception("relation candidate failed: id=%s", lease.id)
+    return {**queued, "claimed": len(leases), "persisted": persisted, "failed": failed}

@@ -10,7 +10,7 @@ later migration):
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
@@ -548,7 +548,7 @@ class DailyHotspotSnapshot(Base):
         ),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
-    natural_date: Mapped[object] = mapped_column(Date, index=True)
+    natural_date: Mapped[date] = mapped_column(Date, index=True)
     timezone: Mapped[str] = mapped_column(String(64))
     category: Mapped[str] = mapped_column(String(16), default="all")
     revision: Mapped[int] = mapped_column(Integer)

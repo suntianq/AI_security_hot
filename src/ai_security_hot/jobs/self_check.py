@@ -18,6 +18,11 @@ from ai_security_hot.domain.enums import PipelineStage
 from ai_security_hot.events.intelligence import CLUSTER_VERSION, DEDUPE_VERSION
 from ai_security_hot.llm.registry import provider_names
 from ai_security_hot.models.base import session_scope
+from ai_security_hot.models.semantic_tables import (
+    SemanticComponentWorkItem,
+    SemanticRelationComponent,
+    SemanticRelationMembership,
+)
 from ai_security_hot.models.tables import (
     CandidateReview,
     Claim,
@@ -46,6 +51,7 @@ def run_self_check() -> dict:
         "failed_items": 0,
         "event_pipeline": {},
         "m2_incremental": {},
+        "semantic_relation": {},
         "classification": {},
         "data_quality": {},
     }
@@ -126,6 +132,35 @@ def run_self_check() -> dict:
             "block_token_buckets": int(block_token_buckets),
             "failed_runs_24h": int(failed_m2_runs),
         }
+        component_work_rows = session.execute(
+            select(SemanticComponentWorkItem.status, func.count()).group_by(
+                SemanticComponentWorkItem.status
+            )
+        ).all()
+        active_components = session.execute(
+            select(func.count())
+            .select_from(SemanticRelationComponent)
+            .where(SemanticRelationComponent.status == "active")
+        ).scalar_one()
+        active_memberships = session.execute(
+            select(func.count())
+            .select_from(SemanticRelationMembership)
+            .where(SemanticRelationMembership.active.is_(True))
+        ).scalar_one()
+        expired_component_leases = session.execute(
+            select(func.count())
+            .select_from(SemanticComponentWorkItem)
+            .where(
+                SemanticComponentWorkItem.status == "running",
+                SemanticComponentWorkItem.lease_until < now,
+            )
+        ).scalar_one()
+        report["semantic_relation"] = {
+            "active_components": int(active_components),
+            "active_memberships": int(active_memberships),
+            "work_status": {str(status): int(count) for status, count in component_work_rows},
+            "expired_leases": int(expired_component_leases),
+        }
         record_status_rows = session.execute(
             select(Document.record_status, func.count()).group_by(Document.record_status)
         ).all()
@@ -161,8 +196,7 @@ def run_self_check() -> dict:
         settings = get_settings()
         config_errors = []
         llm_required = (
-            settings.classification_mode == "hybrid"
-            or settings.semantic_enrichment_enabled
+            settings.classification_mode == "hybrid" or settings.semantic_enrichment_enabled
         )
         model_config = None
         try:
@@ -174,9 +208,7 @@ def run_self_check() -> dict:
             if model_config.provider not in provider_names():
                 config_errors.append(f"unknown provider: {model_config.provider}")
             if not model_config.api_key_configured or not model_config.model:
-                config_errors.append(
-                    "model calls require INTEL_LLM_API_KEY and a configured model"
-                )
+                config_errors.append("model calls require INTEL_LLM_API_KEY and a configured model")
         report["classification"] = {
             "mode": settings.classification_mode,
             "semantic_enabled": settings.semantic_enrichment_enabled,
@@ -184,19 +216,13 @@ def run_self_check() -> dict:
             "provider": model_config.provider if model_config else settings.llm_provider,
             "model": model_config.model if model_config else settings.llm_model,
             "response_format": (
-                model_config.response_format
-                if model_config
-                else settings.llm_response_format
+                model_config.response_format if model_config else settings.llm_response_format
             ),
             "thinking_mode": (
-                model_config.thinking_mode
-                if model_config
-                else settings.llm_thinking_mode
+                model_config.thinking_mode if model_config else settings.llm_thinking_mode
             ),
             "api_key_configured": (
-                model_config.api_key_configured
-                if model_config
-                else bool(settings.llm_api_key)
+                model_config.api_key_configured if model_config else bool(settings.llm_api_key)
             ),
             "expired_leases": int(expired_leases),
             "pending_retries": int(pending_retries),
@@ -211,6 +237,8 @@ def run_self_check() -> dict:
         or report["failed_items"]
         or report["classification"]["config_errors"]
         or report["m2_incremental"]["failed_runs_24h"]
+        or report["semantic_relation"]["work_status"].get("failed", 0)
+        or report["semantic_relation"]["expired_leases"]
     ):
         log.warning("self_check found issues: %s", report)
     else:

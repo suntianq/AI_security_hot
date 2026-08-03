@@ -1,10 +1,8 @@
-"""Controlled shadow→formal event promotion (M2.4, B2).
+"""Controlled shadow→formal event promotion (M2.4).
 
-Synthesizes an EventDraft from a related atomic-event pair's merged claims and
-applies a promotion gate. It is SHADOW (dry-run) only: it previews the event
-without writing to the formal ``events`` table. The formal apply path is not
-implemented yet — promotion is disabled by default and requires an explicit
-design + gate before any shadow result can touch production events.
+Builds stable connected components from versioned ``same_event`` verdicts.
+Preview is the default; explicit apply materializes a complete versioned Event
+graph transactionally, and rollback restores the exact pre-promotion state.
 """
 
 from __future__ import annotations
@@ -12,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from ai_security_hot.events.intelligence import EventDraft, EventMembership
+from ai_security_hot.semantic.versions import PROMOTION_VERSION, RELATION_COMPONENT_VERSION
 
 # Promotion gate: a related pair promotes only when it has enough distinct
 # source documents AND enough merged claims.
@@ -138,16 +137,137 @@ def build_promotion_preview(
     )
 
 
+def load_same_event_components(session, *, limit: int = 1000):
+    """Load complete current materialized components without scanning the edge graph."""
+    from ai_security_hot.semantic.components import load_active_components
+
+    return load_active_components(session, limit=limit)
+
+
+def _event_state(session, event) -> dict | None:
+    """Serialize the complete mutable event graph used for rollback and EventVersion."""
+    from sqlalchemy import select
+
+    from ai_security_hot.models.tables import Claim, ClaimEvidence, EventDocument
+
+    if event is None:
+        return None
+    documents = [
+        {
+            "document_id": int(row.document_id),
+            "stance": row.stance,
+            "evidence_level": row.evidence_level,
+            "relation_reason": row.relation_reason,
+        }
+        for row in session.execute(
+            select(EventDocument).where(EventDocument.event_id == event.id)
+        ).scalars()
+    ]
+    claims = []
+    for claim in session.execute(select(Claim).where(Claim.event_id == event.id)).scalars():
+        evidence = [
+            {
+                "document_id": int(row.document_id),
+                "stance": row.stance,
+                "evidence_level": row.evidence_level,
+                "excerpt": row.excerpt,
+            }
+            for row in session.execute(
+                select(ClaimEvidence).where(ClaimEvidence.claim_id == claim.id)
+            ).scalars()
+        ]
+        claims.append(
+            {
+                "claim_key": claim.claim_key,
+                "claim_type": claim.claim_type,
+                "text": claim.text,
+                "normalized_value": claim.normalized_value,
+                "status": claim.status,
+                "confidence": claim.confidence,
+                "evidence": evidence,
+            }
+        )
+    return {
+        "fingerprint": event.fingerprint,
+        "event_type": event.event_type,
+        "topic": event.topic,
+        "category": event.category,
+        "title": event.title,
+        "summary": event.summary,
+        "status": event.status,
+        "score": event.score,
+        "evidence_level": event.evidence_level,
+        "cluster_version": event.cluster_version,
+        "first_seen_at": event.first_seen_at.isoformat() if event.first_seen_at else None,
+        "last_seen_at": event.last_seen_at.isoformat() if event.last_seen_at else None,
+        "documents": documents,
+        "claims": claims,
+    }
+
+
+def _restore_event_state(session, event, state: dict) -> None:
+    from sqlalchemy import delete, select
+
+    from ai_security_hot.models.tables import Claim, ClaimEvidence, EventDocument
+
+    for field in (
+        "event_type",
+        "topic",
+        "category",
+        "title",
+        "summary",
+        "status",
+        "score",
+        "evidence_level",
+        "cluster_version",
+    ):
+        setattr(event, field, state.get(field))
+    event.first_seen_at = (
+        datetime.fromisoformat(state["first_seen_at"]) if state.get("first_seen_at") else None
+    )
+    event.last_seen_at = (
+        datetime.fromisoformat(state["last_seen_at"]) if state.get("last_seen_at") else None
+    )
+    session.execute(delete(EventDocument).where(EventDocument.event_id == event.id))
+    for row in state.get("documents", []):
+        session.add(EventDocument(event_id=event.id, **row))
+    claim_ids = list(session.execute(select(Claim.id).where(Claim.event_id == event.id)).scalars())
+    if claim_ids:
+        session.execute(delete(ClaimEvidence).where(ClaimEvidence.claim_id.in_(claim_ids)))
+    session.execute(delete(Claim).where(Claim.event_id == event.id))
+    session.flush()
+    for row in state.get("claims", []):
+        claim_data = dict(row)
+        evidence = claim_data.pop("evidence", [])
+        claim = Claim(event_id=event.id, **claim_data)
+        session.add(claim)
+        session.flush()
+        for item in evidence:
+            session.add(ClaimEvidence(claim_id=claim.id, **item))
+
+
 def apply_promotion(
-    session, preview: PromotionPreview, merged_claims, *, algorithm_version: str = "promotion-v1"
+    session,
+    preview: PromotionPreview,
+    merged_claims,
+    *,
+    atomic_ids: list[int],
+    relation_component_id: int,
+    component_key: str,
+    component_revision: int,
+    algorithm_version: str = PROMOTION_VERSION,
 ):
-    """Atomically materialize a gated preview; identical retries are no-ops."""
+    """Atomically materialize one stable same-event component with full rollback state."""
     import json
     from hashlib import sha256
 
-    from sqlalchemy import delete, select
+    from sqlalchemy import delete, select, text
 
-    from ai_security_hot.models.semantic_tables import SemanticPromotion
+    from ai_security_hot.models.semantic_tables import (
+        SemanticPromotion,
+        SemanticRelationComponent,
+        SemanticRelationMembership,
+    )
     from ai_security_hot.models.tables import (
         Claim,
         ClaimEvidence,
@@ -158,6 +278,32 @@ def apply_promotion(
 
     if not preview.gated:
         raise ValueError(preview.reason)
+    relation_component = session.execute(
+        select(SemanticRelationComponent)
+        .where(
+            SemanticRelationComponent.id == relation_component_id,
+            SemanticRelationComponent.component_key == component_key,
+            SemanticRelationComponent.algorithm_version == RELATION_COMPONENT_VERSION,
+        )
+        .with_for_update()
+    ).scalar_one_or_none()
+    if (
+        relation_component is None
+        or relation_component.status != "active"
+        or int(relation_component.revision) != component_revision
+    ):
+        raise RuntimeError("relation component changed; regenerate the promotion preview")
+    active_atomic_ids = sorted(
+        int(value)
+        for value in session.execute(
+            select(SemanticRelationMembership.atomic_event_id).where(
+                SemanticRelationMembership.component_id == relation_component_id,
+                SemanticRelationMembership.active.is_(True),
+            )
+        ).scalars()
+    )
+    if active_atomic_ids != sorted(set(atomic_ids)):
+        raise RuntimeError("relation component membership changed; regenerate the preview")
     draft = {
         **preview.as_dict(),
         "summary": preview.summary,
@@ -167,53 +313,51 @@ def apply_promotion(
     }
     claims_payload = [
         {
-            "claim_key": c.claim_key,
-            "claim_type": c.claim_type,
-            "normalized_value": c.normalized_value,
-            "text": c.text,
-            "sources": c.sources,
-            "confidence": c.confidence,
-            "status": c.status,
-            "conflicts_with": c.conflicts_with,
+            "claim_key": item.claim_key,
+            "claim_type": item.claim_type,
+            "normalized_value": item.normalized_value,
+            "text": item.text,
+            "sources": item.sources,
+            "confidence": item.confidence,
+            "status": item.status,
+            "conflicts_with": item.conflicts_with,
         }
-        for c in merged_claims
+        for item in merged_claims
     ]
     draft_hash = sha256(
         json.dumps(
-            {"draft": draft, "claims": claims_payload}, sort_keys=True, ensure_ascii=False
+            {
+                "draft": draft,
+                "claims": claims_payload,
+                "atomic_ids": atomic_ids,
+                "component_revision": component_revision,
+            },
+            sort_keys=True,
+            ensure_ascii=False,
         ).encode()
     ).hexdigest()
-    component_key = sha256(preview.fingerprint.encode()).hexdigest()
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"semantic-promotion:{component_key}:{algorithm_version}"},
+    )
     promotion = session.execute(
         select(SemanticPromotion)
         .where(
             SemanticPromotion.component_key == component_key,
             SemanticPromotion.algorithm_version == algorithm_version,
+            SemanticPromotion.component_revision == component_revision,
         )
         .with_for_update()
     ).scalar_one_or_none()
     if promotion and promotion.status == "applied" and promotion.draft_hash == draft_hash:
         return promotion, False
-    if promotion is None:
-        promotion = SemanticPromotion(
-            component_key=component_key,
-            algorithm_version=algorithm_version,
-            draft_hash=draft_hash,
-            status="prepared",
-            atomic_ids=[],
-            document_ids=preview.document_ids,
-            draft=draft,
-            claims=claims_payload,
-        )
-        session.add(promotion)
-        session.flush()
-    elif promotion.status == "applied":
-        raise RuntimeError(
-            "promotion component already applied with different content; rollback first"
-        )
+    if promotion and promotion.status == "applied":
+        raise RuntimeError("promotion component changed; rollback the applied revision first")
     event = session.execute(
         select(Event).where(Event.fingerprint == preview.fingerprint).with_for_update()
     ).scalar_one_or_none()
+    created_event = event is None
+    before_state = _event_state(session, event)
     if event is None:
         event = Event(
             fingerprint=preview.fingerprint,
@@ -222,6 +366,21 @@ def apply_promotion(
             title=preview.title,
         )
         session.add(event)
+        session.flush()
+    if promotion is None:
+        promotion = SemanticPromotion(
+            component_key=component_key,
+            algorithm_version=algorithm_version,
+            relation_component_id=relation_component_id,
+            component_revision=component_revision,
+            draft_hash=draft_hash,
+            status="prepared",
+            atomic_ids=atomic_ids,
+            document_ids=preview.document_ids,
+            draft=draft,
+            claims=claims_payload,
+        )
+        session.add(promotion)
         session.flush()
     event.event_type = preview.event_type
     event.topic = preview.topic
@@ -237,11 +396,11 @@ def apply_promotion(
     event.current_version += 1
     event.updated_at = datetime.now(UTC)
     session.execute(delete(EventDocument).where(EventDocument.event_id == event.id))
-    for doc_id in preview.document_ids:
+    for document_id in preview.document_ids:
         session.add(
             EventDocument(
                 event_id=event.id,
-                document_id=doc_id,
+                document_id=document_id,
                 stance="support",
                 evidence_level=preview.evidence_level,
                 relation_reason="semantic_promotion",
@@ -255,6 +414,7 @@ def apply_promotion(
     for claim in old_claims:
         session.delete(claim)
     session.flush()
+    claim_by_key = {item.claim_key: item for item in merged_claims}
     for item in merged_claims:
         claim = Claim(
             event_id=event.id,
@@ -267,36 +427,49 @@ def apply_promotion(
         )
         session.add(claim)
         session.flush()
-        for doc_id in item.sources:
+        support_docs = set(item.sources)
+        contradict_docs = {
+            document_id
+            for conflict_key in item.conflicts_with
+            for document_id in claim_by_key.get(conflict_key, item).sources
+        } - support_docs
+        for document_id in sorted(support_docs):
             session.add(
                 ClaimEvidence(
                     claim_id=claim.id,
-                    document_id=doc_id,
+                    document_id=document_id,
                     stance="support",
                     evidence_level=preview.evidence_level,
                 )
             )
-    snapshot = {
-        "fingerprint": event.fingerprint,
-        "status": event.status,
-        "title": event.title,
-        "document_ids": preview.document_ids,
-        "claim_keys": [c.claim_key for c in merged_claims],
-    }
+        for document_id in sorted(contradict_docs):
+            session.add(
+                ClaimEvidence(
+                    claim_id=claim.id,
+                    document_id=document_id,
+                    stance="contradict",
+                    evidence_level=preview.evidence_level,
+                )
+            )
+    session.flush()
+    after_state = _event_state(session, event)
     session.add(
         EventVersion(
             event_id=event.id,
             version=event.current_version,
             change_type="semantic_promotion",
             algorithm_version=algorithm_version,
-            snapshot=snapshot,
-            diff={"promotion_id": promotion.id},
+            snapshot=after_state or {},
+            diff={"promotion_id": promotion.id, "before": before_state},
         )
     )
     promotion.draft_hash = draft_hash
+    promotion.atomic_ids = atomic_ids
     promotion.document_ids = preview.document_ids
     promotion.draft = draft
     promotion.claims = claims_payload
+    promotion.before_state = before_state
+    promotion.created_event = created_event
     promotion.status = "applied"
     promotion.event_id = event.id
     promotion.event_version = event.current_version
@@ -308,8 +481,8 @@ def apply_promotion(
 
 
 def rollback_promotion(session, promotion_id: int):
-    """Rollback only the exact event version written by this promotion."""
-    from sqlalchemy import select
+    """Restore the exact pre-promotion graph, or supersede a newly created event."""
+    from sqlalchemy import select, text
 
     from ai_security_hot.models.semantic_tables import SemanticPromotion
     from ai_security_hot.models.tables import Event, EventVersion
@@ -317,6 +490,10 @@ def rollback_promotion(session, promotion_id: int):
     promotion = session.execute(
         select(SemanticPromotion).where(SemanticPromotion.id == promotion_id).with_for_update()
     ).scalar_one()
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"semantic-promotion:{promotion.component_key}:{promotion.algorithm_version}"},
+    )
     if promotion.status == "rolled_back":
         return promotion, False
     if promotion.status != "applied" or promotion.event_id is None:
@@ -326,16 +503,23 @@ def rollback_promotion(session, promotion_id: int):
     ).scalar_one()
     if event.current_version != promotion.event_version:
         raise RuntimeError("event changed after promotion; refusing unsafe rollback")
-    event.status = "superseded"
+    if promotion.created_event:
+        event.status = "superseded"
+    elif promotion.before_state is not None:
+        _restore_event_state(session, event, dict(promotion.before_state))
+    else:
+        raise RuntimeError("promotion has no rollback state")
     event.current_version += 1
     event.updated_at = datetime.now(UTC)
+    session.flush()
+    after_state = _event_state(session, event)
     session.add(
         EventVersion(
             event_id=event.id,
             version=event.current_version,
             change_type="semantic_rollback",
             algorithm_version=promotion.algorithm_version,
-            snapshot={"fingerprint": event.fingerprint, "status": event.status},
+            snapshot=after_state or {},
             diff={"promotion_id": promotion.id},
         )
     )

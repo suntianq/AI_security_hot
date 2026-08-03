@@ -195,6 +195,9 @@ if (sem && sem.total > 0) {
     ['带batch标签', sem.with_batch],
     ['带usage', sem.with_usage],
     ['带finish_reason', sem.with_finish_reason],
+    ['稳定事件组件', sem.active_components || 0],
+    ['当前组件成员', sem.active_memberships || 0],
+    ['正式提升revision', Object.values(sem.promotions || {}).reduce((a,b)=>a+b,0)],
   ].map(([l,v])=>`<span class="chip"><b>${v}</b> ${l}</span>`).join('');
   bars($('semCtBars'), sem.content_types, {labels:ctLabels, color:'var(--c5)'});
   bars($('semWorkBars'), sem.work_status, {labels:workLabels, color:'var(--c3)'});

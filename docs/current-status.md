@@ -5,109 +5,100 @@
 
 ## 1. 当前结论
 
-项目已经具备 19 个 endpoint 配置（18 active + 1 retired）、增量采集、文档
-生命周期、规则/混合分类、M2.1 局部去重与确定性事件聚类、EventVersion /
-Claim / Evidence、M2.2 LLM 影子抽取、M2.3 关系裁决骨架、M2.4 提升预览和
-日期热点查询。
+项目已经具备 19 个 endpoint 配置（18 active + 1 retired）、增量采集、文档生命周期、规则/混合分类、M2.1 局部去重与确定性事件聚类、M2.2 LLM 影子抽取，以及经过生命周期加固的 M2.3/M2.4：
 
-当前还不能称为完整的 LLM 事件情报产品：
+- 每次 LLM initial/repair 调用均可记录安全响应正文、usage、finish reason、校验错误和 provider 错误。
+- ontology_version 由代码中的 semantic-onto-v1 Literal/JSON-Schema const 强制约束。
+- M2.3 使用带游标、租约、fencing token、指数退避和版本隔离的有界增量队列；worker 自动调度。
+- same-event 图已物化为稳定 relation component：成员扩展/局部分裂尽量保留 ID，membership 保留历史，generation queue 保证处理中再次失效不会丢任务，周期发现不会反复增加未完成 generation 或重置终态失败。
+- 只有当前文档和当前 relation-v2 的 same_event 边能进入正式提升组件；related_event 只保留关联语义，不能误合并。
+- Claim 的置信度不再表示正反立场；只有显式布尔冲突或已知相反命题才成为 disputed。
+- event-promote 默认预览；显式 --apply 才事务化写 Event、Document、Claim、Evidence 和 EventVersion。重复执行幂等，回滚受事件版本保护并恢复完整旧状态。
+- worker 定期冻结当天和前一天的热点 revision；API 的 as_of 读取对应时点以前已存储的快照，不从当前 Event 反推历史。
 
-- M2.2 默认只写影子表，不修改正式分类、去重或 Event。
-- M2.3 只有共享实体 + 时间窗的确定性候选/裁决，没有 Embedding 或 LLM 裁决。
-- M2.4 只有 pair 级 Claim 合并和 dry-run 提升预览，没有正式持久化提升。
-- 日期热点 API 查询当前 Event 状态，不是冻结的历史日报快照。
-- M2.3/M2.4 主要由手工 CLI 驱动，尚未进入 durable 自动任务链。
+M2.2 仍默认是影子模式，不会自动修改正式分类或 Event；正式提升仍是显式人工/运维动作，不会被 worker 自动执行。
 
-```text
+~~~text
 Source
   → fetch / normalize / fulltext / classify
   → M2.1 local dedupe / deterministic cluster
   → Event / EventVersion / Claim / Evidence
-  → query API / offline report
+  → frozen daily snapshot → as_of API
 
 current non-CVE duplicate master
   → M2.2 LLM shadow extraction
   → Entity / AtomicEvent / ExtractedClaim
-  → M2.3 candidate + relation verdict (shadow)
-  → M2.4 claim merge + promotion preview (shadow)
-  ── formal event promotion not implemented
-```
+  → M2.3 durable candidate queue → versioned relation verdict
+  → same_event connected component → Claim merge
+  → preview
+  → explicit --apply → formal versioned Event
+  → guarded rollback when required
+~~~
 
 ## 2. 里程碑完成度
 
 | 里程碑 | 状态 | 已完成 | 主要边界 |
 |---|---|---|---|
-| M0 工程与部署 | 基础完成，正在硬化 | PostgreSQL/Alembic、API、worker、CLI、CI；统一镜像、独立 migrate、健康探针、macOS DB-free CI | Playwright 仍只是预留；当前旧容器需在本批代码完成后重新部署 |
+| M0 工程与部署 | 基础完成，持续硬化 | PostgreSQL/Alembic、API、worker、CLI、CI；统一镜像、独立 migrate、健康探针、macOS DB-free CI | Playwright 仍只是预留；发布时仍需用同一 Git SHA 重建 API/worker |
 | M1.1 规则分类 | 完成 | CVE 独立类别；新闻/论文主题分类；分类溯源 | 深层语义仍需模型 |
 | M1.2 增量与生命周期 | 完成 | AI HOT changes、NVD cursor、CISA 快照、Anthropic 双通道、修订/撤回/退役审计 | RSS 等源无法恢复上游窗口外历史 |
 | M1.3 混合分类 | 机制完成 | Provider、Schema、缓存、运行审计、租约、fallback；CVE bypass | 存量正式分类没有全部经 LLM 重跑 |
 | M2.1 局部事件情报 | 完成 | 持久签名/强身份/blocking、稳定组件、局部重算、硬冲突、EventVersion/Claim/Evidence | fallback 事件不等同于语义事件合并 |
-| M2.2 语义抽取 | 影子机制完成 | 严格输出契约、证据定位、租约、缓存、实体/原子事件/Claim、分层抽样和聚合评测 | 失败调用审计不完整；本体版本未在输出字段上强约束；无独立 judge |
-| M2.3 关系裁决 | 早期影子版 | 共享实体候选、same/related/different 确定性裁决、RelationVerdict | 候选扫描非增量且大桶 O(n²)；无 Embedding/LLM；审计字段不足 |
-| M2.4 Claim 与提升 | 预览版 | exact-value Claim 合并、提升门禁、dry-run preview | 当前“置信度差=矛盾”语义错误；无事件组件合并、正式写入、回滚 |
-| NVD/KEV 隔离 | 完成 | vuln_db/general 隔离，旧 cve 事件 supersede | `min_cve_year` 会漏掉最近更新的旧编号 CVE |
-| 日期热点 API | 当前态查询完成 | `/v1/daily-hotspots?date&tz&category` | 无日报冻结、`as_of`、历史排名和分页 |
-| M3 日报与投递 | 未开始 | 设计边界已存在 | 快照、生成、投递、更正通知均未实现 |
+| M2.2 语义抽取 | 影子机制完成并加固 | 严格输出契约、完整逐次调用审计、本体常量、证据定位、租约、缓存、实体/原子事件/Claim、分层抽样和聚合评测 | 无独立 judge；抽样和时延统计仍可扩展 |
+| M2.3 关系裁决 | 持久组件版 | 强实体过滤、持久游标、候选队列、租约恢复、稳定组件 ID、历史 membership、局部拆分合并、版本化裁决和 worker 调度 | 尚无 Embedding 与 LLM 三分类；完全消失后再出现的组件历史复用仍可增强 |
+| M2.4 Claim 与提升 | revision 化正式提升 | 命题级冲突、稳定 component key/revision、基于真实 AtomicEvent/Document 的预览、事务 apply、幂等、完整版本和安全回滚 | 重要性、新颖性、紧急性仍需专门判断层；自动提升未开放 |
+| NVD/KEV 隔离 | 完成 | vuln_db/general 隔离，旧 cve 事件 supersede | min_cve_year 会漏掉最近更新的旧编号 CVE |
+| 日期热点 API | 冻结快照完成 | 不可变 revision、并发锁、worker 定期生成、as_of 查询 | as_of 只能选择当时已生成的快照，不做任意时点事件重建；无游标分页 |
+| M3 日报与投递 | 未开始 | 已有冻结热点输入 | 日报文案、投递、更正通知尚未实现 |
 
-“机制完成”不表示历史数据全部用模型重跑，也不表示影子结果已进入正式事件。
+“机制完成”不表示历史数据已全部用模型重跑，也不表示每个影子结果都已提升为正式事件。
 
-## 3. 2026-08-03 部署硬化
+## 3. 部署硬化
 
-本批已在代码仓实现：
+代码仓已经实现：
 
-- API、worker、migrate 使用同一镜像和 `INTEL_BUILD_SHA`。
-- Alembic 与 source sync 归独立一次性 `migrate` 服务；失败时 API/worker 不启动。
-- API 增加 `/health/live`、`/health/ready`，readiness 校验数据库和 Alembic head。
-- worker 每 30 秒刷新 heartbeat，Compose 可发现调度器停止派发。
-- PostgreSQL/API 默认只绑定 `127.0.0.1`，容器增加重启策略。
-- 读取与 `/ops/*` 分别使用 `INTEL_API_TOKEN`、`INTEL_ADMIN_API_TOKEN`。
-- 抓取器跨 origin 重定向会删除 Authorization/Cookie；代理路线也执行 DNS 私网校验。
-- report 模板正式进入 Git，并对嵌入 JSON 做 script 终止字符转义。
-- 默认 CI 使用 PostgreSQL 18；真实信源测试改为手工工作流；增加 macOS DB-free 门禁。
+- API、worker、migrate 使用同一镜像和 INTEL_BUILD_SHA。
+- Alembic 与 source sync 归独立一次性 migrate 服务；失败时 API/worker 不启动。
+- API 提供 liveness/readiness，readiness 校验数据库和 Alembic head。
+- worker heartbeat 可发现调度器停止派发。
+- PostgreSQL/API 默认只绑定 127.0.0.1；读取和运维 Token 分离且 fail-closed。
+- 抓取器跨 origin 重定向会删除 Authorization/Cookie，代理路线也执行 DNS 私网校验。
+- 默认 CI 使用 PostgreSQL 18；真实信源测试为手工工作流；另有 macOS DB-free 门禁。
+- 当前迁移 head 为 6f23c8a1d4b7，已在隔离 PostgreSQL 18 验证 upgrade、downgrade、再次 upgrade 和 ORM metadata check。
 
-运行中的旧 API/worker 不会因代码文件变化自动升级。完成测试和提交后必须用同一
-Git SHA 重建整套应用服务，不能只重建其中一个。
+运行中的 API/worker 不会因工作区文件变化自动升级。发布时必须先备份需要保留的数据，再由 migrate 升级 schema，并用同一 Git SHA 重建 API/worker。新服务器若不需要旧数据，可以直接从空数据库冷启动，不必搬迁现有数据。
 
-## 4. 已知问题
+## 4. 仍需改进
 
 ### 4.1 部署和 API
 
-- `/ops/tick` 虽已使用管理员 Token，仍在 HTTP 请求内同步执行完整流水线；
-  后续应改成持久任务入队并返回 202，同时禁止重复并发执行。
-- 健康检查可以发现 worker 停止派发，但尚未提供跨实例历史 heartbeat/告警表。
-- Docker 基础镜像已固定 uv 版本，但 Python/PostgreSQL 仍是浮动 minor tag；
-  发布流程还应记录最终镜像 digest。
-- 当前没有稳定的 API response schema、游标分页和统一 `/v1` 路径。
+- /ops/tick 仍在 HTTP 请求内同步执行完整流水线；应改为持久任务入队并返回 202。
+- heartbeat 尚无跨实例历史和主动告警。
+- Python/PostgreSQL 基础镜像仍应进一步固定 digest。
+- API response schema、游标分页和统一版本化路径仍需收敛。
+- 需要在 Apple Silicon 上做一次真实 cold-start、抓取、快照和报告验收。
 
-### 4.2 M2.2 语义运行
+### 4.2 语义抽取与评测
 
-- Schema 修复最终失败时，异常没有携带全部原始无效响应、finish reason 和 usage；
-  失败成本与模型行为无法完整审计。
-- `ontology_version` 仍由模型输出普通字符串，应由服务端固定或使用 Literal 校验。
-- 抽样会将大量 eligible 文档加载进 Python；真正的大库抽样应转为数据库分层查询。
-- 语义评测 p50/p95 尚未稳定持久化，LLM-as-judge 仍未实现。
+- 来源平衡抽样仍会把较多 eligible 文档加载到 Python，应改为数据库分层抽样。
+- 每篇调用的 started/finished 时间尚未形成稳定 p50/p95 数据。
+- LLM-as-judge 可作为代理质量信号，但不能冒充人工 precision/recall/F1。
+- 原子事件指纹仍依赖规范化后的模型字段；稳定 component 已隔离普通成员增删，但模型重抽取产生全新原子事件且旧组件完全消失时，还需要历史身份复用策略。
 
-### 4.3 M2.3 候选和裁决
+### 4.3 候选召回与裁决
 
-- 当前先读取所有共享实体，再在桶内两两配对；高频实体会造成 O(n²)。
-- 缺少实体类型/角色/置信度过滤、候选时间窗预过滤、大桶保护和扫描游标。
-- 没有优先排除已裁决 pair，候选顺序也不稳定。
-- pair 没有统一 canonical orientation，algorithm_version 更新审计不完整。
-- 没有强身份冲突解释、Embedding 候选和 LLM 三分类审计。
+- 目前只有强实体 + 确定性规则召回，没有 Embedding/pgvector。
+- 缺少带完整 prompt/响应审计的 LLM same_event / related_event / different_event 裁决器。
+- relation component 已改为 seed + 旧 membership + 当前 same-event 边的有界局部闭包；超限会保留队列失败审计，不会截断后误提交。
+- 仍需把强身份冲突原因完整带入关系裁决和人工复核界面。
 
-### 4.4 M2.4 Claim 和正式事件
+### 4.4 正式事件与日报
 
-- 相同规范值只因置信度差距大就标记 contradict，这是错误语义。
-- 真正不同的规范值被分到不同组，反而不会进行冲突判断。
-- 只处理单个 pair，没有 relation component 的传递合并。
-- preview 使用临时事件属性和当前时间；无正式 apply、幂等、回滚和版本审计。
-
-### 4.5 日期热点和存储
-
-- 日期接口按当前 `last_seen_at` 过滤，后续更新可能使事件从旧日期移动到新日期。
-- 需要 `daily_hotspot_snapshot/items` 保存排名、EventVersion、证据和算法版本。
-- 当前数据库约 6.3 GB；最大表是 block token、raw item、document 和 event version。
-  冷启动前应实现 raw 保留、无变化版本抑制、候选复核归档和大表增长监控。
+- 自动正式提升未开放；当前必须审阅 preview 后显式 --apply。
+- 正式 Event 已使用持久 component key；若两个已经正式提升的组件后来合并，旧 Event 的自动 supersede 仍应保持人工门禁。
+- 标题、摘要、事件类型、主题、重要性、新颖性和紧急性需要专门判断层，不能长期使用通用占位推导。
+- 快照目前冻结 Event payload 和 event_version；后续日报产品还要冻结生成参数/算法版本、文案、投递批次和更正记录。
+- 数据库增长仍需 raw/blob 保留、候选归档和大表监控策略。
 
 ## 5. 已完成的真实实验
 
@@ -121,20 +112,18 @@ DeepSeek V4 Flash 首轮固定 100 篇 current、非 CVE duplicate master：
 | 已记录成功调用 token | 294,250 |
 | 平均 / P95 延迟 | 5,284 ms / 16,148 ms |
 
-后续 98 篇来源平衡样本：相关率 61.2%、证据精确命中 86%、结构失败 0。
-这些是工程与代理质量指标，不是人工金标 precision/recall/F1。
+后续 98 篇来源平衡样本：相关率 61.2%、证据精确命中 86%、结构失败 0。这些是工程与代理质量指标，不是人工金标 precision/recall/F1。
 
-## 6. 后续实施顺序
+## 6. 推荐后续顺序
 
-1. 完成本批部署硬化测试、clean-clone 验证和文档收敛。
-2. 修复 M2.2 失败审计与本体版本强约束。
-3. 将 M2.3 改为有界、确定性、可恢复的增量候选队列，再加入 Embedding。
-4. 增加有审计记录的 LLM relation adjudicator，强冲突继续硬阻断。
-5. 重写 Claim 冲突/支持语义，按 relation component 合并并持久化。
-6. 实现 shadow → formal Event 的幂等提升、版本、回滚与门禁。
-7. 实现每日热点快照和 `as_of` API。
-8. 增加数据保留/归档策略，完成一次 Apple Silicon 冷启动演练。
-9. M3 再接日报生成、邮件/飞书投递和更正通知。
+1. 完成本批全量 CI 等价测试、文档收敛和 clean-database 验证。
+2. 实现 Embedding/pgvector 候选召回，只生成候选，不绕过强冲突。
+3. 增加可审计的 LLM 关系裁决和中置信人工复核。
+4. 增加事件判断层：标题/摘要、影响、新颖性、紧急性、可信度和证据充分性。
+5. 增强冻结日报：算法参数、生成文案、更正记录、分页与投递批次。
+6. 实现数据保留/归档和容量监控。
+7. 在 Apple Silicon 新服务器完成空库冷启动演练。
+8. 进入 M3 邮件/飞书投递和更正通知。
 
 ## 7. 冷启动迁移门槛
 
@@ -143,10 +132,9 @@ DeepSeek V4 Flash 首轮固定 100 篇 current、非 CVE duplicate master：
 - clean clone 中 report 模板存在且可生成页面；
 - 空 PostgreSQL 18 可从零升级到 Alembic head；
 - migrate 成功后 API/worker 使用相同 Git SHA；
-- API/worker 均 healthy，worker 能持续刷新来源状态；
+- API/worker 均 healthy，worker 能持续抓取、生成关系候选和冻结快照；
 - PostgreSQL 不暴露公网，read/admin Token 分离；
-- Linux、macOS DB-free CI 和全部非 live 数据库测试通过；
-- 最高严重级别抓取与报告注入问题已修复。
+- Linux、macOS DB-free CI 和全部非 live 数据库测试通过。
 
 操作说明见 [部署与冷启动](./deployment.md)。
 
@@ -155,11 +143,6 @@ DeepSeek V4 Flash 首轮固定 100 篇 current、非 CVE duplicate master：
 - [README](../README.md)：能力概览、常用命令。
 - [部署与冷启动](./deployment.md)：Linux/macOS 配置、启动、升级、验收。
 - [M1 增量采集与分类](./m1-data-pipeline.md)：采集、生命周期和分类契约。
-- [M2.1 事件情报](./event-intelligence.md)：局部去重、事件、版本和证据。
+- [M2 事件情报](./event-intelligence.md)：局部去重、语义关系、正式提升、版本和快照。
 - [模型与 DeepSeek 配置](./model-configuration.md)：Profile、环境变量和密钥规则。
 - [评测目录](../evaluation/README.md)：确定性回归与可选 reviewed 样本。
-
-
-## 2026-08-03 hardening status
-
-Implemented in code and migration `33e4be894d94`: complete semantic call-attempt audit, strict ontology version, incremental recoverable relation queue, proposition-aware Claim conflicts, transactional/idempotent/version-guarded promotion rollback, and immutable daily snapshots with as-of lookup. The production/runtime database has not been migrated or restarted by this change.

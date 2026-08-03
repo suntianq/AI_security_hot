@@ -27,6 +27,10 @@ from ai_security_hot.models.semantic_tables import (
     DocumentEnrichment,
     ExtractedClaim,
     RelationVerdict,
+    SemanticComponentWorkItem,
+    SemanticPromotion,
+    SemanticRelationComponent,
+    SemanticRelationMembership,
     SemanticWorkItem,
 )
 from ai_security_hot.models.tables import Document, Event, SourceEndpoint
@@ -86,38 +90,39 @@ def _iso(dt: datetime | None) -> str | None:
 
 def collect(session, max_rows: int) -> dict[str, Any]:
     # only current, published documents (hide superseded/withdrawn/retired/rejected)
-    visible = (
-        (Document.source_status == "active")
-        & (Document.record_status == "published")
-    )
+    visible = (Document.source_status == "active") & (Document.record_status == "published")
 
-    total = session.execute(
-        select(func.count()).select_from(Document).where(visible)
-    ).scalar_one()
+    total = session.execute(select(func.count()).select_from(Document).where(visible)).scalar_one()
     total_bulk = session.execute(
-        select(func.count()).select_from(Document).where(
-            visible, Document.endpoint_id.in_(BULK_SOURCES)
-        )
+        select(func.count())
+        .select_from(Document)
+        .where(visible, Document.endpoint_id.in_(BULK_SOURCES))
     ).scalar_one()
 
     # aggregates (computed in SQL over the whole visible set)
     src_rows = session.execute(
         select(Document.endpoint_id, func.count())
-        .where(visible).group_by(Document.endpoint_id).order_by(desc(func.count()))
+        .where(visible)
+        .group_by(Document.endpoint_id)
+        .order_by(desc(func.count()))
     ).all()
     etype_rows = session.execute(
         select(Document.classified_event_type, func.count())
-        .where(visible).group_by(Document.classified_event_type).order_by(desc(func.count()))
+        .where(visible)
+        .group_by(Document.classified_event_type)
+        .order_by(desc(func.count()))
     ).all()
     lang_rows = session.execute(
         select(Document.language, func.count())
-        .where(visible).group_by(Document.language).order_by(desc(func.count()))
+        .where(visible)
+        .group_by(Document.language)
+        .order_by(desc(func.count()))
     ).all()
 
     # multi-label tags need per-row expansion — do it in Python over a capped scan
     tech_c: Counter = Counter()
     company_c: Counter = Counter()
-    for (td, cm) in session.execute(
+    for td, cm in session.execute(
         select(Document.tech_directions, Document.company_models).where(visible)
     ):
         for t in td or []:
@@ -195,40 +200,32 @@ def collect(session, max_rows: int) -> dict[str, Any]:
     ).scalar_one()
 
     # --- semantic enrichment summary (M2.2) ---
-    sem_total = session.execute(
-        select(func.count()).select_from(DocumentEnrichment)
-    ).scalar_one()
+    sem_total = session.execute(select(func.count()).select_from(DocumentEnrichment)).scalar_one()
     sem_relevant = session.execute(
-        select(func.count()).select_from(DocumentEnrichment).where(
-            DocumentEnrichment.relevant.is_(True)
-        )
+        select(func.count())
+        .select_from(DocumentEnrichment)
+        .where(DocumentEnrichment.relevant.is_(True))
     ).scalar_one()
     sem_with_batch = session.execute(
-        select(func.count()).select_from(DocumentEnrichment).where(
-            DocumentEnrichment.batch_id.is_not(None)
-        )
+        select(func.count())
+        .select_from(DocumentEnrichment)
+        .where(DocumentEnrichment.batch_id.is_not(None))
     ).scalar_one()
     sem_with_usage = session.execute(
-        select(func.count()).select_from(DocumentEnrichment).where(
-            DocumentEnrichment.usage != {}
-        )
+        select(func.count()).select_from(DocumentEnrichment).where(DocumentEnrichment.usage != {})
     ).scalar_one()
     sem_finish_reason = session.execute(
-        select(func.count()).select_from(DocumentEnrichment).where(
-            DocumentEnrichment.finish_reason.is_not(None)
-        )
+        select(func.count())
+        .select_from(DocumentEnrichment)
+        .where(DocumentEnrichment.finish_reason.is_not(None))
     ).scalar_one()
     sem_ct_rows = session.execute(
         select(DocumentEnrichment.content_type, func.count())
         .group_by(DocumentEnrichment.content_type)
         .order_by(desc(func.count()))
     ).all()
-    sem_atomic = session.execute(
-        select(func.count()).select_from(AtomicEvent)
-    ).scalar_one()
-    sem_claims = session.execute(
-        select(func.count()).select_from(ExtractedClaim)
-    ).scalar_one()
+    sem_atomic = session.execute(select(func.count()).select_from(AtomicEvent)).scalar_one()
+    sem_claims = session.execute(select(func.count()).select_from(ExtractedClaim)).scalar_one()
     sem_work_status = session.execute(
         select(SemanticWorkItem.status, func.count())
         .group_by(SemanticWorkItem.status)
@@ -247,6 +244,26 @@ def collect(session, max_rows: int) -> dict[str, Any]:
         .group_by(RelationVerdict.decision)
         .order_by(desc(func.count()))
     ).all()
+    active_components = session.execute(
+        select(func.count())
+        .select_from(SemanticRelationComponent)
+        .where(SemanticRelationComponent.status == "active")
+    ).scalar_one()
+    active_memberships = session.execute(
+        select(func.count())
+        .select_from(SemanticRelationMembership)
+        .where(SemanticRelationMembership.active.is_(True))
+    ).scalar_one()
+    component_work_rows = session.execute(
+        select(SemanticComponentWorkItem.status, func.count())
+        .group_by(SemanticComponentWorkItem.status)
+        .order_by(desc(func.count()))
+    ).all()
+    promotion_rows = session.execute(
+        select(SemanticPromotion.status, func.count())
+        .group_by(SemanticPromotion.status)
+        .order_by(desc(func.count()))
+    ).all()
     sem = {
         "total": sem_total,
         "relevant": sem_relevant,
@@ -260,6 +277,10 @@ def collect(session, max_rows: int) -> dict[str, Any]:
         "claims": sem_claims,
         "work_status": {(k or "?"): v for k, v in sem_work_status},
         "relations": {(k or "?"): v for k, v in relation_rows},
+        "active_components": active_components,
+        "active_memberships": active_memberships,
+        "component_work_status": {(k or "?"): v for k, v in component_work_rows},
+        "promotions": {(k or "?"): v for k, v in promotion_rows},
     }
 
     return {

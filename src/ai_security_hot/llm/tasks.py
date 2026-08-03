@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ValidationError
 
@@ -69,14 +69,10 @@ class ModelTaskAttempt:
     phase: str
     status: str
     raw_response: str | None = None
-    usage: dict = None  # type: ignore[assignment]
+    usage: dict = field(default_factory=dict)
     finish_reason: str | None = None
     validation_error: str | None = None
     provider_error: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.usage is None:
-            object.__setattr__(self, "usage", {})
 
 
 class ModelTaskFailure(RuntimeError):

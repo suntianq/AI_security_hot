@@ -1,6 +1,6 @@
-"""Claim merging for related atomic events (M2.4, shadow).
+"""Claim merging for same-event atomic components (M2.4).
 
-Groups ExtractedClaims from atomic events judged same/related by M2.3 into
+Groups ExtractedClaims from atomic events judged same-event by M2.3 into
 unified claims keyed by (claim_type, normalized_value). Each source document
 becomes evidence with a stance. Pure merging logic is DB-free; the repository
 layer reads/writes the formal Claim tables via the existing upsert path.

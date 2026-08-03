@@ -14,7 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Version of the semantic ontology (enum domains). Bumping this invalidates
 # cached enrichments / execution versions so older outputs are not re-used.
-ONTO_VERSION = "semantic-onto-v1"
+type OntologyVersion = Literal["semantic-onto-v1"]
+ONTO_VERSION: OntologyVersion = "semantic-onto-v1"
 
 ContentType = Literal[
     "news",
@@ -124,7 +125,7 @@ class DocumentSemanticOutput(StrictSemanticModel):
     entities: list[ExtractedEntity] = Field(max_length=50)
     atomic_events: list[AtomicEventExtraction] = Field(max_length=12)
     # Literal produces a JSON-Schema const and rejects stale/made-up ontologies.
-    ontology_version: Literal["semantic-onto-v1"]
+    ontology_version: OntologyVersion
 
     @model_validator(mode="after")
     def irrelevant_documents_have_no_events(self) -> DocumentSemanticOutput:

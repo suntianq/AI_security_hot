@@ -1,7 +1,7 @@
 # M2.1 可扩展事件情报实现说明
 
-> 状态：M2.1 基础能力已实现；M2.2 基础设施及首轮 100 篇影子实验已完成；按日期返回热点的业务 API 尚未开始<br>
-> 最后更新：2026-07-31<br>
+> 状态：M2.1 已完成；M2.2 影子抽取已加固；M2.3 有界增量关系队列和 M2.4 显式正式提升/回滚已实现；冻结热点 as_of API 已接通<br>
+> 最后更新：2026-08-03<br>
 > 算法版本：`signature-v3` / `dedupe-v2` / `cluster-v2`
 
 M2.1 将 M2.0 的“出现变化就重算整个 current corpus”改为持久化候选索引和局部图重算。目标仍然是保守合并：可以把低置信内容暂时拆开，但不能仅凭相似度把不同漏洞、发布或事故合并。
@@ -150,7 +150,7 @@ Self-check 的 `m2_incremental` 报告 signature_due、各阶段 work_pending、
 
 ## 8. 迁移、测试与部署
 
-当前迁移 head 为 `2b19e8eb334b`。迁移创建上述索引、队列、版本、事实表和持久 token 桶计数，并从 M2.0 的 `near_dup_of/id` 回填稳定 component ID；不删除 Document、Event 或旧证据。迁移已验证：全新数据库 upgrade、downgrade 到上一版本、再次 upgrade 均成功。
+当前迁移 head 为 `6f23c8a1d4b7`。迁移创建上述索引、队列、版本、事实表和持久 token 桶计数，并从 M2.0 的 `near_dup_of/id` 回填稳定 component ID；不删除 Document、Event 或旧证据。迁移已验证：全新数据库 upgrade、downgrade 到上一版本、再次 upgrade 均成功。
 
 GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签名确定性、相似候选、人工批准、强冲突不可越过、新强身份、质量指标、局部退役重选主、未受影响事件不改版本、EventVersion 和 Claim 支持/反驳证据。
 
@@ -170,9 +170,9 @@ GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签�
 - pgvector/embedding 未启用。影子实验确认召回质量、成本和延迟可接受后可作为候选层加入，但仍不能自动绕过强冲突。
 - 自动 Claim 目前只覆盖事件摘要和强身份；影响范围、已利用状态、修复版本等领域 Claim 需要在后续抽取/管理接口中逐项增加。
 - M2.2 已增加默认关闭的影子语义富化、实体、原子事件和抽取 Claim 表，但尚未影响生产 Event。
-- M2.3 已有共享实体候选和确定性关系裁决影子表；Embedding、LLM 裁决和增量候选队列仍未实现。
-- M2.4 只有 Claim 合并与提升预览；正式事件写入、回滚和正确的冲突语义仍未实现。
-- 日期热点 API 已能按当前 `last_seen_at` 查询；冻结日报、`as_of` 和历史排名尚未实现。
+- M2.3 已实现强实体过滤、游标、有界候选桶、租约恢复、fencing token、重试和版本化确定性裁决；Embedding 与 LLM 裁决仍未实现。
+- M2.4 已按当前 `same_event` 连通组件合并 Claim；显式 apply 事务写入正式 Event，支持幂等重试、完整版本和受保护回滚。置信度不再被误当成矛盾立场。
+- 日期热点已经使用不可变 revision 和 advisory lock 冻结；worker 自动生成，`as_of` 选择该时点前已存储的版本。它不重建尚未生成的任意历史状态。
 
 各里程碑完成度、首轮实验口径和推荐实施顺序统一见 [项目当前状态与后续路线](./current-status.md)。
 
@@ -185,17 +185,27 @@ GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签�
 
 - Every LLM initial/repair call is recorded in `semantic_model_attempts`, including full safe response text, usage, finish reason, validation/provider error, durable retry number and call ordinal. API keys and request headers are never stored.
 - `ontology_version` is a JSON-Schema constant (`semantic-onto-v1`); mismatched model output fails validation and enters the audited repair/retry path.
-- Relation recall uses `relation_scan_states` plus leased `relation_candidates`. `relation-scan` scans only new atomic events, applies seed/pair/bucket bounds, and recovers expired leases with bounded exponential retry.
+- Relation recall uses `relation_scan_states` plus leased `relation_candidates`. `relation-scan` scans only new atomic events, applies seed/pair/bucket bounds, and recovers expired leases with bounded exponential retry; an expired final attempt is moved to failed instead of remaining stuck in running.
 - Claim confidence is no longer treated as polarity. Only explicit incompatible boolean or known opposite proposition values become `disputed`; identical propositions remain supporting evidence regardless of confidence spread.
 - `event-promote` remains preview-only by default. `--apply` writes `semantic_promotions`, Event/EventDocument/Claim/Evidence/EventVersion in one transaction. Identical retries are no-ops; `event-promotion-rollback --promotion-id ID` refuses rollback if a newer event version exists.
 - `daily-snapshot --date YYYY-MM-DD` freezes ranked payloads with their event versions. `/v1/daily-hotspots?...&as_of=<RFC3339>` returns the latest stored revision at or before that instant and never reconstructs from mutable current Events.
 
+### Persistent semantic relation components
+
+- semantic_relation_components stores a stable component key, revision, state and current member count.
+- semantic_relation_memberships keeps active and historical memberships; a partial unique index permits only one active component per atomic event and algorithm version.
+- semantic_component_work_items uses requested/completed generations, leases and fencing tokens. If a new invalidation arrives while a worker is running, completion returns the row to pending instead of losing the newer request. Periodic discovery is idempotent while a generation remains open, does not reset terminal failures, and marks an exhausted expired lease as failed.
+- Each rebuild closes only over the seed, its previous memberships and reachable current relation-v2 same-event edges. Retired or withdrawn atomic events cannot bridge two current groups.
+- Split reconciliation assigns the old ID to the strongest deterministic overlap; merge reconciliation keeps one stable ID and supersedes the others. No material membership change means no component revision churn.
+- Promotion reads only complete active components. It locks and revalidates component ID, key, revision and membership before apply. Each component revision receives a separate promotion audit row.
+- Migration 6f23c8a1d4b7 creates the component tables and queues backfill seeds for existing relation-v2 same-event verdicts.
+
 Operational examples:
 
 ```bash
-uv run ai-security-hot relation-scan --limit 100
-uv run ai-security-hot event-promote --limit 50
-uv run ai-security-hot event-promote --limit 50 --apply
-uv run ai-security-hot event-promotion-rollback --promotion-id 123
-uv run ai-security-hot daily-snapshot --date 2026-08-03 --tz Asia/Shanghai
+uv run intel relation-scan --limit 100
+uv run intel event-promote --limit 50
+uv run intel event-promote --limit 50 --apply
+uv run intel event-promotion-rollback --promotion-id 123
+uv run intel daily-snapshot --date 2026-08-03 --tz Asia/Shanghai
 ```

@@ -11,7 +11,11 @@ import respx
 
 from ai_security_hot.config.models import load_model_profiles, resolve_model_config
 from ai_security_hot.config.settings import Settings
-from ai_security_hot.llm.provider import OpenAICompatibleProvider, provider_cache_namespace
+from ai_security_hot.llm.provider import (
+    ModelProviderError,
+    OpenAICompatibleProvider,
+    provider_cache_namespace,
+)
 from ai_security_hot.llm.registry import build_provider
 
 
@@ -148,7 +152,7 @@ def test_json_object_mode_and_full_endpoint_are_deepseek_compatible() -> None:
         return_value=httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": "```json\n{\"ok\": true}\n```"}}],
+                "choices": [{"message": {"content": '```json\n{"ok": true}\n```'}}],
                 "usage": {"total_tokens": 12},
             },
         )
@@ -183,7 +187,7 @@ def test_prompt_only_omits_unsupported_response_format() -> None:
     route = respx.post("https://gateway.example/v1/chat/completions").mock(
         return_value=httpx.Response(
             200,
-            json={"choices": [{"message": {"content": "{\"ok\": true}"}}]},
+            json={"choices": [{"message": {"content": '{"ok": true}'}}]},
         )
     )
     provider = OpenAICompatibleProvider(
@@ -203,6 +207,39 @@ def test_prompt_only_omits_unsupported_response_format() -> None:
     payload = json.loads(route.calls[0].request.content)
     assert "response_format" not in payload
     assert "complete JSON Schema" in payload["messages"][0]["content"]
+
+
+@respx.mock
+def test_non_text_response_retains_complete_audit_context() -> None:
+    payload = {
+        "choices": [
+            {
+                "message": {"content": [{"type": "text", "text": "not plain text"}]},
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    respx.post("https://gateway.example/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=payload)
+    )
+    provider = OpenAICompatibleProvider(
+        base_url="https://gateway.example/v1",
+        api_key="test-key",
+        model="deepseek-v4",
+    )
+
+    with pytest.raises(ModelProviderError) as caught:
+        provider.complete(
+            system="Return JSON only.",
+            user="{}",
+            output_schema={"title": "Output", "type": "object"},
+            max_output_tokens=100,
+        )
+
+    assert json.loads(caught.value.raw_response or "{}") == payload
+    assert caught.value.usage == payload["usage"]
+    assert caught.value.finish_reason == "length"
 
 
 def test_cache_namespace_changes_with_endpoint_or_response_mode() -> None:

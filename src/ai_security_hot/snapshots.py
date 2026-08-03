@@ -7,7 +7,7 @@ from datetime import UTC, date, datetime, time
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
 
 from ai_security_hot.models.tables import (
@@ -52,6 +52,11 @@ def generate_daily_snapshot(
         )
     )
     scope = category or "all"
+    lock_key = f"daily-hotspot:{natural_date.isoformat()}:{timezone}:{scope}"
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": lock_key},
+    )
     if category:
         stmt = stmt.where(Event.category == category)
     rows = session.execute(

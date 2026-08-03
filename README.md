@@ -3,7 +3,7 @@
 把 AI/安全情报的采集能力融为一个稳定、可扩展的后端。基于 `docs/` 设计文档
 （[当前状态与路线](docs/current-status.md) · [MVP 设计](docs/mvp-design.md) · [整体蓝图](docs/system-design.md) ·
 [信源注册表](docs/source-registry.md) · [M1 增量与分类](docs/m1-data-pipeline.md) · [M2 事件情报](docs/event-intelligence.md) · [模型与 DeepSeek 配置](docs/model-configuration.md) · [部署与冷启动](docs/deployment.md)）实现的
-**M0 工程骨架 + M1 结构化采集 + M2.1 事件情报底座 + M2.2 影子语义富化 + M2.3 关系裁决 + M2.4 提升预览 + NVD 隔离**。
+**M0 工程骨架 + M1 结构化采集 + M2.1 事件情报底座 + M2.2 影子语义富化 + M2.3 增量关系裁决 + M2.4 可回滚正式提升 + 冻结热点快照 + NVD 隔离**。
 
 ## 已实现
 
@@ -51,16 +51,16 @@
 - **NVD + CISA KEV 完全隔离**：结构化漏洞源按自身 `cve-nvd:` 命名空间去重/聚类，不与新闻交叉；事件打 `category` 标签（`vuln_db` / `general`）。
 - **旧事件清理**：隔离迁移后旧的 `cve:` 事件通过 EventVersion supersede 保留历史，退出当前视图（修复"事件数 > 文档数"的口径问题）。
 - **多 CVE fan-out 修复**：NVD 解析器只保留记录自身 CVE 身份，不再从描述正文扫描次要 CVE/GHSA/CNVD。
-- **日期热点 API**：`GET /v1/daily-hotspots?date&tz&category` 按自然日+时区返回去重热点，general/vuln_db 可分别筛选。
+- **冻结日期热点 API**：worker 为当天和前一天生成不可变 revision；`GET /v1/daily-hotspots?date&tz&category&as_of` 读取指定时点前已冻结的去重热点，general/vuln_db 可分别筛选。
 
 ### M2.2 影子语义富化基础 + M2.3/M2.4 语义情报
 
 - **严格语义契约**：相关性、通用实体、0～N 个原子事件和 Claim 均通过严格 JSON Schema/Pydantic 校验；实体类型含 `benchmark`，本体版本 `semantic-onto-v1`。
 - **运行稳定化（M2.2.1）**：失败响应审计（raw_response/finish_reason/usage）、有界结构修复（校验失败重试一次）、batch_id 可重放、`max_attempts` 终止态。
 - **分层评测（M2.2.2）**：`intel semantic-sample` 按来源平衡抽样（16 源均匀）、`intel semantic-eval` 聚合相关率/证据命中/成本，按来源与内容类型拆解。
-- **关系裁决（M2.3）**：`intel relation-scan` 跨文档原子事件候选召回 + `same/related/different` 确定性裁决，写 `relation_verdicts` 影子表。
-- **Claim 合并与提升预览（M2.4）**：`intel claim-merge` 合并同事件 Claims（support/contradict 立场）；`intel event-promote --dry-run` 生成门禁通过的提升预览（默认影子，不写正式 Event）。
-- **默认关闭且仅影子模式**：升级不会自动调用模型，也不会改变现有 Event/聚类；提升预览默认 dry-run。
+- **关系裁决与稳定组件（M2.3）**：`intel relation-scan` 通过游标、强实体 blocking 和有界持久队列写入版本化裁决；same-event 关系再由 generation-fenced 局部队列物化成稳定 component ID、revision 和历史 membership，worker 自动运行。
+- **Claim 合并与正式提升（M2.4）**：只读取完整的当前持久组件；正式事件使用稳定 component key，每个 component revision 产生独立 promotion 审计。预览从 AtomicEvent/Document 推导类型、主题和时间；显式 `--apply` 才写正式事件。
+- **安全默认值**：M2.2 模型调用默认关闭且只写影子表；正式提升默认只预览，worker 不会自动执行 `--apply`。
 - **可切换模型 Profile**：M1.3 与 M2.2 共用 `config/models.yaml`；环境变量优先覆盖 URL/模型，API Key 只允许从环境注入；兼容 `json_schema/json_object/prompt_only`。
 
 98 篇平衡样本评测：相关率 61.2%、证据精确命中 86%、结构失败 0。结果默认只写影子表，未参与正式事件。当前完成度与推荐实施顺序见 [项目当前状态与后续路线](docs/current-status.md)，接入 DeepSeek 或私有网关见 [模型配置](docs/model-configuration.md)。
@@ -140,9 +140,11 @@ uv run intel llm-config                                  # 只校验最终模型
 uv run intel semantic-enrich --limit 5 --force            # 显式运行一批影子语义富化（会调用已配置模型）
 uv run intel semantic-sample --size 100 --batch m2.2.2-eval-v1  # 分层平衡抽样（16 源）
 uv run intel semantic-eval --batch m2.2.2-eval-v1         # 语义评测聚合（相关率/证据/成本）
-uv run intel relation-scan --min-documents 2              # M2.3 跨文档关系裁决（影子）
+uv run intel relation-scan --limit 100                    # M2.3 有界增量关系队列/裁决
 uv run intel claim-merge --limit 200                      # M2.4 Claim 合并（影子）
-uv run intel event-promote --limit 50 --dry-run           # M2.4 提升预览（默认不写正式表）
+uv run intel event-promote --limit 50                 # 默认只预览
+uv run intel event-promote --limit 50 --apply         # 显式正式提升
+uv run intel event-promotion-rollback --promotion-id 123
 uv run intel supersede-stale-vuln --limit 2000            # 清理隔离前旧 cve: 事件
 uv run intel m2-reviews --status pending --limit 50    # 查看低置信候选
 uv run intel stats       # 文档、近重复、事件和证据数量
@@ -167,7 +169,7 @@ uv run python scripts/gen_report.py report.html        # 默认最多嵌入 30,0
 uv run python scripts/gen_report.py report.html 50000  # 可选：调整浏览器内明细上限
 ```
 
-报告中的全库统计始终精确；文档明细按上限保留最新当前记录及最多 5,000 条历史记录。页面同时展示能力地图、事件/证据/版本/Claim、M2 候选复核和运行审计、语义影子状态及信源健康；事件样本最多 4,000 条，并优先保留 75% 非 CVE 热点。
+报告中的全库统计始终精确；文档明细按上限保留最新当前记录及最多 5,000 条历史记录。页面同时展示能力地图、事件/证据/版本/Claim、M2 候选复核和运行审计、语义影子状态、稳定关系组件/队列/promotion revision 及信源健康；事件样本最多 4,000 条，并优先保留 75% 非 CVE 热点。
 
 验证 API。健康探针无需认证；读取接口和 `/ops/*` 分别使用只读、管理员 Token：
 
@@ -278,26 +280,25 @@ src/ai_security_hot/
   parsers/      各源 Parser（rss/cisa_kev/nvd/github_releases/web_article/arxiv/sitemap_article）+ normalize
   classify/     RuleClassifier + HybridClassifier + 严格 Schema + taxonomy.yaml
   events/       M2 去重/事件规则、持久化签名、质量评测和候选判断
-  semantic/     语义任务、实体/原子事件抽取、抽样、评测、关系裁决、Claim 合并、提升预览
+  semantic/     语义任务、实体/原子事件抽取、抽样、评测、持久关系队列、Claim 合并、正式提升/回滚
   storage/      BlobStore + repositories + event_repository + semantic_repository
   pipelines/    fetch/normalize/fulltext/classify/semantic/dedupe/cluster stages
-  jobs/         独立 fetch/normalize/fulltext/classify/event 调度 + self_check
+  jobs/         独立采集/分类/事件/语义关系/冻结快照调度 + self_check
   api/          FastAPI 只读/运维接口（含 /v1/daily-hotspots）
   cli.py        intel CLI（采集、分类、事件、语义、关系、提升、导出与运维）
 config/         models.yaml（DeepSeek/OpenAI-compatible 非敏感 Profile）
 sources/        sources.yaml（19 个配置项：18 active + 1 retired）+ taxonomy.yaml
-migrations/     Alembic（initial + M1 + M2.0/M2.1/M2.2/M2.2.1/M2.3）
+migrations/     Alembic（initial + M1 + M2.0/M2.1/M2.2/M2.2.1/M2.3/M2.4 lifecycle）
 evaluation/     M2 去重/语义样本（m2.2.2-eval-v1）+ 离线诊断指标
 tests/          unit / smoke / event intelligence + semantic + PostgreSQL integration + opt-in live crawl
 ```
 
-## 后续（M2.4+）
+## 后续（M2.5+）
 
-- **正式提升启用**：M2.4 `event-promote` 当前默认 dry-run；达到门禁且确认命名空间对齐后显式启用影子→正式 Event 提升。
 - **Embedding/pgvector 召回**：M2.3 当前用确定性（共享实体+时间）召回；按实际指标触发再引入向量增强。
 - **LLM-as-judge**：M2.2.2 当前用规则聚合；独立 judge 作为代理指标（不命名 F1）。
 - **延迟 p50/p95**：语义评测当前为 null，需持久化每篇 started_at。
-- **日报与投递**：日报冻结/生成/版本化 + 飞书/邮件投递幂等。
+- **日报与投递**：冻结快照已完成；后续增加文案版本、更正记录和飞书/邮件投递幂等。
 - **更多信源**：在当前 active endpoint 基础上扩展至约 35 个。
 - Parser 漂移检测。均由实际指标触发，不提前引入。
 
@@ -309,7 +310,7 @@ tests/          unit / smoke / event intelligence + semantic + PostgreSQL integr
 Generate a revision after clustering/promotion, then serve it immutably:
 
 ```bash
-uv run ai-security-hot daily-snapshot --date 2026-08-03 --tz Asia/Shanghai
+uv run intel daily-snapshot --date 2026-08-03 --tz Asia/Shanghai
 curl "http://localhost:8000/v1/daily-hotspots?date=2026-08-03&tz=Asia/Shanghai&as_of=2026-08-03T23:59:59%2B08:00"
 ```
 

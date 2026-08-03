@@ -728,7 +728,7 @@ docker compose up
 - Worker 中断后重新启动。
 - SSRF、重定向、超大响应和恶意 HTML。
 
-当前测试共 81 项，其中 80 项非 live；最近一次完整非 live 验证结果为 77 passed、3 skipped、1 live deselected。测试覆盖 AI HOT snapshot/changes/remove/409、CISA 权威快照撤回、NVD 参数、HTTP 重试、M1.3 Schema/白名单/CVE bypass，M2.1 持久化索引、局部重算、强冲突、候选复核和版本事实，以及 M2.2 模型配置、语义 Schema、证据定位和 PostgreSQL 事务落库；投递仍属于后续里程碑。
+当前测试共 113 项，其中 112 项非 live；最近一次完整非 live 验证结果为 112 passed、1 live deselected。测试覆盖 AI HOT snapshot/changes/remove/409、CISA 权威快照撤回、NVD 参数、HTTP 重试、M1.3 Schema/白名单/CVE bypass，M2.1 持久化索引、局部重算、强冲突、候选复核和版本事实，以及 M2.2 模型配置、语义 Schema、调用审计和 PostgreSQL 事务落库，以及 M2.3/M2.4 版本化关系、退役桥隔离、提升幂等、完整回滚和冻结快照；投递仍属于后续里程碑。
 
 ### 16.2 最小指标
 
@@ -808,7 +808,7 @@ MVP 使用结构化日志、`/health`、`/stats` 和 self-check；self-check 已
 - JSONL 评测器和 `M2Run` 审计已接通；PostgreSQL advisory lock 保证阶段单写。
 - Worker、`intel eventize`、`/events` 列表/详情、`/stats` 和 self-check 已接通。
 
-M2.1 基础完成标准已达到。M2.2 已具备严格 Schema、证据定位、影子落库和分层实验；M2.3 已有确定性关系裁决影子版本，M2.4 已有 Claim 合并与提升预览，日期热点 API 已提供当前态查询。Embedding/LLM 裁决、正确的 Claim 冲突合并、正式事件提升和冻结日报仍未实现。详见 [当前状态与后续路线](./current-status.md) 和 [M2 事件情报实现说明](./event-intelligence.md)。
+M2.1 基础完成标准已达到。M2.2 已具备严格 Schema、逐次调用审计、本体常量、证据定位、影子落库和分层实验；M2.3 已升级为有界、版本化、可恢复的关系队列；M2.4 已实现命题级 Claim 冲突、same-event 组件、显式正式提升、幂等和受保护回滚；日期热点使用不可变 revision 并支持 as_of。Embedding/LLM 关系裁决、跨完全消失组件的历史身份复用、日报文案和投递仍未实现。详见 [当前状态与后续路线](./current-status.md) 和 [M2 事件情报实现说明](./event-intelligence.md)。
 
 ### M3：日报与推送
 

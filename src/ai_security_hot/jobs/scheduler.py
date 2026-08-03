@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 
@@ -86,6 +87,54 @@ def semantic_tick() -> None:
         log.info("semantic_tick: %s", run_semantic_enrichment_stage())
     except Exception:
         log.exception("semantic_tick failed")
+
+
+def relation_tick() -> None:
+    """Advance and drain the durable M2.3 candidate queue in bounded batches."""
+    try:
+        from ai_security_hot.semantic.candidate_scan import run_incremental_relation_scan
+        from ai_security_hot.semantic.components import run_component_stage
+
+        settings = get_settings()
+        limit = settings.relation_scan_batch_size
+        relation_summary = run_incremental_relation_scan(
+            seed_limit=limit, pair_limit=limit * 5, work_limit=limit
+        )
+        component_summary = run_component_stage(
+            discovery_limit=limit * 5,
+            work_limit=limit,
+            max_atomic_events=settings.m2_max_local_documents,
+        )
+        log.info(
+            "relation_tick: relations=%s components=%s",
+            relation_summary,
+            component_summary,
+        )
+    except Exception:
+        log.exception("relation_tick failed")
+
+
+def daily_snapshot_tick() -> None:
+    """Freeze current and previous natural-day rankings; unchanged content is a no-op."""
+    try:
+        from ai_security_hot.snapshots import generate_daily_snapshot
+
+        settings = get_settings()
+        timezone = ZoneInfo(settings.daily_snapshot_timezone)
+        today = datetime.now(timezone).date()
+        results = []
+        with session_scope() as session:
+            for natural_date in (today - timedelta(days=1), today):
+                row = generate_daily_snapshot(
+                    session,
+                    natural_date=natural_date,
+                    timezone=settings.daily_snapshot_timezone,
+                    limit=settings.daily_snapshot_limit,
+                )
+                results.append((natural_date.isoformat(), int(row.id), int(row.revision)))
+        log.info("daily_snapshot_tick: %s", results)
+    except Exception:
+        log.exception("daily_snapshot_tick failed")
 
 
 def event_tick() -> None:
@@ -174,6 +223,26 @@ def run_worker() -> None:
             coalesce=True,
             next_run_time=first_run,
         )
+    if settings.relation_scan_enabled:
+        scheduler.add_job(
+            relation_tick,
+            "interval",
+            seconds=settings.relation_scan_interval_seconds,
+            id="relation_scan",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=first_run,
+        )
+    if settings.daily_snapshot_enabled:
+        scheduler.add_job(
+            daily_snapshot_tick,
+            "interval",
+            seconds=settings.daily_snapshot_interval_seconds,
+            id="daily_snapshot",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=first_run,
+        )
     scheduler.add_job(
         event_tick,
         "interval",
@@ -193,11 +262,14 @@ def run_worker() -> None:
     )
     log.info(
         "worker started: fetch=%ds normalize=%ds fulltext=%ds "
-        "classify=%ds event=%ds self_check=%ds",
+        "classify=%ds semantic=%s relation=%s snapshot=%s event=%ds self_check=%ds",
         settings.tick_interval_seconds,
         settings.normalize_interval_seconds,
         settings.fulltext_interval_seconds,
         settings.classification_interval_seconds,
+        "on" if settings.semantic_enrichment_enabled else "off",
+        "on" if settings.relation_scan_enabled else "off",
+        "on" if settings.daily_snapshot_enabled else "off",
         settings.event_interval_seconds,
         settings.self_check_interval_seconds,
     )

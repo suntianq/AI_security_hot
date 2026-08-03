@@ -1,9 +1,8 @@
-"""Repository layer for M2.4 claim merging (shadow only, no formal writes).
+"""Repository layer for M2.4 same-event Claim merging.
 
-Reads related atomic-event pairs from relation_verdicts, loads their extracted
-claims, and merges them for preview. Merged claims are never written to the
-formal Claim table here; the promotion path (B2) is intentionally gated and
-currently only produces a dry-run preview.
+Only current relation-algorithm ``same_event`` verdicts are eligible. This
+module returns a shadow summary; formal writes remain behind the explicit,
+transactional promotion command.
 """
 
 from __future__ import annotations
@@ -16,9 +15,8 @@ from sqlalchemy.orm import Session
 from ai_security_hot.models.semantic_tables import (
     AtomicEvent,
     ExtractedClaim,
-    RelationVerdict,
 )
-from ai_security_hot.semantic.claim_merge import SourceClaim, merge_related_pair
+from ai_security_hot.semantic.claim_merge import SourceClaim, merge_claims
 
 log = logging.getLogger("intel.claim_merge")
 
@@ -62,31 +60,30 @@ def run_claim_merge(
     *,
     limit: int = 200,
 ) -> dict:
-    """Merge claims for related atomic-event pairs; return summary (shadow, no persist)."""
-    verdicts = session.execute(
-        select(RelationVerdict).where(
-            RelationVerdict.decision.in_(["related_event", "same_event"])
-        ).limit(limit)
-    ).scalars().all()
-    if not verdicts:
-        return {"pairs": 0, "merged_claims": 0, "pairs_merged": 0}
+    """Merge each current same-event component once; return a shadow summary."""
+    from ai_security_hot.semantic.promotion import load_same_event_components
 
-    atomic_ids = {v.left_atomic_id for v in verdicts} | {v.right_atomic_id for v in verdicts}
+    components = load_same_event_components(session, limit=limit)
+    if not components:
+        return {"components": 0, "components_with_claims": 0, "merged_claims": 0}
+
+    atomic_ids = {value for component in components for value in component.atomic_ids}
     claims_by_atomic = _load_claims_for_atomics(session, atomic_ids)
-
     merged_total = 0
-    pairs_with_claims = 0
-    for verdict in verdicts:
-        left_claims = claims_by_atomic.get(verdict.left_atomic_id, [])
-        right_claims = claims_by_atomic.get(verdict.right_atomic_id, [])
-        if not left_claims or not right_claims:
+    components_with_claims = 0
+    for component in components:
+        source_claims = [
+            claim
+            for atomic_id in component.atomic_ids
+            for claim in claims_by_atomic.get(atomic_id, [])
+        ]
+        if not source_claims:
             continue
-        merged = merge_related_pair(left_claims, right_claims)
-        merged_total += len(merged)
-        pairs_with_claims += 1
+        merged_total += len(merge_claims(source_claims))
+        components_with_claims += 1
 
     return {
-        "pairs": len(verdicts),
-        "pairs_with_claims": pairs_with_claims,
+        "components": len(components),
+        "components_with_claims": components_with_claims,
         "merged_claims": merged_total,
     }

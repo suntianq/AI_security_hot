@@ -111,6 +111,15 @@ class Settings(BaseSettings):
     # reproducible experiment batch tag (M2.2.1 1d)
     semantic_enrichment_batch_id: str | None = Field(default=None)
 
+    # --- M2.3 relation queue and frozen daily snapshots ---
+    relation_scan_enabled: bool = Field(default=True)
+    relation_scan_interval_seconds: int = Field(default=120, ge=10)
+    relation_scan_batch_size: int = Field(default=100, ge=1, le=1000)
+    daily_snapshot_enabled: bool = Field(default=True)
+    daily_snapshot_interval_seconds: int = Field(default=900, ge=60)
+    daily_snapshot_timezone: str = Field(default="Asia/Shanghai")
+    daily_snapshot_limit: int = Field(default=100, ge=1, le=500)
+
     # --- API security / build identity ---
     # Read and administrative operations use separate environment-only tokens.
     api_token: str | None = Field(default=None, min_length=8)

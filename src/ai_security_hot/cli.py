@@ -185,7 +185,7 @@ def semantic_eval(
 
 @app.command("claim-merge")
 def claim_merge(limit: int = typer.Option(200, min=1)) -> None:
-    """Merge claims for related atomic-event pairs (M2.4, shadow summary)."""
+    """Merge claims for same-event atomic-event pairs (M2.4, shadow summary)."""
     from ai_security_hot.models.base import session_scope
     from ai_security_hot.semantic.claim_merge_repo import run_claim_merge
 
@@ -196,66 +196,110 @@ def claim_merge(limit: int = typer.Option(200, min=1)) -> None:
 
 @app.command("event-promote")
 def event_promote(
-    limit: int = typer.Option(50, min=1),
+    limit: int = typer.Option(1000, min=1),
     apply: bool = typer.Option(
-        False, "--apply", help="persist gated promotions; preview is default"
+        False, "--apply", help="persist gated same-event components; preview is default"
     ),
 ) -> None:
-    """Preview by default; --apply persists gated promotions transactionally."""
+    """Preview or apply stable connected components built only from same_event edges."""
+    from collections import Counter
+
     from sqlalchemy import select
 
     from ai_security_hot.models.base import session_scope
-    from ai_security_hot.models.semantic_tables import RelationVerdict
-    from ai_security_hot.semantic.claim_merge_repo import (
-        _load_claims_for_atomics,
-        merge_related_pair,
+    from ai_security_hot.models.semantic_tables import AtomicEvent
+    from ai_security_hot.models.tables import Document
+    from ai_security_hot.semantic.claim_merge import merge_claims
+    from ai_security_hot.semantic.claim_merge_repo import _load_claims_for_atomics
+    from ai_security_hot.semantic.promotion import (
+        apply_promotion,
+        build_promotion_preview,
+        load_same_event_components,
     )
-    from ai_security_hot.semantic.promotion import apply_promotion, build_promotion_preview
 
     _setup_logging()
     with session_scope() as session:
-        verdicts = (
-            session.execute(
-                select(RelationVerdict)
-                .where(RelationVerdict.decision.in_(["related_event", "same_event"]))
-                .limit(limit)
+        components = load_same_event_components(session, limit=limit)
+        atomic_ids = {value for component in components for value in component.atomic_ids}
+        claims_by_atomic = _load_claims_for_atomics(session, atomic_ids)
+        atomic_rows = {
+            int(row.id): row
+            for row in session.execute(
+                select(
+                    AtomicEvent.id,
+                    AtomicEvent.document_id,
+                    AtomicEvent.event_type,
+                    AtomicEvent.summary,
+                    AtomicEvent.confidence,
+                    Document.published_at_utc,
+                    Document.tech_directions,
+                )
+                .join(Document, Document.id == AtomicEvent.document_id)
+                .where(AtomicEvent.id.in_(atomic_ids))
             )
-            .scalars()
-            .all()
-        )
-        atomic_ids = {v.left_atomic_id for v in verdicts} | {v.right_atomic_id for v in verdicts}
-        claims = _load_claims_for_atomics(session, atomic_ids)
+        }
         previews = []
-        for verdict in verdicts:
-            left_claims = claims.get(verdict.left_atomic_id, [])
-            right_claims = claims.get(verdict.right_atomic_id, [])
-            if not left_claims or not right_claims:
+        for component in components:
+            source_claims = [
+                claim
+                for atomic_id in component.atomic_ids
+                for claim in claims_by_atomic.get(atomic_id, [])
+            ]
+            if not source_claims:
                 continue
-            merged = merge_related_pair(left_claims, right_claims)
-            left_docs = {c.document_id for c in left_claims}
-            right_docs = {c.document_id for c in right_claims}
-            doc_ids = sorted(left_docs | right_docs)
-            title = merged[0].text[:80] if merged else "Merged semantic event"
-            summary = " ".join(m.text for m in merged[:3])[:500]
+            merged = merge_claims(source_claims)
+            rows = [atomic_rows[value] for value in component.atomic_ids if value in atomic_rows]
+            if not rows:
+                continue
+            document_ids = sorted({int(row.document_id) for row in rows})
+            best_atomic = max(rows, key=lambda row: (float(row.confidence), -int(row.id)))
+            title = str(best_atomic.summary)[:160]
+            summary = " ".join(item.text for item in merged[:3])[:500]
+            event_type = Counter(str(row.event_type) for row in rows).most_common(1)[0][0]
+            topics = [
+                str(topic)
+                for row in rows
+                for topic in (row.tech_directions or [])
+                if topic != "cve"
+            ]
+            topic = Counter(topics).most_common(1)[0][0] if topics else "security_for_ai"
+            published_times = [row.published_at_utc for row in rows if row.published_at_utc]
+            first_seen_at = min(published_times) if published_times else None
+            last_seen_at = max(published_times) if published_times else None
             preview = build_promotion_preview(
-                fingerprint=f"semantic:{verdict.left_atomic_id}:{verdict.right_atomic_id}",
+                fingerprint=component.fingerprint,
                 title=title,
                 summary=summary,
-                event_type="incident",
-                topic="security_for_ai",
+                event_type=event_type,
+                topic=topic,
                 category="general",
-                document_ids=doc_ids,
+                document_ids=document_ids,
                 merged_claim_count=len(merged),
+                first_seen_at=first_seen_at,
+                last_seen_at=last_seen_at,
             )
-            payload = preview.as_dict()
+            payload = {
+                **preview.as_dict(),
+                "component_id": component.id,
+                "component_revision": component.revision,
+                "atomic_ids": component.atomic_ids,
+            }
             if apply and preview.gated:
-                promotion, changed = apply_promotion(session, preview, merged)
+                promotion, changed = apply_promotion(
+                    session,
+                    preview,
+                    merged,
+                    atomic_ids=component.atomic_ids,
+                    relation_component_id=component.id,
+                    component_key=component.component_key,
+                    component_revision=component.revision,
+                )
                 payload.update({"promotion_id": promotion.id, "applied": changed})
             previews.append(payload)
-        gated = sum(1 for p in previews if p["gated"])
+        gated = sum(1 for item in previews if item["gated"])
         typer.echo(
             json.dumps(
-                {"previews": len(previews), "gated_met": gated, "sample": previews[:5]},
+                {"components": len(previews), "gated_met": gated, "sample": previews[:5]},
                 ensure_ascii=False,
                 indent=2,
             )
@@ -264,20 +308,21 @@ def event_promote(
 
 @app.command("relation-scan")
 def relation_scan(
-    min_documents: int = typer.Option(2, min=2),
     limit: int = typer.Option(500, min=1),
 ) -> None:
     """Scan cross-document atomic-event candidate pairs and adjudicate (M2.3, shadow)."""
-    from ai_security_hot.models.base import session_scope
+    from ai_security_hot.config.settings import get_settings
+    from ai_security_hot.semantic.candidate_scan import run_incremental_relation_scan
+    from ai_security_hot.semantic.components import run_component_stage
 
     _setup_logging()
-    with session_scope() as session:
-        from ai_security_hot.semantic.candidate_scan import run_incremental_relation_scan
-
-        summary = run_incremental_relation_scan(
-            session, seed_limit=limit, pair_limit=limit, work_limit=limit
-        )
-        typer.echo(json.dumps(summary, ensure_ascii=False))
+    summary = run_incremental_relation_scan(seed_limit=limit, pair_limit=limit, work_limit=limit)
+    summary["components"] = run_component_stage(
+        discovery_limit=limit * 5,
+        work_limit=limit,
+        max_atomic_events=get_settings().m2_max_local_documents,
+    )
+    typer.echo(json.dumps(summary, ensure_ascii=False))
 
 
 @app.command("semantic-sample")

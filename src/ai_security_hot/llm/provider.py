@@ -175,7 +175,13 @@ class OpenAICompatibleProvider:
                 finish_reason=str(finish) if finish is not None else None,
             ) from exc
         if not isinstance(content, str):
-            raise ValueError("model returned non-text content")
+            raise ModelProviderError(
+                "model returned non-text content",
+                raw_response=raw_http,
+                status_code=response.status_code,
+                usage=usage,
+                finish_reason=str(finish) if finish is not None else None,
+            )
         content = _unwrap_json_fence(content)
         finish_reason = finish
         return ModelResponse(

@@ -19,6 +19,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -103,7 +104,7 @@ class DocumentEnrichment(Base):
     summary: Mapped[str] = mapped_column(Text)
     output: Mapped[dict] = mapped_column(JSONB)
     # M2.2.1 stabilization: failure audit + reproducible batch
-    raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)  # redacted
+    raw_response: Mapped[str | None] = mapped_column(Text, nullable=True)  # safe response body
     finish_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
     usage: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -205,7 +206,12 @@ class RelationVerdict(Base):
 
     __tablename__ = "relation_verdicts"
     __table_args__ = (
-        UniqueConstraint("left_atomic_id", "right_atomic_id", name="uq_relation_pair"),
+        UniqueConstraint(
+            "left_atomic_id",
+            "right_atomic_id",
+            "algorithm_version",
+            name="uq_relation_pair_version",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
@@ -288,16 +294,113 @@ class RelationCandidate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class SemanticRelationComponent(Base):
+    """Stable identity for one materialized current same-event component."""
+
+    __tablename__ = "semantic_relation_components"
+    __table_args__ = (
+        Index(
+            "ix_semantic_relation_component_active",
+            "algorithm_version",
+            "status",
+            "updated_at",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    component_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    algorithm_version: Mapped[str] = mapped_column(String(32), index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    status: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
+    member_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SemanticRelationMembership(Base):
+    """Versioned membership history; only one active component per atom/version."""
+
+    __tablename__ = "semantic_relation_memberships"
+    __table_args__ = (
+        Index(
+            "uq_semantic_relation_membership_active",
+            "atomic_event_id",
+            "algorithm_version",
+            unique=True,
+            postgresql_where=text("active"),
+        ),
+        Index("ix_semantic_relation_membership_component_active", "component_id", "active"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    component_id: Mapped[int] = mapped_column(
+        ForeignKey("semantic_relation_components.id", ondelete="CASCADE"), index=True
+    )
+    atomic_event_id: Mapped[int] = mapped_column(
+        ForeignKey("atomic_events.id", ondelete="CASCADE"), index=True
+    )
+    algorithm_version: Mapped[str] = mapped_column(String(32), index=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SemanticComponentWorkItem(Base):
+    """Generation-fenced durable request to rebuild an affected relation closure."""
+
+    __tablename__ = "semantic_component_work_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "seed_atomic_id",
+            "algorithm_version",
+            name="uq_semantic_component_work_seed",
+        ),
+        Index(
+            "ix_semantic_component_work_claim",
+            "status",
+            "next_retry_at",
+            "lease_until",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    seed_atomic_id: Mapped[int] = mapped_column(
+        ForeignKey("atomic_events.id", ondelete="CASCADE"), index=True
+    )
+    algorithm_version: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
+    requested_generation: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    completed_generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, default=5, server_default="5")
+    reason: Mapped[str] = mapped_column(String(64), default="relation_changed")
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class SemanticPromotion(Base):
     __tablename__ = "semantic_promotions"
     __table_args__ = (
         UniqueConstraint(
-            "component_key", "algorithm_version", name="uq_semantic_promotion_component"
+            "component_key",
+            "algorithm_version",
+            "component_revision",
+            name="uq_semantic_promotion_component_revision",
         ),
     )
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     component_key: Mapped[str] = mapped_column(String(64))
     algorithm_version: Mapped[str] = mapped_column(String(32))
+    relation_component_id: Mapped[int | None] = mapped_column(
+        ForeignKey("semantic_relation_components.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    component_revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     draft_hash: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(16), default="prepared")
     event_id: Mapped[int | None] = mapped_column(
@@ -308,6 +411,8 @@ class SemanticPromotion(Base):
     document_ids: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
     draft: Mapped[dict] = mapped_column(JSONB)
     claims: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    before_state: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_event: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
