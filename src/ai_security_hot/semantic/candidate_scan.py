@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
@@ -126,7 +127,7 @@ def scan_candidate_pairs(
 
 
 def adjudicate_candidates(
-    session: Session, candidates: list[tuple[int, int, str]]
+    session: Session, candidates: Sequence[tuple[int, int, str | None]]
 ) -> list[RelationVerdict]:
     """Adjudicate candidate pairs and return verdicts (shadow, not persisted)."""
     atomic_ids = {aid for pair in candidates for aid in pair[:2]}
@@ -137,7 +138,7 @@ def adjudicate_candidates(
         right = refs.get(right_id)
         if left is None or right is None:
             continue
-        verdicts.append(adjudicate(left, right, shared_entities={_entity}))
+        verdicts.append(adjudicate(left, right, shared_entities={_entity} if _entity else set()))
     return verdicts
 
 
@@ -205,7 +206,7 @@ class CandidateLease:
     id: int
     left_atomic_id: int
     right_atomic_id: int
-    shared_entity: str
+    shared_entity: str | None
     attempts: int
     lease_token: str
 
@@ -276,16 +277,26 @@ def enqueue_candidate_pairs(
             ).scalars()
             for other_id in matches:
                 left, right = sorted((int(seed.id), int(other_id)))
+                candidate_stmt = pg_insert(RelationCandidate).values(
+                    left_atomic_id=left,
+                    right_atomic_id=right,
+                    shared_entity=str(entity_key),
+                    algorithm_version=RELATION_VERSION,
+                )
                 inserted_id = session.execute(
-                    pg_insert(RelationCandidate)
-                    .values(
-                        left_atomic_id=left,
-                        right_atomic_id=right,
-                        shared_entity=str(entity_key),
-                        algorithm_version=RELATION_VERSION,
-                    )
-                    .on_conflict_do_nothing(constraint="uq_relation_candidate_version")
-                    .returning(RelationCandidate.id)
+                    candidate_stmt.on_conflict_do_update(
+                        constraint="uq_relation_candidate_version",
+                        set_={
+                            "shared_entity": candidate_stmt.excluded.shared_entity,
+                            "status": "pending",
+                            "error": None,
+                            "updated_at": datetime.now(UTC),
+                        },
+                        where=(
+                            (RelationCandidate.status == "recalled")
+                            & RelationCandidate.hard_conflict.is_(None)
+                        ),
+                    ).returning(RelationCandidate.id)
                 ).scalar_one_or_none()
                 inserted += int(inserted_id is not None)
                 if inserted >= pair_limit:

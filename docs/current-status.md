@@ -10,6 +10,7 @@
 - 每次 LLM initial/repair 调用均可记录安全响应正文、usage、finish reason、校验错误和 provider 错误。
 - ontology_version 由代码中的 semantic-onto-v1 Literal/JSON-Schema const 强制约束。
 - M2.3 使用带游标、租约、fencing token、指数退避和版本隔离的有界增量队列；worker 自动调度。
+- Embedding 候选召回已实现独立 provider/profile、持久向量、可恢复工作队列和有界时间窗；默认关闭，vector-only 只写 recalled，不直接裁决或合并。
 - same-event 图已物化为稳定 relation component：成员扩展/局部分裂尽量保留 ID，membership 保留历史，generation queue 保证处理中再次失效不会丢任务，周期发现不会反复增加未完成 generation 或重置终态失败。
 - 只有当前文档和当前 relation-v2 的 same_event 边能进入正式提升组件；related_event 只保留关联语义，不能误合并。
 - Claim 的置信度不再表示正反立场；只有显式布尔冲突或已知相反命题才成为 disputed。
@@ -28,6 +29,7 @@ Source
 current non-CVE duplicate master
   → M2.2 LLM shadow extraction
   → Entity / AtomicEvent / ExtractedClaim
+  → optional Embedding queue → bounded vector recall → recalled/blocked candidate
   → M2.3 durable candidate queue → versioned relation verdict
   → same_event connected component → Claim merge
   → preview
@@ -45,7 +47,7 @@ current non-CVE duplicate master
 | M1.3 混合分类 | 机制完成 | Provider、Schema、缓存、运行审计、租约、fallback；CVE bypass | 存量正式分类没有全部经 LLM 重跑 |
 | M2.1 局部事件情报 | 完成 | 持久签名/强身份/blocking、稳定组件、局部重算、硬冲突、EventVersion/Claim/Evidence | fallback 事件不等同于语义事件合并 |
 | M2.2 语义抽取 | 影子机制完成并加固 | 严格输出契约、完整逐次调用审计、本体常量、证据定位、租约、缓存、实体/原子事件/Claim、分层抽样和聚合评测 | 无独立 judge；抽样和时延统计仍可扩展 |
-| M2.3 关系裁决 | 持久组件版 | 强实体过滤、持久游标、候选队列、租约恢复、稳定组件 ID、历史 membership、局部拆分合并、版本化裁决和 worker 调度 | 尚无 Embedding 与 LLM 三分类；完全消失后再出现的组件历史复用仍可增强 |
+| M2.3 关系裁决 | Embedding 候选基础完成 | 强实体 + 时间窗 + 向量召回、持久游标和队列、强冲突 blocked、稳定组件与版本化裁决 | 向量仍是 PostgreSQL 有界精确基线，尚无 pgvector ANN 和 LLM 三分类；完全消失组件的身份复用仍可增强 |
 | M2.4 Claim 与提升 | revision 化正式提升 | 命题级冲突、稳定 component key/revision、基于真实 AtomicEvent/Document 的预览、事务 apply、幂等、完整版本和安全回滚 | 重要性、新颖性、紧急性仍需专门判断层；自动提升未开放 |
 | NVD/KEV 隔离 | 完成 | vuln_db/general 隔离，旧 cve 事件 supersede | min_cve_year 会漏掉最近更新的旧编号 CVE |
 | 日期热点 API | 冻结快照完成 | 不可变 revision、并发锁、worker 定期生成、as_of 查询 | as_of 只能选择当时已生成的快照，不做任意时点事件重建；无游标分页 |
@@ -64,7 +66,7 @@ current non-CVE duplicate master
 - PostgreSQL/API 默认只绑定 127.0.0.1；读取和运维 Token 分离且 fail-closed。
 - 抓取器跨 origin 重定向会删除 Authorization/Cookie，代理路线也执行 DNS 私网校验。
 - 默认 CI 使用 PostgreSQL 18；真实信源测试为手工工作流；另有 macOS DB-free 门禁。
-- 当前迁移 head 为 6f23c8a1d4b7，已在隔离 PostgreSQL 18 验证 upgrade、downgrade、再次 upgrade 和 ORM metadata check。
+- 当前迁移 head 为 7a91d2e4f6b8，已在隔离 PostgreSQL 18 验证 upgrade、downgrade、再次 upgrade 和 ORM metadata check。
 
 运行中的 API/worker 不会因工作区文件变化自动升级。发布时必须先备份需要保留的数据，再由 migrate 升级 schema，并用同一 Git SHA 重建 API/worker。新服务器若不需要旧数据，可以直接从空数据库冷启动，不必搬迁现有数据。
 
@@ -87,7 +89,7 @@ current non-CVE duplicate master
 
 ### 4.3 候选召回与裁决
 
-- 目前只有强实体 + 确定性规则召回，没有 Embedding/pgvector。
+- 已有默认关闭的 Embedding 精确召回基线；向量按 execution_version 持久化并受时间窗、pool、Top-K 和阈值约束。尚未使用 pgvector ANN，数据量和开启频率上升前需要索引加速。
 - 缺少带完整 prompt/响应审计的 LLM same_event / related_event / different_event 裁决器。
 - relation component 已改为 seed + 旧 membership + 当前 same-event 边的有界局部闭包；超限会保留队列失败审计，不会截断后误提交。
 - 仍需把强身份冲突原因完整带入关系裁决和人工复核界面。
@@ -117,8 +119,8 @@ DeepSeek V4 Flash 首轮固定 100 篇 current、非 CVE duplicate master：
 ## 6. 推荐后续顺序
 
 1. 完成本批全量 CI 等价测试、文档收敛和 clean-database 验证。
-2. 实现 Embedding/pgvector 候选召回，只生成候选，不绕过强冲突。
-3. 增加可审计的 LLM 关系裁决和中置信人工复核。
+2. 在小批影子数据上校准 Embedding 阈值、召回量、成本和延迟；需要扩容时增加 pgvector ANN。
+3. 增加可审计的 LLM same_event / related_event / different_event 裁决和中置信人工复核。
 4. 增加事件判断层：标题/摘要、影响、新颖性、紧急性、可信度和证据充分性。
 5. 增强冻结日报：算法参数、生成文案、更正记录、分页与投递批次。
 6. 实现数据保留/归档和容量监控。
@@ -132,7 +134,7 @@ DeepSeek V4 Flash 首轮固定 100 篇 current、非 CVE duplicate master：
 - clean clone 中 report 模板存在且可生成页面；
 - 空 PostgreSQL 18 可从零升级到 Alembic head；
 - migrate 成功后 API/worker 使用相同 Git SHA；
-- API/worker 均 healthy，worker 能持续抓取、生成关系候选和冻结快照；
+- API/worker 均 healthy，worker 能持续抓取、生成关系/向量候选和冻结快照；
 - PostgreSQL 不暴露公网，read/admin Token 分离；
 - Linux、macOS DB-free CI 和全部非 live 数据库测试通过。
 

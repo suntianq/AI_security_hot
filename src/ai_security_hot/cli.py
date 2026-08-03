@@ -306,6 +306,40 @@ def event_promote(
         )
 
 
+@app.command("embedding-config")
+def embedding_config() -> None:
+    """Validate effective embedding config without exposing credentials."""
+    from ai_security_hot.config.embeddings import resolve_embedding_config
+    from ai_security_hot.embeddings.provider import embedding_provider_names
+
+    try:
+        config = resolve_embedding_config(get_settings())
+    except ValueError as exc:
+        typer.echo(json.dumps({"status": "configuration_error", "error": str(exc)}, indent=2))
+        raise typer.Exit(code=2) from exc
+    summary = config.public_summary()
+    summary["provider_registered"] = config.provider in embedding_provider_names()
+    summary["enabled"] = get_settings().embedding_enabled
+    summary["status"] = (
+        "ready" if summary["ready"] and summary["provider_registered"] else "not_ready"
+    )
+    typer.echo(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+@app.command("embedding-run")
+def embedding_run(
+    limit: int = typer.Option(16, min=1, max=100),
+) -> None:
+    """Run one explicitly enabled embedding and candidate-recall batch."""
+    from ai_security_hot.embeddings.pipeline import run_embedding_stage
+
+    _setup_logging()
+    settings = get_settings().model_copy(
+        update={"embedding_enabled": True, "embedding_batch_size": limit}
+    )
+    typer.echo(json.dumps(run_embedding_stage(settings), ensure_ascii=False, indent=2))
+
+
 @app.command("relation-scan")
 def relation_scan(
     limit: int = typer.Option(500, min=1),

@@ -296,7 +296,7 @@ rate_limit:
 
 模型只提出“合并建议”；当事件类型、版本或时间明显冲突时由规则拒绝。高风险事件的错误合并和错误拆分都进入人工复核队列。
 
-当前 M2.1 已实现持久化 URL/标题/正文 hash、RapidFuzz 自动规则、SimHash/MinHash 候选、稳定重复组件、局部候选/事件图重算，以及 CVE/GHSA/CNVD/arXiv/GitHub release/模型或包发布/事故/campaign 强键。低置信候选可人工裁决，强身份冲突不能被相似度或人工批准越过；EventVersion、Claim 和支持/反驳 Evidence 已落库。M2.2 已完成非 CVE 影子抽取和分层实验并补齐逐次调用审计；M2.3 已升级为有界、版本化、可恢复的持久候选队列，并用 generation-fenced 局部闭包物化稳定 relation component/revision/历史 membership；M2.4 按稳定 component key 显式正式提升并安全回滚。Embedding/pgvector 与 LLM 关系裁决仍未实现；详见 [当前状态与路线](./current-status.md) 和 [M2 事件情报](./event-intelligence.md)。
+当前 M2.1 已实现持久化 URL/标题/正文 hash、RapidFuzz 自动规则、SimHash/MinHash 候选、稳定重复组件、局部候选/事件图重算，以及 CVE/GHSA/CNVD/arXiv/GitHub release/模型或包发布/事故/campaign 强键。低置信候选可人工裁决，强身份冲突不能被相似度或人工批准越过；EventVersion、Claim 和支持/反驳 Evidence 已落库。M2.2 已完成非 CVE 影子抽取和分层实验并补齐逐次调用审计；M2.3 已升级为有界、版本化、可恢复的持久候选队列，并用 generation-fenced 局部闭包物化稳定 relation component/revision/历史 membership；M2.4 按稳定 component key 显式正式提升并安全回滚。默认关闭的可移植 Embedding 有界召回已实现；pgvector ANN 与 LLM 关系裁决仍未实现；详见 [当前状态与路线](./current-status.md) 和 [M2 事件情报](./event-intelligence.md)。
 
 ### 6.3 事件更新而非重复发布
 

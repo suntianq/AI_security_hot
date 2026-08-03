@@ -255,6 +255,63 @@ class SemanticModelAttempt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AtomicEventEmbedding(Base):
+    """Immutable vector for one atomic event and embedding execution version."""
+
+    __tablename__ = "atomic_event_embeddings"
+    __table_args__ = (
+        UniqueConstraint(
+            "atomic_event_id",
+            "execution_version",
+            name="uq_atomic_event_embedding_execution",
+        ),
+        Index(
+            "ix_atomic_event_embedding_execution_id",
+            "execution_version",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    work_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("semantic_work_items.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+    )
+    atomic_event_id: Mapped[int] = mapped_column(
+        ForeignKey("atomic_events.id", ondelete="CASCADE"), index=True
+    )
+    task_version: Mapped[str] = mapped_column(String(64))
+    execution_version: Mapped[str] = mapped_column(String(32), index=True)
+    input_hash: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(200))
+    dimensions: Mapped[int] = mapped_column(Integer)
+    vector: Mapped[list] = mapped_column(JSONB)
+    norm: Mapped[float] = mapped_column(Float)
+    usage: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class EmbeddingRecallState(Base):
+    """Serialized cursor for one recall algorithm and embedding execution."""
+
+    __tablename__ = "embedding_recall_states"
+    __table_args__ = (
+        UniqueConstraint(
+            "recall_version",
+            "embedding_execution_version",
+            name="uq_embedding_recall_state_version",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    recall_version: Mapped[str] = mapped_column(String(32))
+    embedding_execution_version: Mapped[str] = mapped_column(String(32))
+    last_embedding_id: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class RelationScanState(Base):
     __tablename__ = "relation_scan_states"
     algorithm_version: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -281,7 +338,10 @@ class RelationCandidate(Base):
     right_atomic_id: Mapped[int] = mapped_column(
         ForeignKey("atomic_events.id", ondelete="CASCADE"), index=True
     )
-    shared_entity: Mapped[str] = mapped_column(String(64))
+    shared_entity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    embedding_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    embedding_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    hard_conflict: Mapped[str | None] = mapped_column(String(64), nullable=True)
     algorithm_version: Mapped[str] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

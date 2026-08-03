@@ -89,6 +89,16 @@ def semantic_tick() -> None:
         log.exception("semantic_tick failed")
 
 
+def embedding_tick() -> None:
+    """Generate bounded vectors and recall candidates without auto-merging."""
+    try:
+        from ai_security_hot.embeddings.pipeline import run_embedding_stage
+
+        log.info("embedding_tick: %s", run_embedding_stage())
+    except Exception:
+        log.exception("embedding_tick failed")
+
+
 def relation_tick() -> None:
     """Advance and drain the durable M2.3 candidate queue in bounded batches."""
     try:
@@ -223,6 +233,16 @@ def run_worker() -> None:
             coalesce=True,
             next_run_time=first_run,
         )
+    if settings.embedding_enabled:
+        scheduler.add_job(
+            embedding_tick,
+            "interval",
+            seconds=settings.embedding_interval_seconds,
+            id="embedding",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=first_run,
+        )
     if settings.relation_scan_enabled:
         scheduler.add_job(
             relation_tick,
@@ -262,12 +282,13 @@ def run_worker() -> None:
     )
     log.info(
         "worker started: fetch=%ds normalize=%ds fulltext=%ds "
-        "classify=%ds semantic=%s relation=%s snapshot=%s event=%ds self_check=%ds",
+        "classify=%ds semantic=%s embedding=%s relation=%s snapshot=%s event=%ds self_check=%ds",
         settings.tick_interval_seconds,
         settings.normalize_interval_seconds,
         settings.fulltext_interval_seconds,
         settings.classification_interval_seconds,
         "on" if settings.semantic_enrichment_enabled else "off",
+        "on" if settings.embedding_enabled else "off",
         "on" if settings.relation_scan_enabled else "off",
         "on" if settings.daily_snapshot_enabled else "off",
         settings.event_interval_seconds,

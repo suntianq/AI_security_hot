@@ -1,0 +1,13 @@
+# Non-secret embedding profiles. Keep credentials in INTEL_EMBEDDING_API_KEY.
+# Embedding calls remain disabled until INTEL_EMBEDDING_ENABLED=true.
+version: 1
+active_profile: null
+
+profiles:
+  openai-compatible:
+    provider: openai-compatible
+    base_url: https://api.openai.com/v1
+    model: text-embedding-3-small
+    dimensions: 1536
+    timeout_seconds: 30
+    max_input_chars: 4000

@@ -24,8 +24,10 @@ from sqlalchemy import desc, func, select
 from ai_security_hot.models.base import session_scope
 from ai_security_hot.models.semantic_tables import (
     AtomicEvent,
+    AtomicEventEmbedding,
     DocumentEnrichment,
     ExtractedClaim,
+    RelationCandidate,
     RelationVerdict,
     SemanticComponentWorkItem,
     SemanticPromotion,
@@ -264,6 +266,18 @@ def collect(session, max_rows: int) -> dict[str, Any]:
         .group_by(SemanticPromotion.status)
         .order_by(desc(func.count()))
     ).all()
+    embedding_total = session.execute(
+        select(func.count()).select_from(AtomicEventEmbedding)
+    ).scalar_one()
+    embedding_versions = session.execute(
+        select(func.count(func.distinct(AtomicEventEmbedding.execution_version)))
+    ).scalar_one()
+    embedding_candidate_rows = session.execute(
+        select(RelationCandidate.status, func.count())
+        .where(RelationCandidate.embedding_score.is_not(None))
+        .group_by(RelationCandidate.status)
+        .order_by(desc(func.count()))
+    ).all()
     sem = {
         "total": sem_total,
         "relevant": sem_relevant,
@@ -281,6 +295,9 @@ def collect(session, max_rows: int) -> dict[str, Any]:
         "active_memberships": active_memberships,
         "component_work_status": {(k or "?"): v for k, v in component_work_rows},
         "promotions": {(k or "?"): v for k, v in promotion_rows},
+        "embeddings": int(embedding_total),
+        "embedding_versions": int(embedding_versions),
+        "embedding_candidates": {(k or "?"): v for k, v in embedding_candidate_rows},
     }
 
     return {

@@ -59,6 +59,7 @@
 - **运行稳定化（M2.2.1）**：失败响应审计（raw_response/finish_reason/usage）、有界结构修复（校验失败重试一次）、batch_id 可重放、`max_attempts` 终止态。
 - **分层评测（M2.2.2）**：`intel semantic-sample` 按来源平衡抽样（16 源均匀）、`intel semantic-eval` 聚合相关率/证据命中/成本，按来源与内容类型拆解。
 - **关系裁决与稳定组件（M2.3）**：`intel relation-scan` 通过游标、强实体 blocking 和有界持久队列写入版本化裁决；same-event 关系再由 generation-fenced 局部队列物化成稳定 component ID、revision 和历史 membership，worker 自动运行。
+- **Embedding 候选召回（M2.3.1）**：独立 `config/embeddings.yaml` 与 `INTEL_EMBEDDING_*`；持久向量和游标只在当前非 CVE 原子事件的有界时间窗内召回。vector-only=`recalled`、强冲突=`blocked`，均不会直接合并。
 - **Claim 合并与正式提升（M2.4）**：只读取完整的当前持久组件；正式事件使用稳定 component key，每个 component revision 产生独立 promotion 审计。预览从 AtomicEvent/Document 推导类型、主题和时间；显式 `--apply` 才写正式事件。
 - **安全默认值**：M2.2 模型调用默认关闭且只写影子表；正式提升默认只预览，worker 不会自动执行 `--apply`。
 - **可切换模型 Profile**：M1.3 与 M2.2 共用 `config/models.yaml`；环境变量优先覆盖 URL/模型，API Key 只允许从环境注入；兼容 `json_schema/json_object/prompt_only`。
@@ -169,7 +170,7 @@ uv run python scripts/gen_report.py report.html        # 默认最多嵌入 30,0
 uv run python scripts/gen_report.py report.html 50000  # 可选：调整浏览器内明细上限
 ```
 
-报告中的全库统计始终精确；文档明细按上限保留最新当前记录及最多 5,000 条历史记录。页面同时展示能力地图、事件/证据/版本/Claim、M2 候选复核和运行审计、语义影子状态、稳定关系组件/队列/promotion revision 及信源健康；事件样本最多 4,000 条，并优先保留 75% 非 CVE 热点。
+报告中的全库统计始终精确；文档明细按上限保留最新当前记录及最多 5,000 条历史记录。页面同时展示能力地图、事件/证据/版本/Claim、M2 候选复核和运行审计、语义影子状态、稳定关系组件/队列/promotion revision、Embedding 覆盖、向量候选及信源健康；事件样本最多 4,000 条，并优先保留 75% 非 CVE 热点。
 
 验证 API。健康探针无需认证；读取接口和 `/ops/*` 分别使用只读、管理员 Token：
 
@@ -295,7 +296,7 @@ tests/          unit / smoke / event intelligence + semantic + PostgreSQL integr
 
 ## 后续（M2.5+）
 
-- **Embedding/pgvector 召回**：M2.3 当前用确定性（共享实体+时间）召回；按实际指标触发再引入向量增强。
+- **Embedding/pgvector 召回**：可移植的有界精确向量召回已完成并默认关闭；先校准阈值/成本/延迟，数据规模需要时再增加 pgvector ANN。
 - **LLM-as-judge**：M2.2.2 当前用规则聚合；独立 judge 作为代理指标（不命名 F1）。
 - **延迟 p50/p95**：语义评测当前为 null，需持久化每篇 started_at。
 - **日报与投递**：冻结快照已完成；后续增加文案版本、更正记录和飞书/邮件投递幂等。

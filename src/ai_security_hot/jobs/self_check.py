@@ -12,16 +12,21 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
 
+from ai_security_hot.config.embeddings import resolve_embedding_config
 from ai_security_hot.config.models import resolve_model_config
 from ai_security_hot.config.settings import get_settings
 from ai_security_hot.domain.enums import PipelineStage
+from ai_security_hot.embeddings.provider import embedding_provider_names
 from ai_security_hot.events.intelligence import CLUSTER_VERSION, DEDUPE_VERSION
 from ai_security_hot.llm.registry import provider_names
 from ai_security_hot.models.base import session_scope
 from ai_security_hot.models.semantic_tables import (
+    AtomicEventEmbedding,
+    RelationCandidate,
     SemanticComponentWorkItem,
     SemanticRelationComponent,
     SemanticRelationMembership,
+    SemanticWorkItem,
 )
 from ai_security_hot.models.tables import (
     CandidateReview,
@@ -52,6 +57,7 @@ def run_self_check() -> dict:
         "event_pipeline": {},
         "m2_incremental": {},
         "semantic_relation": {},
+        "embedding": {},
         "classification": {},
         "data_quality": {},
     }
@@ -161,6 +167,34 @@ def run_self_check() -> dict:
             "work_status": {str(status): int(count) for status, count in component_work_rows},
             "expired_leases": int(expired_component_leases),
         }
+        embedding_work_rows = session.execute(
+            select(SemanticWorkItem.status, func.count())
+            .where(SemanticWorkItem.task == "atomic_embedding")
+            .group_by(SemanticWorkItem.status)
+        ).all()
+        embedding_vectors = session.execute(
+            select(func.count()).select_from(AtomicEventEmbedding)
+        ).scalar_one()
+        embedding_candidates = session.execute(
+            select(RelationCandidate.status, func.count())
+            .where(RelationCandidate.embedding_score.is_not(None))
+            .group_by(RelationCandidate.status)
+        ).all()
+        expired_embedding_leases = session.execute(
+            select(func.count())
+            .select_from(SemanticWorkItem)
+            .where(
+                SemanticWorkItem.task == "atomic_embedding",
+                SemanticWorkItem.status == "running",
+                SemanticWorkItem.lease_until < now,
+            )
+        ).scalar_one()
+        report["embedding"] = {
+            "vectors": int(embedding_vectors),
+            "work_status": {str(status): int(count) for status, count in embedding_work_rows},
+            "candidate_status": {str(status): int(count) for status, count in embedding_candidates},
+            "expired_leases": int(expired_embedding_leases),
+        }
         record_status_rows = session.execute(
             select(Document.record_status, func.count()).group_by(Document.record_status)
         ).all()
@@ -209,6 +243,36 @@ def run_self_check() -> dict:
                 config_errors.append(f"unknown provider: {model_config.provider}")
             if not model_config.api_key_configured or not model_config.model:
                 config_errors.append("model calls require INTEL_LLM_API_KEY and a configured model")
+        embedding_errors = []
+        embedding_config = None
+        try:
+            embedding_config = resolve_embedding_config(settings)
+        except ValueError as exc:
+            if settings.embedding_enabled:
+                embedding_errors.append(str(exc))
+        if embedding_config is not None and settings.embedding_enabled:
+            if embedding_config.provider not in embedding_provider_names():
+                embedding_errors.append(f"unknown embedding provider: {embedding_config.provider}")
+            if not embedding_config.api_key_configured or not embedding_config.model:
+                embedding_errors.append(
+                    "embedding calls require INTEL_EMBEDDING_API_KEY and a configured model"
+                )
+        report["embedding"].update(
+            {
+                "enabled": settings.embedding_enabled,
+                "profile": embedding_config.profile if embedding_config else None,
+                "provider": (
+                    embedding_config.provider if embedding_config else settings.embedding_provider
+                ),
+                "model": embedding_config.model if embedding_config else settings.embedding_model,
+                "api_key_configured": (
+                    embedding_config.api_key_configured
+                    if embedding_config
+                    else bool(settings.embedding_api_key)
+                ),
+                "config_errors": embedding_errors,
+            }
+        )
         report["classification"] = {
             "mode": settings.classification_mode,
             "semantic_enabled": settings.semantic_enrichment_enabled,
@@ -239,6 +303,9 @@ def run_self_check() -> dict:
         or report["m2_incremental"]["failed_runs_24h"]
         or report["semantic_relation"]["work_status"].get("failed", 0)
         or report["semantic_relation"]["expired_leases"]
+        or report["embedding"]["config_errors"]
+        or report["embedding"]["work_status"].get("failed", 0)
+        or report["embedding"]["expired_leases"]
     ):
         log.warning("self_check found issues: %s", report)
     else:

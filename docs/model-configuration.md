@@ -102,7 +102,37 @@ uv run intel semantic-enrich --limit 5 --force --retry-only
 
 这条命令会产生真实 API 调用和费用；应在配置检查通过并确认预算后执行。
 
-## 5. Docker Compose
+## 5. Embedding 模型与向量召回
+
+Embedding 使用独立的 `config/embeddings.yaml` 和 `INTEL_EMBEDDING_*`，不会把聊天模型配置误用于向量接口。DeepSeek V4 Flash 在本项目中只承担 Chat Completions；除非所用网关明确提供兼容的 `/embeddings` 模型，否则必须配置另一个 embedding-capable endpoint。
+
+配置优先级与 LLM 相同：环境变量优先于指定 Profile、YAML active_profile 和安全默认值。API Key 只能通过环境注入：
+
+```dotenv
+INTEL_EMBEDDING_ENABLED=false
+INTEL_EMBEDDING_PROFILE=openai-compatible
+INTEL_EMBEDDING_API_KEY=replace-with-real-key
+# 下列值也可放入 config/embeddings.yaml
+INTEL_EMBEDDING_BASE_URL=https://api.openai.com/v1
+INTEL_EMBEDDING_MODEL=text-embedding-3-small
+INTEL_EMBEDDING_DIMENSIONS=1536
+```
+
+先做不调用网络的配置检查：
+
+```bash
+uv run intel embedding-config
+```
+
+显式小批实验会产生真实 API 费用：
+
+```bash
+uv run intel embedding-run --limit 16
+```
+
+常驻 worker 只有在 `INTEL_EMBEDDING_ENABLED=true` 时才调度该阶段。向量按 provider endpoint、模型、维度和输入契约生成独立 `execution_version`；vector-only pair 只写 `recalled` 候选，强身份冲突写 `blocked`，两者都不会直接形成 `same_event`。当前使用 PostgreSQL JSONB 保存可移植向量并在严格 pool/time-window 上做精确余弦召回，后续 pgvector 只作为 ANN 加速器。
+
+## 6. Docker Compose
 
 镜像内包含默认配置，同时 Compose 把宿主机 `./config` 只读挂载到
 `/app/config`。修改 `config/models.yaml` 或 `.env` 后，应使用同一个

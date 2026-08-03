@@ -150,7 +150,7 @@ Self-check 的 `m2_incremental` 报告 signature_due、各阶段 work_pending、
 
 ## 8. 迁移、测试与部署
 
-当前迁移 head 为 `6f23c8a1d4b7`。迁移创建上述索引、队列、版本、事实表和持久 token 桶计数，并从 M2.0 的 `near_dup_of/id` 回填稳定 component ID；不删除 Document、Event 或旧证据。迁移已验证：全新数据库 upgrade、downgrade 到上一版本、再次 upgrade 均成功。
+当前迁移 head 为 `7a91d2e4f6b8`。迁移创建上述索引、队列、版本、事实表和持久 token 桶计数，并从 M2.0 的 `near_dup_of/id` 回填稳定 component ID；不删除 Document、Event 或旧证据。迁移已验证：全新数据库 upgrade、downgrade 到上一版本、再次 upgrade 均成功。
 
 GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签名确定性、相似候选、人工批准、强冲突不可越过、新强身份、质量指标、局部退役重选主、未受影响事件不改版本、EventVersion 和 Claim 支持/反驳证据。
 
@@ -167,10 +167,10 @@ GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签�
 
 - 人工金标不再是前置条件；LLM-as-judge 只能提供代理质量信号，报告中不得把它冒充真实 precision/recall。
 - 结构化 model/package/incident/campaign 强键已经可用，但召回率取决于上游 Parser/实体抽取是否提供对应 `entities`；后续应以漏合并样本驱动实体抽取扩充。
-- pgvector/embedding 未启用。影子实验确认召回质量、成本和延迟可接受后可作为候选层加入，但仍不能自动绕过强冲突。
+- Embedding 候选层已实现但默认关闭：使用独立 OpenAI-compatible provider、JSONB 向量、持久工作队列和有界时间窗精确余弦召回。vector-only 候选停在 recalled，强冲突进入 blocked；pgvector ANN 尚未启用。
 - 自动 Claim 目前只覆盖事件摘要和强身份；影响范围、已利用状态、修复版本等领域 Claim 需要在后续抽取/管理接口中逐项增加。
 - M2.2 已增加默认关闭的影子语义富化、实体、原子事件和抽取 Claim 表，但尚未影响生产 Event。
-- M2.3 已实现强实体过滤、游标、有界候选桶、租约恢复、fencing token、重试和版本化确定性裁决；Embedding 与 LLM 裁决仍未实现。
+- M2.3 已实现强实体过滤、Embedding 候选召回、游标、有界候选桶、租约恢复、fencing token、重试和版本化确定性裁决；LLM 三分类裁决仍未实现。
 - M2.4 已按当前 `same_event` 连通组件合并 Claim；显式 apply 事务写入正式 Event，支持幂等重试、完整版本和受保护回滚。置信度不再被误当成矛盾立场。
 - 日期热点已经使用不可变 revision 和 advisory lock 冻结；worker 自动生成，`as_of` 选择该时点前已存储的版本。它不重建尚未生成的任意历史状态。
 
@@ -200,9 +200,20 @@ GitHub CI 执行全部非 live 测试并连接 PostgreSQL。M2 专项覆盖签�
 - Promotion reads only complete active components. It locks and revalidates component ID, key, revision and membership before apply. Each component revision receives a separate promotion audit row.
 - Migration 6f23c8a1d4b7 creates the component tables and queues backfill seeds for existing relation-v2 same-event verdicts.
 
+### Bounded Embedding candidate recall
+
+- `config/embeddings.yaml` and `INTEL_EMBEDDING_*` configure a dedicated embedding-capable endpoint; credentials never enter YAML or reports. The feature gate defaults to off.
+- `semantic_work_items` provides leased, fenced, retryable atomic-event embedding work. `atomic_event_embeddings` stores provider/model/dimension/input-hash/execution-version with each vector.
+- `embedding_recall_states` serializes a resumable cursor. Each seed compares only a configured current-document time window and bounded candidate pool, then retains Top-K above threshold.
+- Vector-only pairs are stored as `recalled` and are not claimed by deterministic adjudication. Identical fingerprints or later shared strong entities promote the pair to `pending`; incompatible strong identities are audited as `blocked`.
+- JSONB vector storage keeps official PostgreSQL 18 and Apple Silicon cold starts portable. This is the correctness baseline; pgvector ANN is the later acceleration path, not a semantic-policy change.
+- Migration `7a91d2e4f6b8` creates vector/cursor storage and candidate audit columns without requiring a PostgreSQL extension.
+
 Operational examples:
 
 ```bash
+uv run intel embedding-config
+uv run intel embedding-run --limit 16
 uv run intel relation-scan --limit 100
 uv run intel event-promote --limit 50
 uv run intel event-promote --limit 50 --apply

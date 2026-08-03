@@ -120,6 +120,25 @@ class Settings(BaseSettings):
     daily_snapshot_timezone: str = Field(default="Asia/Shanghai")
     daily_snapshot_limit: int = Field(default=100, ge=1, le=500)
 
+    # --- M2.3.1 embedding candidate recall (disabled by default) ---
+    embedding_enabled: bool = Field(default=False)
+    embedding_config_file: str = Field(default="config/embeddings.yaml")
+    embedding_profile: str | None = Field(default=None)
+    embedding_provider: str = Field(default="openai-compatible")
+    embedding_base_url: str = Field(default="https://api.openai.com/v1")
+    embedding_api_key: str | None = Field(default=None)
+    embedding_model: str | None = Field(default=None)
+    embedding_dimensions: int | None = Field(default=None, ge=1, le=65536)
+    embedding_timeout_seconds: float = Field(default=30.0, ge=1, le=120)
+    embedding_max_input_chars: int = Field(default=4000, ge=256, le=50000)
+    embedding_interval_seconds: int = Field(default=180, ge=30)
+    embedding_batch_size: int = Field(default=16, ge=1, le=100)
+    embedding_lease_seconds: int = Field(default=300, ge=60)
+    embedding_recall_window_days: int = Field(default=30, ge=1, le=365)
+    embedding_recall_threshold: float = Field(default=0.82, ge=0, le=1)
+    embedding_recall_top_k: int = Field(default=10, ge=1, le=100)
+    embedding_recall_pool_limit: int = Field(default=2000, ge=10, le=20000)
+
     # --- API security / build identity ---
     # Read and administrative operations use separate environment-only tokens.
     api_token: str | None = Field(default=None, min_length=8)
