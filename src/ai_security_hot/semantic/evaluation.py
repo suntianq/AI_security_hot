@@ -4,7 +4,7 @@ Reads DocumentEnrichment + SemanticWorkItem rows for one ``batch_id`` and
 reports proxy metrics: relevance ratio (broken down by source / tech direction /
 content type), evidence exact-hit rate, structural failure rate, cost and
 latency. This is a proxy report, not human-gold precision/recall — that label
-is reserved for reviewed annotations (see evaluation/README.md).
+is reserved for reviewed annotation assets under ``evaluation/``.
 """
 
 from __future__ import annotations
