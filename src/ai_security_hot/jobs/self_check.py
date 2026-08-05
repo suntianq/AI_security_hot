@@ -52,6 +52,7 @@ def run_self_check() -> dict:
     report: dict = {
         "stale": [],
         "degraded": [],
+        "circuit_open": [],
         "stuck_items": 0,
         "failed_items": 0,
         "event_pipeline": {},
@@ -70,7 +71,11 @@ def run_self_check() -> dict:
         )
 
         for ep in endpoints:
-            if ep.status == "degraded" or ep.consecutive_failures >= 3:
+            if ep.status == "circuit_open":
+                report["circuit_open"].append(
+                    {"id": ep.id, "failures": ep.consecutive_failures, "error": ep.last_error}
+                )
+            elif ep.status == "degraded" or ep.consecutive_failures >= 3:
                 report["degraded"].append(
                     {"id": ep.id, "failures": ep.consecutive_failures, "error": ep.last_error}
                 )
@@ -296,6 +301,7 @@ def run_self_check() -> dict:
 
     if (
         report["degraded"]
+        or report["circuit_open"]
         or report["stale"]
         or report["stuck_items"]
         or report["failed_items"]

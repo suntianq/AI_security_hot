@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     normalize_batch_size: int = Field(default=2000, ge=1, le=5000)
     fulltext_batch_size: int = Field(default=20, ge=1, le=500)
 
+    # --- circuit breaker (applies to all endpoints uniformly) ---
+    circuit_breaker_threshold: int = Field(
+        default=5, ge=1, description="Consecutive failures before the circuit opens"
+    )
+    circuit_breaker_cooldown_minutes: int = Field(
+        default=120, ge=10, description="Cooldown when the circuit is open (default 2h)"
+    )
+
     # --- M1.3 classification / LLM ---
     classification_mode: Literal["rule", "hybrid"] = Field(default="rule")
     classification_interval_seconds: int = Field(default=30, ge=5)

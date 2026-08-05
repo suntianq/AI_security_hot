@@ -102,6 +102,7 @@ NON_CURRENT_UPSTREAM_STATUSES = frozenset(
 class SourceStatus(StrEnum):
     ACTIVE = "active"
     DEGRADED = "degraded"
+    CIRCUIT_OPEN = "circuit_open"
     PAUSED = "paused"
     RETIRED = "retired"
 

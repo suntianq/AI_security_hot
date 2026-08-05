@@ -352,7 +352,7 @@ endpoints:
     priority: P1
     language: en
     egress: { route: proxy_pool_global }
-    schedule: { interval_minutes: 360, jitter_seconds: 600 }
+    schedule: { interval_minutes: 120, jitter_seconds: 600 }
     fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
     topics: [ai, security_for_ai]
 
@@ -366,6 +366,7 @@ endpoints:
     trust_tier: A
     priority: P1
     language: en
+    fulltext: true   # static blog pages → second-fetch full article text
     egress: { route: proxy_pool_global }
     schedule: { interval_minutes: 120, jitter_seconds: 300 }
     fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
@@ -381,6 +382,7 @@ endpoints:
     trust_tier: B
     priority: P1
     language: en
+    fulltext: true   # static blog pages → second-fetch full article text
     egress: { route: proxy_pool_global }
     schedule: { interval_minutes: 120, jitter_seconds: 300 }
     fetch: { timeout_seconds: 25, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
@@ -460,6 +462,7 @@ endpoints:
     trust_tier: A
     priority: P1
     language: en
+    fulltext: true   # static blog pages → second-fetch full article text
     egress: { route: proxy_pool_global }
     schedule: { interval_minutes: 120, jitter_seconds: 300 }
     fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }

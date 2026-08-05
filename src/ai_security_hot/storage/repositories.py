@@ -17,6 +17,7 @@ from sqlalchemy import Table, bindparam, delete, func, select, text, tuple_, upd
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from ai_security_hot.config.settings import get_settings
 from ai_security_hot.config.sources import SourceRegistry
 from ai_security_hot.connectors.base import Checkpoint
 from ai_security_hot.domain.enums import (
@@ -666,16 +667,28 @@ def advance_checkpoint(
         row.last_success_at = now
         row.next_run_at = now + timedelta(minutes=interval_minutes, seconds=jitter)
         row.consecutive_failures = 0
-        row.status = "active"
+        row.status = SourceStatus.ACTIVE.value
         row.last_error = None
     else:
         row.consecutive_failures += 1
-        # Retry quickly at first, then back off up to the normal source interval.
-        retry_minutes = min(interval_minutes, 2 ** min(row.consecutive_failures, 10))
-        row.next_run_at = now + timedelta(minutes=retry_minutes, seconds=jitter)
+        failures = row.consecutive_failures
         row.last_error = error
-        if row.consecutive_failures >= 5:
-            row.status = "degraded"
+        settings = get_settings()
+        threshold = settings.circuit_breaker_threshold
+        cooldown = settings.circuit_breaker_cooldown_minutes
+        if failures >= threshold:
+            # Circuit OPEN: stop retrying for a cooldown period.  When the
+            # cooldown expires, claim_due_endpoints picks the endpoint up
+            # automatically (half-open probe).  Success closes the circuit;
+            # failure reopens it for another cooldown.
+            row.status = SourceStatus.CIRCUIT_OPEN.value
+            row.next_run_at = now + timedelta(minutes=cooldown)
+        else:
+            # Circuit still closed: exponential backoff capped at interval.
+            retry_minutes = min(interval_minutes, 2 ** min(failures, 10))
+            row.next_run_at = now + timedelta(minutes=retry_minutes, seconds=jitter)
+            if failures >= 3:
+                row.status = SourceStatus.DEGRADED.value
     session.commit()
 
 

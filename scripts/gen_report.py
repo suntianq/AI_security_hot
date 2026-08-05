@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sys
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -161,13 +161,17 @@ def collect(session, max_rows: int) -> dict[str, Any]:
     # Vuln-db events (NVD/KEV category) and any CVE-topic event (including news
     # articles about CVEs) are excluded from the reader-facing hot list — CVE
     # content is tracked separately.
+    # Only events seen within the last 24 hours appear, so the report reflects
+    # today's hot news rather than all-time highest-scoring historical events.
     events = []
+    recent_cutoff = datetime.now(UTC) - timedelta(hours=24)
     ev_stmt = (
         select(Event)
         .where(
             Event.status == "detected",
             (Event.category == "general") | (Event.category.is_(None)),
             (Event.topic != "cve") | (Event.topic.is_(None)),
+            Event.last_seen_at >= recent_cutoff,
         )
         .order_by(desc(Event.score).nullslast(), desc(Event.last_seen_at).nullslast())
         .limit(200)
