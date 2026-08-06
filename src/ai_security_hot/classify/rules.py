@@ -14,6 +14,21 @@ from ai_security_hot.classify.taxonomy import Taxonomy, load_taxonomy
 from ai_security_hot.domain.models import NormalizedDocument, content_sha256
 
 
+def _strip_html_and_urls(text: str) -> str:
+    """Remove HTML tags and URLs to prevent classification noise.
+
+    IT之家等来源的body_text含图片URL参数（image/watermark等）会污染关键词匹配。
+    在分类前清理HTML标签、img src、URL参数，只保留纯文本内容。
+    """
+    # Remove HTML tags
+    text = re.sub(r"<[^>]+>", " ", text)
+    # Remove URLs (http/https)
+    text = re.sub(r"https?://\S+", " ", text)
+    # Collapse multiple spaces
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
 def _compile_aliases(aliases: list[str]) -> list[re.Pattern[str]]:
     # word-boundary, case-insensitive; CJK terms need no boundary
     pats = []
@@ -45,7 +60,10 @@ class RuleClassifier(Classifier):
         source_id: str | None = None,
         connector: str | None = None,
     ) -> Classification:
-        text = f"{doc.title_original}\n{doc.body_text or ''}"
+        # Strip HTML tags and URLs before matching to prevent noise from image
+        # processing params (watermark, type_, etc.) in IT之家 and similar sources
+        raw_text = f"{doc.title_original}\n{doc.body_text or ''}"
+        text = _strip_html_and_urls(raw_text)
 
         companies = [
             cid for cid, pats in self._company.items() if any(p.search(text) for p in pats)

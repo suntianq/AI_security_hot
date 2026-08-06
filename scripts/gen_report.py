@@ -5,6 +5,10 @@ single HTML file with inline CSS/JS (no external deps, no network at view time).
 The report shows the data itself — sources, classification tags, event types,
 companies, languages, a filterable document table and top events.
 
+Hot spots come from the persistent ``daily_hotspot_items`` snapshots (the same
+source the ``/v1/daily-hotspots`` API serves), re-ranked by source count so
+multi-source corroborated news outranks single-source filler.
+
     uv run python scripts/gen_report.py [out.html] [max_document_rows]
 
 DB host port is 5433 (the Docker container); set INTEL_DATABASE_URL or rely on
@@ -13,6 +17,7 @@ the default which this script points at 5433.
 
 from __future__ import annotations
 
+import re
 import sys
 from collections import Counter
 from datetime import UTC, datetime, timedelta
@@ -35,7 +40,14 @@ from ai_security_hot.models.semantic_tables import (
     SemanticRelationMembership,
     SemanticWorkItem,
 )
-from ai_security_hot.models.tables import Document, Event, SourceEndpoint
+from ai_security_hot.models.tables import (
+    DailyHotspotItem,
+    DailyHotspotSnapshot,
+    Document,
+    Event,
+    EventDocument,
+    SourceEndpoint,
+)
 from ai_security_hot.reporting import json_for_html_script
 
 # Friendly labels for the two-layer taxonomy (keeps the report readable).
@@ -83,12 +95,112 @@ SOURCE_LABELS = {
 # The report tags them so the UI can offer a one-click toggle.
 BULK_SOURCES = {"nvd-recent"}
 
+# Consumer-electronics / gaming / commerce filler that is not AI×security news.
+# Matched against single-source events with no topic label; kept in the
+# timeline but excluded from the hot ranking.
+# 2026-08-06: added social-news keywords to filter IT之家 crime/ticket spam.
+NOISE_KEYWORDS = (
+    "发布价",
+    "预售",
+    "首发价",
+    "到手价",
+    "优惠",
+    "立减",
+    "评测",
+    "掌机",
+    "手机壳",
+    "充电器",
+    "电视",
+    "冰箱",
+    "洗衣机",
+    "空调",
+    "剃须刀",
+    "牙刷",
+    "音箱",
+    "耳机",
+    "主板",
+    "显卡",
+    "固态硬盘",
+    "键盘",
+    "鼠标",
+    "显示器",
+    "游戏本",
+    "笔记本",
+    "奖杯",
+    "皮肤",
+    "版本更新",
+    "返场",
+    "商城",
+    # Social news filler from IT之家 (crime/ticket/entertainment)
+    "网警",
+    "警方",
+    "落网",
+    "犯罪团伙",
+    "犯罪嫌疑人",
+    "倒卖",
+    "黄牛",
+    "演唱会",
+    "门票",
+    "景区门票",
+    "代抢",
+    "抓获",
+)
+
+HOTSPOT_LOOKBACK_DAYS = 7
+HOTSPOT_TOP_N = 100
+
 MAX_ROWS_DEFAULT = 4000
 
 
 def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt else None
 
+
+def _clean_summary(text: str | None, limit: int = 400) -> str:
+    """Strip HTML tags and truncate to a sentence boundary."""
+    if not text:
+        return ""
+    import re
+    clean = re.sub(r"<[^>]+>", "", text).strip()
+    if len(clean) <= limit:
+        return clean
+    snippet = clean[:limit]
+    for sep in ("\u3002", "\uff01", "\uff1f", ". ", "! ", "? "):
+        idx = snippet.rfind(sep)
+        if idx > 50:
+            return snippet[: idx + 1]
+    return snippet.rstrip() + "…"
+
+
+def _is_noise(payload: dict) -> bool:
+    """True for single-source consumer/gaming filler without an AI topic."""
+    if (payload.get("source_count") or 0) > 1:
+        return False  # multi-source corroborated — worth showing
+    if payload.get("topic"):
+        return False  # classified into an AI×security topic
+    title = (payload.get("title") or "").lower()
+    return any(kw in title for kw in NOISE_KEYWORDS)
+
+
+
+
+
+
+def _epoch_seconds(iso_value: str | None) -> float:
+    """Parse an ISO timestamp to epoch seconds for sorting; 0 when absent."""
+    if not iso_value:
+        return 0.0
+    try:
+        return datetime.fromisoformat(iso_value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+def _cve_from_fingerprint(fingerprint: str | None) -> str | None:
+    """Extract the CVE id from an event fingerprint like cve-nvd:CVE-2026-1234."""
+    if not fingerprint:
+        return None
+    match = re.search(r"(CVE-\d{4}-\d{4,})", fingerprint)
+    return match.group(1) if match else None
 
 def collect(session, max_rows: int) -> dict[str, Any]:
     # only current, published documents (hide superseded/withdrawn/retired/rejected)
@@ -145,6 +257,7 @@ def collect(session, max_rows: int) -> dict[str, Any]:
         docs.append(
             {
                 "title": d.title_original,
+                "summary": _clean_summary(d.body_text, 400),
                 "url": d.canonical_url,
                 "source": d.endpoint_id,
                 "lang": d.language,
@@ -157,32 +270,119 @@ def collect(session, max_rows: int) -> dict[str, Any]:
             }
         )
 
-    # top recent general (non-vuln) events by score.
-    # Vuln-db events (NVD/KEV category) and any CVE-topic event (including news
-    # articles about CVEs) are excluded from the reader-facing hot list — CVE
-    # content is tracked separately.
-    # Only events seen within the last 24 hours appear, so the report reflects
-    # today's hot news rather than all-time highest-scoring historical events.
-    events = []
-    recent_cutoff = datetime.now(UTC) - timedelta(hours=24)
-    ev_stmt = (
-        select(Event)
+    # --- Hot spots: merged recent daily snapshots, re-ranked by source count ---
+    # Same source the /v1/daily-hotspots API serves; multi-source corroborated
+    # news outranks single-source filler. Noise (consumer/gaming) is demoted.
+    hotspot_lookback = datetime.now(UTC) - timedelta(days=HOTSPOT_LOOKBACK_DAYS)
+    snapshots = session.execute(
+        select(DailyHotspotSnapshot)
+        .where(
+            DailyHotspotSnapshot.generated_at >= hotspot_lookback,
+            DailyHotspotSnapshot.category.in_(("general", "all")),
+        )
+        .order_by(desc(DailyHotspotSnapshot.generated_at))
+    ).scalars().all()
+    snapshot_ids = [s.id for s in snapshots]
+    events: list[dict] = []
+    seen_event_ids: set[int] = set()
+    if snapshot_ids:
+        items = session.execute(
+            select(DailyHotspotItem)
+            .where(DailyHotspotItem.snapshot_id.in_(snapshot_ids))
+            .order_by(DailyHotspotItem.rank)
+        ).scalars()
+        for item in items:
+            payload = dict(item.payload)
+            event_id = int(payload.get("id") or 0)
+            if not event_id or event_id in seen_event_ids:
+                continue  # dedupe across snapshot revisions
+            # Exclude vuln-db (NVD/KEV) and CVE-topic entries from the reading
+            # hot list — CVE content is tracked separately.
+            category = payload.get("category")
+            topic = payload.get("topic")
+            if category == "vuln_db" or topic == "cve":
+                continue
+            seen_event_ids.add(event_id)
+            events.append(
+                {
+                    "id": event_id,
+                    "title": payload.get("title") or "",
+                    "summary": _clean_summary(payload.get("summary"), 500),
+                    "type": payload.get("event_type"),
+                    "topic": topic,
+                    "score": payload.get("score") or 0,
+                    "source_count": int(payload.get("source_count") or 0),
+                    "document_count": int(payload.get("document_count") or 0),
+                    "evidence_level": payload.get("evidence_level"),
+                    "last": payload.get("last_seen_at"),
+                    "noise": _is_noise(payload),
+                    "_sort_ts": _epoch_seconds(payload.get("last_seen_at")),
+                }
+            )
+    # Re-rank: multi-source first, then score, then recency. Noise sinks to
+    # the bottom (kept for the timeline, excluded from the Top N). Timestamps
+    # are ISO strings (sortable) with None treated as empty (oldest).
+    events.sort(
+        key=lambda e: (
+            e["noise"],  # False (non-noise) sorts before True
+            -(e["source_count"]),
+            -(e["score"] or 0),
+            -e["_sort_ts"],  # newest first
+        )
+    )
+
+    # Evidence chains for the Top hot events (docs behind each event).
+    top_events = [e for e in events if not e["noise"]][:50]
+    event_ids = [e["id"] for e in top_events]
+    evidence_by_event: dict[int, list[dict]] = {}
+    if event_ids:
+        rows = session.execute(
+            select(
+                EventDocument.event_id,
+                Document.title_original,
+                Document.canonical_url,
+                EventDocument.evidence_level,
+                EventDocument.stance,
+            )
+            .join(Document, Document.id == EventDocument.document_id)
+            .where(EventDocument.event_id.in_(event_ids))
+            .order_by(EventDocument.event_id, EventDocument.evidence_level)
+        ).all()
+        for row in rows:
+            evidence_by_event.setdefault(int(row.event_id), []).append(
+                {
+                    "title": row.title_original,
+                    "url": row.canonical_url,
+                    "level": row.evidence_level,
+                    "stance": row.stance,
+                }
+            )
+    for e in top_events:
+        e["evidence"] = evidence_by_event.get(e["id"], [])
+
+    # --- CVE focus: recent vuln-db events with their CVE ids (separate block) ---
+    cve_focus = []
+    cve_cutoff = datetime.now(UTC) - timedelta(days=HOTSPOT_LOOKBACK_DAYS)
+    cve_stmt = (
+        select(Event, func.count(EventDocument.id))
+        .join(EventDocument, EventDocument.event_id == Event.id)
         .where(
             Event.status == "detected",
-            (Event.category == "general") | (Event.category.is_(None)),
-            (Event.topic != "cve") | (Event.topic.is_(None)),
-            Event.last_seen_at >= recent_cutoff,
+            Event.category == "vuln_db",
+            Event.last_seen_at >= cve_cutoff,
         )
-        .order_by(desc(Event.score).nullslast(), desc(Event.last_seen_at).nullslast())
-        .limit(200)
+        .group_by(Event.id)
+        .order_by(desc(Event.last_seen_at))
+        .limit(30)
     )
-    for e in session.execute(ev_stmt).scalars():
-        events.append(
+    for e, ndocs in session.execute(cve_stmt):
+        cve_focus.append(
             {
                 "title": e.title,
-                "type": e.event_type,
-                "topic": e.topic,
+                "fingerprint": e.fingerprint,
+                "cve": _cve_from_fingerprint(e.fingerprint),
                 "score": e.score,
+                "docs": ndocs,
                 "last": _iso(e.last_seen_at),
             }
         )
@@ -204,6 +404,22 @@ def collect(session, max_rows: int) -> dict[str, Any]:
     active_sources = session.execute(
         select(func.count()).select_from(SourceEndpoint).where(SourceEndpoint.enabled.is_(True))
     ).scalar_one()
+
+    # --- source health: endpoints by status + failure counts ---
+    ep_status_rows = session.execute(
+        select(SourceEndpoint.status, func.count())
+        .group_by(SourceEndpoint.status)
+        .order_by(desc(func.count()))
+    ).all()
+    degraded_eps = session.execute(
+        select(SourceEndpoint.id, SourceEndpoint.status, SourceEndpoint.consecutive_failures)
+        .where(
+            SourceEndpoint.status.in_(["degraded", "failed", "paused"]),
+            SourceEndpoint.enabled.is_(True),
+        )
+        .order_by(desc(SourceEndpoint.consecutive_failures))
+        .limit(15)
+    ).all()
 
     # --- semantic enrichment summary (M2.2) ---
     sem_total = session.execute(select(func.count()).select_from(DocumentEnrichment)).scalar_one()
@@ -314,6 +530,7 @@ def collect(session, max_rows: int) -> dict[str, Any]:
             "cve_events": total_cve_events,
             "sources": active_sources,
             "sample": len(docs),
+            "hotspots": len([e for e in events if not e["noise"]]),
         },
         "sources": [{"id": k, "n": v} for k, v in src_rows],
         "tech": dict(tech_c.most_common()),
@@ -322,9 +539,18 @@ def collect(session, max_rows: int) -> dict[str, Any]:
         "lang": {(k or "?"): v for k, v in lang_rows},
         "docs": docs,
         "events": events,
+        "cve_focus": cve_focus,
+        "source_health": {
+            "by_status": {(k or "?"): v for k, v in ep_status_rows},
+            "degraded": [
+                {"id": ep.id, "status": ep.status, "failures": ep.consecutive_failures}
+                for ep in degraded_eps
+            ],
+        },
         "semantic": sem,
         "labels": {"tech": TECH_LABELS, "etype": ETYPE_LABELS, "source": SOURCE_LABELS},
         "bulkSources": sorted(BULK_SOURCES),
+        "hotspot": {"lookback_days": HOTSPOT_LOOKBACK_DAYS, "top_n": HOTSPOT_TOP_N},
     }
 
 

@@ -49,16 +49,19 @@ tech_directions:
        "vulnerability management", "penetration test", "pentest"]
   security_for_ai:
     # Protecting AI / attacking models
+    # Removed ambiguous solo words (watermark/alignment/robustness/backdoor/guardrail)
+    # that appear in non-security contexts (image watermarks, text alignment, general robustness).
+    # Keep only specific AI-security phrases.
     keywords:
       ["prompt injection", "indirect prompt injection", "jailbreak", "jailbreaking",
        "model extraction", "model stealing", "data poisoning", "training data poisoning",
        "adversarial attack", "adversarial example", "model supply chain", "safetensors",
        "RAG poisoning", "memory poisoning", "unsafe output", "guardrail bypass",
-       "safety bypass", "red team", "red-teaming", "alignment", "model inversion",
+       "safety bypass", "red team", "red-teaming", "model inversion",
        "提示注入", "越狱", "投毒", "对抗攻击", "模型窃取", "安全对齐",
-       # category-1 additions
-       "guardrail", "watermark", "backdoor", "robustness", "instruction hierarchy",
-       "retrieval-augmented", "membership inference", "model poisoning", "LLM safety"]
+       # category-1 additions (kept specific AI-security phrases only)
+       "instruction hierarchy", "retrieval-augmented", "membership inference",
+       "model poisoning", "LLM safety", "model watermark", "AI alignment"]
   agent:
     keywords:
       ["agent", "agentic", "AI agent", "multi-agent", "MCP", "Model Context Protocol",
