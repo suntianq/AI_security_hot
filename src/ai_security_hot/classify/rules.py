@@ -17,8 +17,8 @@ from ai_security_hot.domain.models import NormalizedDocument, content_sha256
 def _strip_html_and_urls(text: str) -> str:
     """Remove HTML tags and URLs to prevent classification noise.
 
-    IT之家等来源的body_text含图片URL参数（image/watermark等）会污染关键词匹配。
-    在分类前清理HTML标签、img src、URL参数，只保留纯文本内容。
+    IT之家等来源的body_text含图片URL参数(image/watermark等)会污染关键词匹配.
+    在分类前清理HTML标签, img src, URL参数, 只保留纯文本内容.
     """
     # Remove HTML tags
     text = re.sub(r"<[^>]+>", " ", text)
