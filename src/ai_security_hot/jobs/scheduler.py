@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -184,65 +183,6 @@ def tick() -> None:
     event_tick()
 
 
-def daily_report_tick() -> None:
-    """Regenerate today's local HTML daily report when the snapshot advanced.
-
-    Idempotent: only writes when the latest general snapshot revision differs
-    from the one the report was last generated from (tracked by a stamp file),
-    so it runs safely both on the 09:30 schedule and after each classify/event
-    pass without rewriting identical output.
-    """
-    try:
-        settings = get_settings()
-        output_dir = Path(settings.daily_report_output_dir)
-        stamp_file = output_dir / ".daily_report_stamp"
-        today = datetime.now(UTC) + timedelta(hours=8)  # Asia/Shanghai
-        date_str = today.strftime("%Y-%m-%d")
-
-        from sqlalchemy import desc as _desc
-        from sqlalchemy import select
-
-        from ai_security_hot.models.tables import DailyHotspotSnapshot
-
-        with session_scope() as session:
-            snapshot = session.execute(
-                select(DailyHotspotSnapshot)
-                .where(
-                    DailyHotspotSnapshot.natural_date == today.date(),
-                    DailyHotspotSnapshot.category == "general",
-                )
-                .order_by(_desc(DailyHotspotSnapshot.revision))
-                .limit(1)
-            ).scalar_one_or_none()
-            if snapshot is None:
-                log.info("daily_report_tick: no general snapshot yet, skipping")
-                return
-            new_key = f"{today.date().isoformat()}:{snapshot.revision}:{snapshot.content_hash[:12]}"
-        last_key = stamp_file.read_text(encoding="utf-8").strip() if stamp_file.exists() else ""
-        if last_key == new_key:
-            return  # unchanged — don't rewrite
-        # Run the generator as a subprocess so it loads sources/env cleanly.
-        import subprocess
-
-        script = Path(__file__).resolve().parents[3] / "scripts" / "gen_daily.py"
-        output_html = output_dir / f"daily-{date_str}.html"
-        subprocess.run(  # noqa: S603
-            [sys.executable, str(script), str(output_dir)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        stamp_file.write_text(new_key, encoding="utf-8")
-        log.info(
-            "daily_report_tick: regenerated %s (snapshot rev %s)",
-            output_html,
-            snapshot.revision,
-        )
-    except Exception:
-        log.exception("daily_report_tick failed")
-
-
 def run_worker() -> None:
     settings = get_settings()
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
@@ -328,27 +268,6 @@ def run_worker() -> None:
             "interval",
             seconds=settings.daily_snapshot_interval_seconds,
             id="daily_snapshot",
-            max_instances=1,
-            coalesce=True,
-            next_run_time=first_run,
-        )
-    if settings.daily_report_enabled:
-        # 09:30 daily + periodic regeneration when new content finishes
-        # classify/cluster (idempotent via stamp file).
-        scheduler.add_job(
-            daily_report_tick,
-            "cron",
-            hour=settings.daily_report_hour,
-            minute=settings.daily_report_minute,
-            id="daily_report_scheduled",
-            max_instances=1,
-            coalesce=True,
-        )
-        scheduler.add_job(
-            daily_report_tick,
-            "interval",
-            seconds=settings.daily_report_regenerate_interval_seconds,
-            id="daily_report_regenerate",
             max_instances=1,
             coalesce=True,
             next_run_time=first_run,

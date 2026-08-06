@@ -13,7 +13,8 @@
 - 非敏感模型 profile：`config/models.yaml` 和 `config/embeddings.yaml`。
 - 密钥只允许来自环境变量或本地 `.env`，不得出现在代码、YAML、日志、提交或回复中。
 - 当前 Alembic head 为 `7a91d2e4f6b8`；新增迁移后同步更新本节。
-- 当前注册表包含 17 个 source、19 个 endpoint，其中 18 个 active、1 个 retired。
+- 当前注册表包含 18 个 source、20 个 endpoint（含 Black Hat Briefings，使用
+  playwright connector 通过独立容器抓取）。
 
 ## 开始任何任务前
 
@@ -48,6 +49,13 @@
   事件版本保护。
 - 每日热点读取冻结 revision；`as_of` 不得从当前 Event 临时伪造历史状态。
 - API 读取 Token 与 `/ops/*` 管理 Token 分离并 fail-closed；健康探针保持无认证。
+- 只读路由接受 read token 或 admin token（后台用一个凭证读取）；`/ops/*` 写操作只认
+  admin token。
+- 公开前端页面（`/`、`/admin.html`、`/login.html`、`/assets/`）与 `/api/*` 聚合接口
+  无需 token；后台页面在登录后把 admin token 存 localStorage，前端 JS 调 `/ops/*`
+  时带上 Bearer。不能把密钥写进前端代码。
+- 前端聚合服务在 `services/overview.py`（`build_overview`），取代旧 gen_daily 脚本；
+  页面数据来自 `GET /api/overview`，不要为前端新增旁路 SQL。
 
 ## 修改代码的习惯
 
@@ -124,10 +132,14 @@ INTEL_RUN_LIVE=1 uv run pytest -m live -v
 
 ## 当前已知边界
 
-- Playwright profile 只是预留，镜像没有浏览器和动态网页 connector。
+- Black Hat Briefings 通过独立 playwright 容器抓取（compose `--profile playwright`
+  门控）；主 worker 镜像不含浏览器，普通信源不受影响。
 - worker heartbeat 只证明调度器在运行，主动告警和跨实例任务健康仍需增强。
 - `/ops/tick` 仍同步执行，不适合暴露给不可信调用方。
+- 后台管理提供文档/事件增删改查、打标签、一键分类/聚类；完整用户体系、多管理员
+  和操作审计尚未实现（单一 admin token）。
 - LLM 关系三分类、重要性/新颖性/紧急性判断和自动正式提升尚未开放。
-- 邮件、飞书投递和自动日报文案尚未实现。
+- 邮件、飞书投递和自动日报文案尚未实现；前端网站 + 后台管理已取代旧的
+  `gen_report.py` / `gen_daily.py` 静态报告脚本。
 - RSS 等窗口型信源无法从空库恢复上游窗口外的历史。
 - Embedding 默认关闭；在未完成真实模型校准前保持关闭。

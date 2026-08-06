@@ -34,7 +34,7 @@ AI Security Hot 是一个面向 AI 与网络安全领域的增量情报后端。
   -> 规则或混合分类
   -> 局部去重与事件聚合
   -> Event / Claim / Evidence / EventVersion
-  -> 每日热点快照 / API / report.html
+  -> 每日热点快照 / API / 前端网站 / 后台管理
 
 可选语义支路
   -> LLM 影子抽取
@@ -112,7 +112,8 @@ Linux 应只在项目 Docker 网桥地址上暴露代理入口，不能把代理
 
 ## API
 
-健康接口无需认证；读取接口和 `/ops/*` 分别使用只读 Token 与管理员 Token。
+健康接口、静态前端页面和 `/api/*` 聚合接口无需认证；读取接口接受只读 Token 或
+管理员 Token；`/ops/*` 写操作只接受管理员 Token。
 
 ```bash
 curl http://127.0.0.1:8000/health/ready
@@ -131,7 +132,17 @@ curl -H "Authorization: Bearer $INTEL_API_TOKEN" "http://127.0.0.1:8000/v1/daily
 - `GET /events`、`GET /events/{id}`
 - `GET /v1/daily-hotspots`
 - `GET /stats`
+- `GET /api/overview` — 公开前端聚合（热点 + 模块时间线），无需 token
 - `GET /ops/self-check`
+
+后台管理写接口（`/ops/`，管理员 Token）：
+
+- `PATCH /ops/documents/{id}` — 手动打标签/改分类
+- `PATCH /ops/documents/{id}/status`、`DELETE /ops/documents/{id}` — 软删/物理删
+- `POST /ops/documents/{id}/requeue` — 单文档重新聚类
+- `PATCH /ops/events/{id}/status`、`DELETE /ops/events/{id}` — 事件软删/物理删
+- `POST /ops/classify`、`POST /ops/cluster` — 一键分类 / 聚类+去重
+- `GET /ops/taxonomy`、`POST/DELETE /ops/taxonomy/tags` — 标签分类管理
 
 ## 常用运维命令
 
@@ -194,14 +205,18 @@ INTEL_EMBEDDING_ENABLED=false
 
 向量相似度只用于召回可能相关的候选，不会绕过强身份冲突规则，也不会自动合并事件。
 
-## 生成静态报告
+## 前端网站与后台管理
 
-```bash
-uv run python scripts/gen_report.py report.html
-```
+`intel serve` 同时提供 API 和内置 Web 前端（`web/` 目录静态挂载）：
 
-生成结果是一个可离线打开的自包含 HTML，展示信源、分类、文档、事件、证据、语义任务
-和运行状态。`report.html` 属于本地生成文件，不进入 Git。
+- **公开前端** `/`：AI × Security 热点站，浅色卡片风格——今日热点 Top10、按模块
+  （资讯/论文/CVE/开源Trending/Black Hat）分组的按日时间线、多源报道标记。
+  数据来自 `GET /api/overview`（无需 token）。
+- **后台管理** `/admin.html`：登录后（输入 `INTEL_ADMIN_API_TOKEN`）可实时管理——
+  文档/事件增删改查（打标签、软删/恢复、物理删除、重新聚类）、标签分类管理
+  （taxonomy 关键词增删）、一键分类/聚类/完整流水线触发。
+
+后台写操作全部挂 `/ops/` 前缀，由 `INTEL_ADMIN_API_TOKEN` 保护。
 
 ## 开发与验证
 

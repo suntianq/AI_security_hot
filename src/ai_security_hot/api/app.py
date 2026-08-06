@@ -46,30 +46,71 @@ app = FastAPI(title="AI Security Hot — Intel Backend", version="0.2.0")
 
 _PUBLIC_HEALTH_PATHS = {"/health", "/health/live", "/health/ready"}
 
+# Public read-only aggregations for the public frontend (no token needed — the
+# browser page cannot carry a bearer token). Admin mutations stay under /ops/.
+_PUBLIC_API_PREFIXES = ("/api/",)
+
+# Static frontend files (pages + assets) are public; admin auth is enforced in
+# the SPA by redirecting to /login.html before any /ops/ call.
+_PUBLIC_STATIC = {"/", "/index.html", "/admin.html", "/login.html", "/favicon.ico"}
+_PUBLIC_STATIC_PREFIXES = ("/assets/",)
+
+
+# --- admin + frontend routers (imported after app exists to attach routes) ---
+from ai_security_hot.api.admin import router as admin_router  # noqa: E402
+from ai_security_hot.api.frontend import router as frontend_router  # noqa: E402
+
+app.include_router(frontend_router)
+app.include_router(admin_router)
+
 
 @app.middleware("http")
 async def _require_bearer_token(request: Request, call_next) -> Response:
     """Use separate fail-closed tokens for read and administrative routes."""
-    if request.url.path in _PUBLIC_HEALTH_PATHS:
+    path = request.url.path
+    if path in _PUBLIC_HEALTH_PATHS:
+        return await call_next(request)
+    if path.startswith(_PUBLIC_API_PREFIXES):
+        return await call_next(request)
+    if path in _PUBLIC_STATIC or path.startswith(_PUBLIC_STATIC_PREFIXES):
         return await call_next(request)
 
     settings = get_settings()
     is_admin = request.url.path.startswith("/ops/")
-    token = settings.admin_api_token if is_admin else settings.api_token
-    token_name = "INTEL_ADMIN_API_TOKEN" if is_admin else "INTEL_API_TOKEN"
-    if not token:
-        return JSONResponse(
-            status_code=503,
-            content={"detail": f"{token_name} is not configured"},
-        )
+    if is_admin:
+        # Mutations / admin routes require the admin token only.
+        expected = settings.admin_api_token
+        name = "INTEL_ADMIN_API_TOKEN"
+    else:
+        # Read routes accept either the read token or the admin token (admin is
+        # a superset, so the management console can read with one credential).
+        expected = settings.api_token
+        name = "INTEL_API_TOKEN"
+    if not expected:
+        # Admin may fall back to the read token for read routes if unset.
+        if not is_admin and settings.admin_api_token:
+            expected = settings.admin_api_token
+            name = "INTEL_ADMIN_API_TOKEN"
+        if not expected:
+            return JSONResponse(
+                status_code=503,
+                content={"detail": f"{name} is not configured"},
+            )
 
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         return JSONResponse(status_code=401, content={"detail": "unauthorized"})
     provided = header.removeprefix("Bearer ")
-    if not provided or not secrets.compare_digest(provided, token):
+    if not provided:
         return JSONResponse(status_code=401, content={"detail": "unauthorized"})
-    return await call_next(request)
+    if secrets.compare_digest(provided, expected):
+        return await call_next(request)
+    # Read routes additionally accept the admin token when provided.
+    if not is_admin and settings.admin_api_token and secrets.compare_digest(
+        provided, settings.admin_api_token
+    ):
+        return await call_next(request)
+    return JSONResponse(status_code=401, content={"detail": "unauthorized"})
 
 
 @lru_cache
@@ -441,3 +482,28 @@ def get_document(document_id: int) -> dict:
             "withdrawn_at": d.withdrawn_at.isoformat() if d.withdrawn_at else None,
             "classify_error": d.classify_error,
         }
+
+
+# --- CORS for the SPA/admin pages (internal deployment) ---
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+
+_settings = get_settings()
+_cors_origins = [o.strip() for o in (_settings.cors_origins or "").split(",") if o.strip()]
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+# --- Public static frontend (web/), mounted last so API routes take priority ---
+from pathlib import Path  # noqa: E402
+
+if _settings.web_dir:
+    _web_path = Path(_settings.web_dir)
+    if _web_path.is_dir():
+        from fastapi.staticfiles import StaticFiles
+
+        app.mount("/", StaticFiles(directory=str(_web_path), html=True), name="web")

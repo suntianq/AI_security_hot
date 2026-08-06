@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>后台登录 · AI Security Hot</title>
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<div class="login-wrap">
+  <div class="login-card">
+    <h1>🔐 后台管理</h1>
+    <p>输入管理员 Token 登录</p>
+    <input type="password" id="token" placeholder="INTEL_ADMIN_API_TOKEN" autocomplete="off">
+    <button id="loginBtn">登 录</button>
+    <div class="err" id="err"></div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const token = localStorage.getItem('admin_token');
+if (token) {
+  fetch('/ops/auth/check', {headers: {'Authorization': 'Bearer ' + token}})
+    .then(r => r.ok ? (location.href = '/admin.html') : null);
+}
+$('loginBtn').onclick = async () => {
+  const t = $('token').value.trim();
+  if (!t) { $('err').textContent = '请输入 Token'; return; }
+  try {
+    const r = await fetch('/ops/auth/check', {headers: {'Authorization': 'Bearer ' + t}});
+    if (r.ok) {
+      localStorage.setItem('admin_token', t);
+      location.href = '/admin.html';
+    } else {
+      $('err').textContent = r.status === 401 ? 'Token 无效' : (r.status === 503 ? '服务端未配置 admin token' : '认证失败 (' + r.status + ')');
+    }
+  } catch (e) { $('err').textContent = '无法连接服务端'; }
+};
+$('token').addEventListener('keydown', e => { if (e.key === 'Enter') $('loginBtn').onclick(); });
+</script>
+</body>
+</html>

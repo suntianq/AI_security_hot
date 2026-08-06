@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI × Security 热点</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%230071e3'/><text x='50' y='68' font-size='52' font-weight='bold' text-anchor='middle' fill='white' font-family='Arial'>AI</text></svg>">
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <div class="brand"><div class="logo">AI</div>Security Hot<span id="dateLabel"></span></div>
+    <nav class="nav">
+      <a href="#all" class="active" data-filter="all">精选</a>
+      <a href="#news" data-filter="news">资讯</a>
+      <a href="#papers" data-filter="papers">论文</a>
+      <a href="#cve" data-filter="cve">CVE</a>
+      <a href="#trending" data-filter="trending">Trending</a>
+      <a href="#blackhat" data-filter="blackhat">Black Hat</a>
+    </nav>
+  </div>
+</header>
+
+<div class="wrap">
+  <!-- Hot ranking -->
+  <div class="section-title"><span class="bar"></span>今日热点<span class="count" id="hotCount"></span></div>
+  <div class="hot-list" id="hotList"></div>
+
+  <!-- Category tabs -->
+  <div class="cat-tabs" id="catTabs"></div>
+
+  <!-- Modules -->
+  <div id="modules"></div>
+</div>
+
+<footer id="footer"></footer>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>
