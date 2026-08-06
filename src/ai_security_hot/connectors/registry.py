@@ -5,6 +5,7 @@ from __future__ import annotations
 from ai_security_hot.connectors.aihot import AIHotConnector
 from ai_security_hot.connectors.arxiv import ArxivConnector
 from ai_security_hot.connectors.base import Connector, Parser
+from ai_security_hot.connectors.blackhat import BlackHatConnector
 from ai_security_hot.connectors.fetch import FetchContext
 from ai_security_hot.connectors.github import GitHubConnector
 from ai_security_hot.connectors.nvd import NvdConnector
@@ -15,6 +16,7 @@ from ai_security_hot.connectors.web import WebListConnector
 from ai_security_hot.domain.enums import ConnectorKind
 from ai_security_hot.parsers.aihot import AIHotParser
 from ai_security_hot.parsers.arxiv import ArxivParser
+from ai_security_hot.parsers.blackhat import BlackHatParser
 from ai_security_hot.parsers.cisa_kev import CisaKevParser
 from ai_security_hot.parsers.github_releases import GitHubReleasesParser
 from ai_security_hot.parsers.nvd import NvdParser
@@ -31,6 +33,7 @@ _CONNECTORS = {
     ConnectorKind.WEB: WebListConnector,
     ConnectorKind.ARXIV: ArxivConnector,
     ConnectorKind.SITEMAP: SitemapConnector,
+    ConnectorKind.PLAYWRIGHT: BlackHatConnector,
 }
 
 _PARSERS: dict[str, type[Parser]] = {
@@ -43,6 +46,7 @@ _PARSERS: dict[str, type[Parser]] = {
     "web-article-v1": WebArticleParser,
     "arxiv-v1": ArxivParser,
     "sitemap-article-v1": SitemapArticleParser,
+    "blackhat-v1": BlackHatParser,
 }
 
 

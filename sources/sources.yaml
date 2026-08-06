@@ -92,6 +92,11 @@ sources:
     trust_tier: C
     language: en
     org: GitHub
+  - id: blackhat
+    name: Black Hat Briefings
+    trust_tier: A
+    language: en
+    org: Black Hat
 
 endpoints:
   # --- RSS ---
@@ -481,4 +486,21 @@ endpoints:
     egress: { route: proxy_pool_global }
     schedule: { interval_minutes: 720, jitter_seconds: 600 }
     fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai]
+
+  # Black Hat USA 2026 Briefings（会议议题，非每日源；Cloudflare 防护，由独立
+  # playwright 容器抓取 sessions.json 写入共享卷，本 connector 读卷）
+  - id: blackhat-us26-briefings
+    source_id: blackhat
+    connector: playwright
+    parser: blackhat-v1
+    url: https://blackhat.com/us-26/briefings/schedule/
+    enabled: true
+    trust_tier: A
+    priority: P2
+    language: en
+    schedule: { interval_minutes: 10080, jitter_seconds: 600 }   # 每周一次
+    options:
+      blackhat:
+        data_file: /shared/blackhat/sessions.json
     topics: [ai]

@@ -151,6 +151,24 @@ uv run intel stats                # 查看数据量与流水线状态
 uv run intel export --format jsonl --out documents.jsonl
 ```
 
+### Black Hat Briefings（Cloudflare 防护源）
+
+Black Hat 议题由独立 Playwright 容器抓取（通过 Cloudflare 质询），写入共享卷，
+主 worker 的 fetch 阶段再读取入库。手动触发一次：
+
+```bash
+docker compose --profile playwright run --rm playwright
+```
+
+可用宿主 cron 每周自动触发（例如每周日 03:00）：
+
+```cron
+0 3 * * 0  cd /path/to/ai_security_hot && docker compose --profile playwright run --rm playwright >> /var/log/blackhat_fetch.log 2>&1
+```
+
+Black Hat 是周期性会议（US 每年 8 月、Asia 每年 5 月左右），会议结束后可
+`docker compose --profile playwright stop` 或移除 endpoint。
+
 ## 可选模型配置
 
 LLM profile 位于 `config/models.yaml`，部署时由 `INTEL_LLM_*` 环境变量覆盖。API Key
@@ -208,7 +226,9 @@ INTEL_RUN_LIVE=1 uv run pytest -m live -v
 - 语义抽取默认处于影子模式，不会自动改写正式事件。
 - Embedding 候选召回默认关闭，正式关系裁决仍以确定性规则和人工门禁为主。
 - 正式语义事件提升必须显式执行 `event-promote --apply`。
-- 动态网页 Playwright 抓取、主动告警、邮件/飞书投递和自动生成日报文案尚未提供。
+- 动态网页抓取仅用于 Cloudflare 防护的信源（Black Hat Briefings）：通过
+  `--profile playwright` 的独立容器抓取，主 worker 不内置浏览器。
+- 主动告警、邮件/飞书投递尚未提供。
 - RSS 等窗口型来源只能抓取上游当前仍返回的内容，空库冷启动不能恢复窗口之外的历史。
 
 ## 目录

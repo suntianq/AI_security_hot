@@ -109,12 +109,40 @@ NOISE_KEYWORDS = (
 )
 
 HOT_TOP_N = 10
+# Per-module cap for the timeline. Each module scrolls independently, so a
+# generous cap keeps every section populated without a single global limit
+# starving the smaller modules (papers/trending) behind bulk CVE/blackhat rows.
+PER_MODULE_MAX = 200
 TIMEZONE_OFFSET_HOURS = 8  # Asia/Shanghai
 
 # Endpoints excluded from the reading timeline: structured vulnerability feeds
 # (they have their own score path) plus disabled sources such as IT之家 that
 # are paused pending a filtering rule.
 EXCLUDED_ENDPOINTS = set(STRUCTURED_VULN_ENDPOINTS) | {"ithome-rss"}
+
+# Daily-report modules: which endpoint groups appear under which section.
+# Each module has a label and the endpoints that feed it. Documents not in any
+# module fall into "news" by default.
+MODULES = [
+    {"id": "news", "label": "资讯 · 新闻", "endpoints": [
+        "aihot-selected-api", "aihot-selected-rss", "hackernews-rss",
+        "portswigger-research-rss", "google-security-rss", "trailofbits-rss",
+        "wiz-blog-rss", "nvidia-blog-rss", "openai-news-rss",
+        "google-blog-ai-rss", "anthropic-news", "apple-ml-research-rss",
+        "huggingface-blog-rss",
+    ]},
+    {"id": "papers", "label": "论文 · 研究", "endpoints": [
+        "arxiv-ai-llm", "arxiv-security-ai",
+    ]},
+    {"id": "cve", "label": "CVE 漏洞", "endpoints": ["nvd-recent", "cisa-kev"]},
+    {"id": "trending", "label": "开源 Trending", "endpoints": ["github-trending-rss"]},
+    {"id": "blackhat", "label": "Black Hat", "endpoints": ["blackhat-us26-briefings"]},
+]
+
+_MODULE_BY_ENDPOINT = {
+    ep: m["id"] for m in MODULES for ep in m["endpoints"]
+}
+
 
 
 def _clean_summary(text: str | None, limit: int = 300) -> str:
@@ -231,13 +259,15 @@ def collect(session) -> dict[str, Any]:
     )
     hotspots = hotspots[: HOT_TOP_N]
 
-    # --- today's timeline: freshly fetched general documents (exclude vuln endpoints) ---
+    # --- today's timeline grouped by module ---
     source_labels_rows = session.execute(
         select(SourceEndpoint.id, Source.name)
         .join(Source, Source.id == SourceEndpoint.source_id)
     ).all()
     source_name = {row.id: row.name for row in source_labels_rows}
 
+    # All module endpoints combined (CVE included; it has its own section).
+    module_endpoints = {ep for m in MODULES for ep in m["endpoints"]}
     rows = session.execute(
         select(
             Document.id,
@@ -255,20 +285,23 @@ def collect(session) -> dict[str, Any]:
         .where(
             Document.source_status == "active",
             Document.record_status == "published",
-            Document.endpoint_id.notin_(EXCLUDED_ENDPOINTS),
+            Document.endpoint_id.in_(module_endpoints),
             RawItem.fetched_at >= day_start_utc,
             RawItem.fetched_at < day_end_utc,
         )
         .order_by(desc(RawItem.fetched_at))
-        .limit(400)
     ).all()
-    timeline: list[dict] = []
+    timeline_by_module: dict[str, list[dict]] = {}
     for row in rows:
         title = row.title_original
         topic = (row.tech_directions or ["?"])[0] if row.tech_directions else None
         if _is_noise(title, topic):
             continue
-        timeline.append(
+        module = _MODULE_BY_ENDPOINT.get(row.endpoint_id, "news")
+        bucket = timeline_by_module.setdefault(module, [])
+        if len(bucket) >= PER_MODULE_MAX:
+            continue  # module already full — keep the newest PER_MODULE_MAX rows
+        bucket.append(
             {
                 "title": title,
                 "summary": _clean_summary(row.body_text, 300),
@@ -288,7 +321,7 @@ def collect(session) -> dict[str, Any]:
         .where(
             Document.source_status == "active",
             Document.record_status == "published",
-            Document.endpoint_id.notin_(EXCLUDED_ENDPOINTS),
+            Document.endpoint_id.in_(module_endpoints),
             RawItem.fetched_at >= day_start_utc,
             RawItem.fetched_at < day_end_utc,
         )
@@ -299,13 +332,24 @@ def collect(session) -> dict[str, Any]:
     for endpoint, url, _count in dup_rows:
         url_sources.setdefault(str(url), []).append(str(endpoint))
 
+    # Ordered modules: only modules with content are emitted; others omitted.
+    modules = [
+        {
+            "id": m["id"],
+            "label": m["label"],
+            "items": timeline_by_module.get(m["id"], []),
+        }
+        for m in MODULES
+        if timeline_by_module.get(m["id"])
+    ]
+
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "date": today.isoformat(),
         "weekday": ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][today.weekday()],
         "snapshot_generated_at": snapshot_generated_at.isoformat(),
         "hotspots": hotspots,
-        "timeline": timeline,
+        "modules": modules,
         "url_sources": url_sources,
         "labels": {
             "source": SOURCE_LABELS,
@@ -456,6 +500,28 @@ header{{
 .tag.system_security{{color:var(--c6);border-color:rgba(251,146,60,.35);background:rgba(251,146,60,.08)}}
 .tag.et{{color:var(--acc);border-color:rgba(56,189,248,.35);background:rgba(56,189,248,.08)}}
 
+/* Collapsible module + scrollable body */
+.hot-section[data-module] .hot-title{{cursor:pointer;user-select:none;
+  transition:color .15s ease}}
+.hot-section[data-module] .hot-title:hover{{color:var(--acc)}}
+.hot-section[data-module] .hot-title .chevron{{margin-left:8px;font-size:12px;
+  color:var(--dim);transition:transform .2s ease}}
+.hot-section[data-module].collapsed .hot-title .chevron{{transform:rotate(-90deg)}}
+.module-scroll{{
+  max-height:460px;overflow-y:auto;overflow-x:hidden;
+  padding:2px 10px 2px 2px;margin-right:-6px;
+  transition:max-height .25s ease;
+}}
+.hot-section[data-module].collapsed .module-scroll{{max-height:0;overflow:hidden;
+  padding-top:0;padding-bottom:0}}
+.module-scroll::-webkit-scrollbar{{width:8px}}
+.module-scroll::-webkit-scrollbar-track{{background:transparent}}
+.module-scroll::-webkit-scrollbar-thumb{{background:rgba(148,163,184,.25);
+  border-radius:8px;border:2px solid transparent;background-clip:padding-box}}
+.module-scroll::-webkit-scrollbar-thumb:hover{{background:rgba(148,163,184,.45);
+  background-clip:padding-box}}
+.module-scroll{{scrollbar-width:thin;scrollbar-color:rgba(148,163,184,.3) transparent}}
+
 footer{{text-align:center;padding:24px;color:var(--dim);font-size:12px;
   border-top:1px solid var(--line);margin-top:20px}}
 footer .dot{{display:inline-block;width:6px;height:6px;border-radius:50%;
@@ -488,10 +554,7 @@ footer .dot{{display:inline-block;width:6px;height:6px;border-radius:50%;
     <div class="hot-title"><span class="bar"></span>今日热点 <span class="count">多来源优先 · 仅资讯</span></div>
     <div class="hot-list" id="hotList"></div>
   </div>
-  <div class="hot-section">
-    <div class="hot-title"><span class="bar"></span>今日动态 <span class="count" id="tlCount"></span></div>
-    <div class="timeline-wrap" id="timeline"></div>
-  </div>
+  <div id="modules"></div>
 </div>
 <footer><span class="dot"></span>生成于 {generated_at} · AI Security Hot</footer>
 
@@ -524,7 +587,7 @@ $('hotList').innerHTML = (D.hotspots||[]).map((e,i)=>{
   </div>`;
 }).join('') || '<div style="color:var(--dim);padding:24px">今日暂无热点</div>';
 
-// ---- Timeline ----
+// ---- Modules (each section is one content type) ----
 function techTags(arr){
   return (arr||[]).filter(x=>x!=='cve').map(x=>`<span class="tag ${x}">${esc(L.tech[x]||x)}</span>`).join('');
 }
@@ -534,8 +597,8 @@ function multiSources(url){
   const names = srcs.map(s=>esc(L.source[s]||s)).join('、');
   return `<span class="tl-multi">另有 ${srcs.length-1} 家信源报道 · ${names}</span>`;
 }
-const tlItems = (D.timeline||[]).map(d=>`
-  <div class="tl-item">
+function moduleItem(d){
+  return `<div class="tl-item">
     <div class="tl-time">${esc((d.fetched||'').substring(11,16))}</div>
     <div class="tl-body">
       <div class="tl-meta">
@@ -546,9 +609,22 @@ const tlItems = (D.timeline||[]).map(d=>`
       ${multiSources(d.url)}
       ${d.tech&&d.tech.length?`<div class="tl-tags">${techTags(d.tech)}</div>`:''}
     </div>
+  </div>`;
+}
+const moduleHTML = (D.modules||[]).map(m=>`
+  <div class="hot-section" data-module="${esc(m.id)}">
+    <div class="hot-title"><span class="bar"></span>${esc(m.label)}
+      <span class="count">${m.items.length} 条</span><span class="chevron">▼</span></div>
+    <div class="module-scroll">
+      <div class="timeline-wrap">${m.items.map(moduleItem).join('')}</div>
+    </div>
   </div>`).join('');
-$('timeline').innerHTML = tlItems || '<div style="color:var(--dim);padding:24px">今日暂无动态</div>';
-$('tlCount').textContent = `${D.timeline?.length||0} 条`;
+$('modules').innerHTML = moduleHTML || '<div style="color:var(--dim);padding:24px">今日暂无内容</div>';
+
+// Click a module title to collapse/expand its scrollable body.
+document.querySelectorAll('.hot-section[data-module] .hot-title').forEach(t=>{
+  t.addEventListener('click', ()=> t.parentElement.classList.toggle('collapsed'));
+});
 </script>
 </body>
 </html>
@@ -580,9 +656,10 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     out = out / f"daily-{today}.html"
     out.write_text(html, encoding="utf-8")
+    module_counts = {m["id"]: len(m["items"]) for m in data["modules"]}
     print(
         f"wrote {out} — {len(data['hotspots'])} hotspots, "
-        f"{len(data['timeline'])} timeline items, {out.stat().st_size // 1024} KB"
+        f"modules={module_counts}, {out.stat().st_size // 1024} KB"
     )
 
 
