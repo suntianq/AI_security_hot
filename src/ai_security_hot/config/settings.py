@@ -128,6 +128,15 @@ class Settings(BaseSettings):
     daily_snapshot_timezone: str = Field(default="Asia/Shanghai")
     daily_snapshot_limit: int = Field(default=100, ge=1, le=500)
 
+    # --- daily HTML report (local generation, no delivery) ---
+    daily_report_enabled: bool = Field(default=True)
+    daily_report_hour: int = Field(default=9, ge=0, le=23)
+    daily_report_minute: int = Field(default=30, ge=0, le=59)
+    daily_report_output_dir: str = Field(default="delivery")
+    # regenerate the daily report whenever new sources finish classifying +
+    # clustering (bounded re-check interval)
+    daily_report_regenerate_interval_seconds: int = Field(default=1800, ge=60, le=86400)
+
     # --- M2.3.1 embedding candidate recall (disabled by default) ---
     embedding_enabled: bool = Field(default=False)
     embedding_config_file: str = Field(default="config/embeddings.yaml")

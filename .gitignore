@@ -13,3 +13,4 @@ exports/
 *.csv
 *.jsonl
 .claude/
+delivery/

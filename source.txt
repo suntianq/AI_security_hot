@@ -13,3 +13,5 @@ https://arxiv.org/list/cs.AI/recent
 https://www.ithome.com/
 https://blog.google/innovation-and-ai/technology/ai/
 https://github.com/trending
+https://huggingface.co/papers/trending
+https://huggingface.co/papers/date/xxxx-xx-xx

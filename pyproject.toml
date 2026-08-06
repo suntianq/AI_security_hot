@@ -56,6 +56,7 @@ ignore = ["S101", "RUF003"]  # allow assert in tests; allow fullwidth punctuatio
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S", "B"]
 "migrations/**" = ["ALL"]
+"scripts/gen_daily.py" = ["RUF001", "E501"]  # HTML template: CJK punctuation + long JS lines are content
 
 [tool.pyright]
 include = ["src", "tests"]

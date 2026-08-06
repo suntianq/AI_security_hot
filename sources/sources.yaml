@@ -443,7 +443,7 @@ endpoints:
     connector: rss
     parser: rss-default-v1
     url: https://www.ithome.com/rss/
-    enabled: true
+    enabled: false  # 2026-08-06: paused — IT之家泛科技噪音多，先停抓，后续设计过滤规则后再恢复
     trust_tier: C
     priority: P2
     language: zh
