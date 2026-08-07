@@ -88,6 +88,7 @@ export interface DocumentDetail {
   id: number;
   title: string;
   body: string | null;
+  summary: string; // clean text snippet of body, "" when there is no content
   url: string;
   source: string;
   source_name: string;

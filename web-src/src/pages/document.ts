@@ -39,9 +39,7 @@ async function load(documentId: string): Promise<void> {
           查看原文 ↗
         </a>
       </div>
-      <div class="article-card mt-lg">
-        <div class="doc-body">${renderDocumentBody(doc.body)}</div>
-      </div>
+      ${renderArticle(doc)}
     `;
   } catch (e) {
     content.innerHTML = errorStateHtml(
@@ -49,4 +47,26 @@ async function load(documentId: string): Promise<void> {
       () => void load(documentId),
     );
   }
+}
+
+// Full body when available; otherwise the summary; otherwise an honest
+// "external link, body not fetched yet" state instead of a blank card.
+function renderArticle(doc: { body: string | null; summary: string }): string {
+  if (doc.body && doc.body.trim()) {
+    return `<div class="article-card mt-lg"><div class="doc-body">${renderDocumentBody(doc.body)}</div></div>`;
+  }
+  if (doc.summary) {
+    return `
+      <div class="article-card mt-lg">
+        <div class="section-title"><span class="bar"></span>摘要</div>
+        <div class="doc-body">${esc(doc.summary)}</div>
+      </div>`;
+  }
+  return `
+    <div class="article-card mt-lg">
+      <div class="empty-state">
+        <div class="empty-title">外部链接文章</div>
+        <div class="empty-hint">本地尚未抓取正文，可点击上方「查看原文」阅读原文。</div>
+      </div>
+    </div>`;
 }

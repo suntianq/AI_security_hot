@@ -18,7 +18,7 @@ from ai_security_hot.models.base import session_scope
 from ai_security_hot.models.tables import Document, Event, EventDocument, Source, SourceEndpoint
 from ai_security_hot.services.daily_archive import get_archive, list_archive_dates
 from ai_security_hot.services.feed import VALID_MODULES, build_feed, search_documents
-from ai_security_hot.services.overview import build_overview
+from ai_security_hot.services.overview import _clean_summary, build_overview
 
 router = APIRouter(prefix="/api", tags=["frontend"])
 
@@ -65,6 +65,7 @@ def public_document(document_id: int) -> dict:
             "id": d.id,
             "title": d.title_original,
             "body": d.body_text,
+            "summary": _clean_summary(d.body_text, 300),
             "url": d.canonical_url,
             "source": d.endpoint_id,
             "source_name": source_name,
