@@ -570,3 +570,15 @@ class DailyHotspotItem(Base):
     event_version: Mapped[int] = mapped_column(Integer)
     score: Mapped[int] = mapped_column(Integer)
     payload: Mapped[dict] = mapped_column(JSONB)
+
+
+class DailyArchive(Base):
+    """Frozen daily content archive (hotspots + module timelines) for history."""
+
+    __tablename__ = "daily_archives"
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    natural_date: Mapped[date] = mapped_column(Date, unique=True, index=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
+    # Full build_overview payload frozen at generation time.
+    payload: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

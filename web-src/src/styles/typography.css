@@ -1,0 +1,103 @@
+/* Typography scale — Page 24 / Section 18 / Headline 16 / Body 14 / Meta 12. */
+
+.page-title {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  line-height: 1.35;
+}
+
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+  margin: 6px 0 14px;
+}
+
+.section-title .bar {
+  width: 4px;
+  height: 18px;
+  border-radius: 2px;
+  background: var(--acc);
+  flex-shrink: 0;
+}
+
+.section-title .count {
+  font-size: 12px;
+  color: var(--dim);
+  font-weight: 500;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.headline {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.body {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.meta {
+  font-size: 12px;
+  color: var(--mut);
+  line-height: 1.5;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  color: var(--mut);
+  background: transparent;
+  white-space: nowrap;
+}
+
+.tag.llm {
+  color: var(--c5);
+  border-color: color-mix(in srgb, var(--c5) 40%, transparent);
+  background: color-mix(in srgb, var(--c5) 8%, transparent);
+}
+.tag.ai_for_security {
+  color: var(--c3);
+  border-color: color-mix(in srgb, var(--c3) 40%, transparent);
+  background: color-mix(in srgb, var(--c3) 8%, transparent);
+}
+.tag.security_for_ai {
+  color: var(--c2);
+  border-color: color-mix(in srgb, var(--c2) 40%, transparent);
+  background: color-mix(in srgb, var(--c2) 8%, transparent);
+}
+.tag.agent {
+  color: var(--c4);
+  border-color: color-mix(in srgb, var(--c4) 40%, transparent);
+  background: color-mix(in srgb, var(--c4) 8%, transparent);
+}
+.tag.system_security {
+  color: var(--c6);
+  border-color: color-mix(in srgb, var(--c6) 40%, transparent);
+  background: color-mix(in srgb, var(--c6) 8%, transparent);
+}
+
+.tag-co {
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  color: var(--mut);
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}

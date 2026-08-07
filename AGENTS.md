@@ -54,8 +54,12 @@
 - 公开前端页面（`/`、`/admin.html`、`/login.html`、`/assets/`）与 `/api/*` 聚合接口
   无需 token；后台页面在登录后把 admin token 存 localStorage，前端 JS 调 `/ops/*`
   时带上 Bearer。不能把密钥写进前端代码。
-- 前端聚合服务在 `services/overview.py`（`build_overview`），取代旧 gen_daily 脚本；
-  页面数据来自 `GET /api/overview`，不要为前端新增旁路 SQL。
+- 公开前端源码在 `web-src/`（Vite + TypeScript，MPA），`npm run build` 产出
+  `web/dist`（Dockerfile 多阶段构建自动执行）；admin/login 等遗留页面逐字拷贝在
+  `web-src/public/`，不要直接改 `web/dist`（生成物）。
+- 前端聚合服务在 `services/overview.py`（`build_overview`）与 `services/feed.py`
+  （`build_feed` / `search_documents`），取代旧 gen_daily 脚本；页面数据来自
+  `GET /api/overview`、`GET /api/feed`、`GET /api/search`，不要为前端新增旁路 SQL。
 
 ## 修改代码的习惯
 

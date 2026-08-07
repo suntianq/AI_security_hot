@@ -44,7 +44,16 @@ _PUBLIC_API_PREFIXES = ("/api/",)
 
 # Static frontend files (pages + assets) are public; admin auth is enforced in
 # the SPA by redirecting to /login.html before any /ops/ call.
-_PUBLIC_STATIC = {"/", "/index.html", "/admin.html", "/login.html", "/favicon.ico"}
+_PUBLIC_STATIC = {
+    "/",
+    "/index.html",
+    "/admin.html",
+    "/login.html",
+    "/document.html",
+    "/event.html",
+    "/daily.html",
+    "/favicon.ico",
+}
 _PUBLIC_STATIC_PREFIXES = ("/assets/",)
 
 
@@ -432,7 +441,7 @@ if _cors_origins:
         allow_headers=["*"],
     )
 
-# --- Public static frontend (web/), mounted last so API routes take priority ---
+# --- Public static frontend (web/dist), mounted last so API routes take priority ---
 from pathlib import Path  # noqa: E402
 
 if _settings.web_dir:

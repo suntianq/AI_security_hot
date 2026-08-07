@@ -156,6 +156,28 @@ def daily_snapshot_tick() -> None:
         log.exception("daily_snapshot_tick failed")
 
 
+def daily_archive_tick() -> None:
+    """Freeze today's full content overview for the daily history archive.
+
+    Generates (or refreshes, if content changed) the archive for yesterday and
+    today so the frontend daily page always has the latest day available.
+    """
+    try:
+        from ai_security_hot.services.daily_archive import generate_daily_archive
+
+        settings = get_settings()
+        timezone = ZoneInfo(settings.daily_snapshot_timezone)
+        today = datetime.now(timezone).date()
+        results = []
+        with session_scope() as session:
+            for natural_date in (today - timedelta(days=1), today):
+                row = generate_daily_archive(session, natural_date)
+                results.append((natural_date.isoformat(), row.content_hash[:12]))
+        log.info("daily_archive_tick: %s", results)
+    except Exception:
+        log.exception("daily_archive_tick failed")
+
+
 def event_tick() -> None:
     """Versioned derived-data stages, independent from fetch and classification."""
     try:
@@ -268,6 +290,15 @@ def run_worker() -> None:
             "interval",
             seconds=settings.daily_snapshot_interval_seconds,
             id="daily_snapshot",
+            max_instances=1,
+            coalesce=True,
+            next_run_time=first_run,
+        )
+        scheduler.add_job(
+            daily_archive_tick,
+            "interval",
+            seconds=settings.daily_snapshot_interval_seconds,
+            id="daily_archive",
             max_instances=1,
             coalesce=True,
             next_run_time=first_run,

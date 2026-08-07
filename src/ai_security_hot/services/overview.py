@@ -191,13 +191,16 @@ def build_overview(
     *,
     hot_top_n: int = HOT_TOP_N,
     per_module_max: int = PER_MODULE_MAX,
+    natural_date: date | None = None,
 ) -> dict[str, Any]:
     """Return the frontend overview payload (hotspots + module timelines).
 
     Everything the public page needs in one call. Hotspots come from the frozen
-    daily snapshot; timelines read today's freshly-fetched documents live.
+    daily snapshot; timelines read the day's freshly-fetched documents live.
+    ``natural_date`` defaults to today; pass an explicit date for the daily
+    archive history view.
     """
-    today = _shanghai_now().date()
+    today = natural_date or _shanghai_now().date()
     day_start_utc = _day_start_shanghai(today)
     day_end_utc = _day_start_shanghai(today + timedelta(days=1))
 
@@ -262,6 +265,7 @@ def build_overview(
     module_endpoints = {ep for m in MODULES for ep in m["endpoints"]}
     rows = session.execute(
         select(
+            Document.id,
             Document.title_original,
             Document.body_text,
             Document.canonical_url,
@@ -282,7 +286,7 @@ def build_overview(
     ).all()
 
     timeline_by_module: dict[str, list[dict]] = {}
-    for title_original, body_text, url, ep, tech, etype, fetched_at in rows:
+    for doc_id, title_original, body_text, url, ep, tech, etype, fetched_at in rows:
         topic = (tech or [None])[0] if tech else None
         if _is_noise(title_original, topic):
             continue
@@ -292,6 +296,7 @@ def build_overview(
             continue
         bucket.append(
             {
+                "document_id": doc_id,
                 "title": title_original,
                 "summary": _clean_summary(body_text, 300),
                 "url": url,

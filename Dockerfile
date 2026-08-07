@@ -1,4 +1,14 @@
 # syntax=docker/dockerfile:1
+
+# ---- frontend build stage (Vite MPA -> web/dist) ----
+FROM node:22-alpine AS web-builder
+WORKDIR /app/web-src
+COPY web-src/package.json web-src/package-lock.json ./
+RUN npm ci
+COPY web-src/ ./
+RUN npm run build
+
+# ---- python runtime ----
 FROM python:3.13-slim
 
 # Pin uv so the same Git revision produces the same toolchain on amd64/arm64.
@@ -25,7 +35,7 @@ COPY migrations ./migrations
 COPY alembic.ini ./alembic.ini
 COPY sources ./sources
 COPY config ./config
-COPY web ./web
+COPY --from=web-builder /app/web/dist ./web/dist
 COPY entrypoint.sh ./entrypoint.sh
 RUN uv sync --frozen --no-dev && chmod +x entrypoint.sh
 

@@ -8,3 +8,6 @@ tests/
 .env
 /report*.html
 exports/
+web-src/node_modules/
+web/dist/
+web-src/dist/

@@ -57,6 +57,15 @@ cd AI_security_hot
 cp .env.example .env
 ```
 
+前端 `web/dist` 由 Vite 构建产物提供；`docker compose build` 会在镜像构建时通过
+多阶段 Dockerfile 自动执行 `npm ci && npm run build`（`web-src/` 下）。本地单独
+构建/开发前端：
+
+```bash
+cd web-src && npm ci && npm run build   # 产出 ../web/dist
+cd web-src && npm run dev               # Vite dev server (http://localhost:5173)
+```
+
 至少修改 `.env` 中的以下值：
 
 ```dotenv
@@ -142,6 +151,8 @@ curl -H "Authorization: Bearer $INTEL_API_TOKEN" "http://127.0.0.1:8000/events?m
 - `GET /events`、`GET /events/{id}`
 - `GET /stats`
 - `GET /api/overview` — 公开前端聚合（热点 + 模块时间线），无需 token
+- `GET /api/feed` — 公开游标分页信息流（`limit`/`before`/`since`/`module`/`tech_direction`/`source`），无需 token
+- `GET /api/search` — 公开全文搜索（`q`≥2 字符，标题或正文），无需 token
 - `GET /ops/self-check`
 
 后台管理写接口（`/ops/`，管理员 Token）：
@@ -216,11 +227,15 @@ INTEL_EMBEDDING_ENABLED=false
 
 ## 前端网站与后台管理
 
-`intel serve` 同时提供 API 和内置 Web 前端（`web/` 目录静态挂载）：
+`intel serve` 同时提供 API 和内置 Web 前端（`web/dist` 目录静态挂载，由 `web-src/` 构建）：
 
-- **公开前端** `/`：AI × Security 热点站，浅色卡片风格——今日热点 Top10、按模块
-  （资讯/论文/CVE/开源Trending/Black Hat）分组的按日时间线、多源报道标记。
-  数据来自 `GET /api/overview`（无需 token）。
+- **公开前端** `/`：AI × Security 每日热点情报站（Vite + TypeScript，构建产物在
+  `web/dist`）。三栏情报布局（桌面端 侧栏/主信息流/右栏，平板双栏，移动端抽屉式
+  侧栏）：今日热点 Top1 主卡 + Top2-5 紧凑列表、轻量统计、按日分组的"最新精选"
+  信息流（粘性日期头、可折叠）、按热度/来源/技术方向筛选、Cmd/Ctrl+K 全局搜索、
+  Dark Mode、已读变淡与收藏（localStorage）。支持三种视图：首页（`/api/overview`）、
+  全部动态（`/api/feed` 游标分页 + 无限滚动）、收藏（`/?view=fav`）。
+  数据来自 `GET /api/overview`、`GET /api/feed`、`GET /api/search`（均无需 token）。
 - **后台管理** `/admin.html`：登录后（输入 `INTEL_ADMIN_API_TOKEN`）可实时管理——
   文档/事件增删改查（打标签、软删/恢复、物理删除、重新聚类）、标签分类管理
   （taxonomy 关键词增删）、一键分类/聚类触发。

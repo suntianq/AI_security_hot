@@ -155,7 +155,8 @@ class Settings(BaseSettings):
 
     # --- public web frontend ---
     # Directory served as static files at the app root; empty string disables.
-    web_dir: str = Field(default="web")
+    # Built by `npm run build` in web-src/ (Vite MPA output lands in web/dist).
+    web_dir: str = Field(default="web/dist")
     # CORS allowed origins for the SPA/admin page (comma-separated); empty = same-origin only.
     cors_origins: str = Field(default="")
 

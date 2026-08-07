@@ -12,3 +12,6 @@ exports/
 *.csv
 *.jsonl
 .claude/
+web/dist/
+web-src/node_modules/
+web-src/dist/
