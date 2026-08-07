@@ -12,9 +12,11 @@
 - 信源真相：`sources/sources.yaml`；分类真相：`sources/taxonomy.yaml`。
 - 非敏感模型 profile：`config/models.yaml` 和 `config/embeddings.yaml`。
 - 密钥只允许来自环境变量或本地 `.env`，不得出现在代码、YAML、日志、提交或回复中。
-- 当前 Alembic head 为 `7a91d2e4f6b8`；新增迁移后同步更新本节。
-- 当前注册表包含 18 个 source、20 个 endpoint（含 Black Hat Briefings，使用
-  playwright connector 通过独立容器抓取）。
+- 当前 Alembic head 为 `1e8573435eb2`（daily content archives）；新增迁移后同步
+  更新本节。
+- 当前注册表包含 18 个 source、21 个 endpoint（含 Black Hat Briefings，使用
+  playwright connector 通过独立容器抓取；Hacker News 使用官方 API 端点
+  `hackernews-api`，旧 `hackernews-rss` 已 `enabled: false` + `replaced_by` 退役）。
 
 ## 开始任何任务前
 
@@ -60,6 +62,14 @@
 - 前端聚合服务在 `services/overview.py`（`build_overview`）与 `services/feed.py`
   （`build_feed` / `search_documents`），取代旧 gen_daily 脚本；页面数据来自
   `GET /api/overview`、`GET /api/feed`、`GET /api/search`，不要为前端新增旁路 SQL。
+- CVE 模块按 `config/cve_follow.yaml` 过滤：只展示「CVSS ≥ `cvss_min` 且命中
+  `follow` 关注软件关键词」的漏洞；`follow` 为空即不过滤。NVD parser
+  （`parsers/nvd.py`）把 CVSS 基础分与受影响产品/厂商写入 `Document.entities`，
+  overview 与 feed 据此过滤（CVSS 阈值在 SQL 层、关键词在 Python 层）。改动过滤
+  规则时同步更新 `tests/test_cve_follow.py`。
+- Hacker News 通过官方 Firebase API（`connectors/hackernews.py`，`ConnectorKind.
+  HACKERNEWS`）抓取结构化条目 + 提交者正文；链接帖正文由 `fulltext` 二次抓取。
+  旧 hnrss RSS 只提供元数据，已退役。
 
 ## 修改代码的习惯
 
@@ -146,3 +156,7 @@ INTEL_RUN_LIVE=1 uv run pytest -m live -v
   `gen_report.py` / `gen_daily.py` 静态报告脚本。
 - RSS 等窗口型信源无法从空库恢复上游窗口外的历史。
 - Embedding 默认关闭；在未完成真实模型校准前保持关闭。
+- 公开前端不提供收藏功能（曾实现后移除）；已读状态走 localStorage `aih.read`。
+- CVE 过滤只影响展示/信息流，不改变入库的原始 CVE 文档；`follow` 为空时全部保留。
+- 前端筛选：首页支持 分类/技术方向/来源/排序，全部动态支持 分类/时间/来源；筛选
+  状态映射到 URL query（`?view=&category=&tech=&source=&range=&sort=`）。

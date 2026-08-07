@@ -9,7 +9,8 @@ AI Security Hot 是一个面向 AI 与网络安全领域的增量情报后端。
 
 ## 核心能力
 
-- 增量采集：支持 RSS、REST、NVD、AI HOT、GitHub、网页、arXiv 和 Sitemap。
+- 增量采集：支持 RSS、REST、NVD、AI HOT、GitHub、网页、arXiv、Sitemap 和
+  Hacker News 官方 API（结构化条目 + 提交者正文，链接帖正文二次抓取）。
 - 多源覆盖：已配置 OpenAI、Anthropic、AI HOT、NVD、CISA、Google、Apple、NVIDIA、
   Hugging Face、Wiz、PortSwigger、Trail of Bits、arXiv、Hacker News 等来源。
 - 生命周期审计：保留原始版本、内容修订、撤回、拒绝、来源退役和替代关系。
@@ -153,6 +154,8 @@ curl -H "Authorization: Bearer $INTEL_API_TOKEN" "http://127.0.0.1:8000/events?m
 - `GET /api/overview` — 公开前端聚合（热点 + 模块时间线），无需 token
 - `GET /api/feed` — 公开游标分页信息流（`limit`/`before`/`since`/`module`/`tech_direction`/`source`），无需 token
 - `GET /api/search` — 公开全文搜索（`q`≥2 字符，标题或正文），无需 token
+- `GET /api/document/{id}`、`GET /api/event/{id}` — 文档/事件详情，无需 token
+- `GET /api/daily/archives`、`GET /api/daily/archives/{date}` — 每日简报归档，无需 token
 - `GET /ops/self-check`
 
 后台管理写接口（`/ops/`，管理员 Token）：
@@ -248,9 +251,10 @@ follow:         # 关注关键词，命中受影响软件/厂商/标题/描述�
 - **公开前端** `/`：AI × Security 每日热点情报站（Vite + TypeScript，构建产物在
   `web/dist`）。三栏情报布局（桌面端 侧栏/主信息流/右栏，平板双栏，移动端抽屉式
   侧栏）：今日热点 Top1 主卡 + Top2-5 紧凑列表、轻量统计、按日分组的"最新精选"
-  信息流（粘性日期头、可折叠）、按热度/来源/技术方向筛选、Cmd/Ctrl+K 全局搜索、
-  Dark Mode、已读变淡与收藏（localStorage）。支持三种视图：首页（`/api/overview`）、
-  全部动态（`/api/feed` 游标分页 + 无限滚动）、收藏（`/?view=fav`）。
+  信息流（粘性日期头、可折叠）、分类/技术方向/来源/排序筛选、Cmd/Ctrl+K 全局搜索、
+  Dark Mode、已读变淡（localStorage）。两种视图：首页（`/api/overview`）与
+  全部动态（`/api/feed` 游标分页 + 无限滚动）。筛选状态映射到 URL query
+  （`?view=&category=&tech=&source=&range=&sort=`）。
   数据来自 `GET /api/overview`、`GET /api/feed`、`GET /api/search`（均无需 token）。
 - **后台管理** `/admin.html`：登录后（输入 `INTEL_ADMIN_API_TOKEN`）可实时管理——
   文档/事件增删改查（打标签、软删/恢复、物理删除、重新聚类）、标签分类管理
@@ -285,6 +289,9 @@ INTEL_RUN_LIVE=1 uv run pytest -m live -v
   `--profile playwright` 的独立容器抓取，主 worker 不内置浏览器。
 - 主动告警、邮件/飞书投递尚未提供。
 - RSS 等窗口型来源只能抓取上游当前仍返回的内容，空库冷启动不能恢复窗口之外的历史。
+- Hacker News 通过官方 API 抓取（旧 RSS 已退役）；链接帖正文依赖 fulltext 抓取，
+  JS 渲染/付费墙站点可能没有正文，仅显示标题 + 原文链接。
+- 公开前端暂无收藏功能；CVE 过滤只影响展示，不改变入库文档。
 
 ## 目录
 
@@ -293,7 +300,7 @@ src/ai_security_hot/  应用、API、流水线、模型和存储代码
 sources/              信源注册表与分类体系
 config/               非敏感 LLM 与 Embedding profile
 migrations/           Alembic 数据库迁移
-scripts/              静态报告生成器与模板
+scripts/              Black Hat 抓取等运维脚本
 evaluation/           JSON/JSONL 评测资产
 tests/                单元、数据库集成和可选真实信源测试
 ```
