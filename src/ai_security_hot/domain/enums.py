@@ -43,6 +43,7 @@ class ConnectorKind(StrEnum):
     WEB = "web"
     ARXIV = "arxiv"  # official arXiv API (Atom response) — API-tier
     SITEMAP = "sitemap"  # sitemap.xml discovery + per-article trafilatura
+    HACKERNEWS = "hackernews"  # official HN Firebase API (structured items)
     PLAYWRIGHT = "playwright"  # reserved, profile-gated
 
 

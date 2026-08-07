@@ -44,6 +44,7 @@ SOURCE_LABELS = {
     "arxiv-ai-llm": "arXiv AI/LLM",
     "arxiv-security-ai": "arXiv 安全",
     "hackernews-rss": "Hacker News",
+    "hackernews-api": "Hacker News",
     "ithome-rss": "IT之家",
     "google-blog-ai-rss": "Google Blog AI",
     "github-trending-rss": "GitHub Trending",
@@ -115,7 +116,7 @@ MODULES: list[dict] = [
         "endpoints": [
             "aihot-selected-api",
             "aihot-selected-rss",
-            "hackernews-rss",
+            "hackernews-api",
             "portswigger-research-rss",
             "google-security-rss",
             "trailofbits-rss",

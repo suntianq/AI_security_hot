@@ -8,6 +8,7 @@ from ai_security_hot.connectors.base import Connector, Parser
 from ai_security_hot.connectors.blackhat import BlackHatConnector
 from ai_security_hot.connectors.fetch import FetchContext
 from ai_security_hot.connectors.github import GitHubConnector
+from ai_security_hot.connectors.hackernews import HackerNewsConnector
 from ai_security_hot.connectors.nvd import NvdConnector
 from ai_security_hot.connectors.rest import RestApiConnector
 from ai_security_hot.connectors.rss import RSSConnector
@@ -19,6 +20,7 @@ from ai_security_hot.parsers.arxiv import ArxivParser
 from ai_security_hot.parsers.blackhat import BlackHatParser
 from ai_security_hot.parsers.cisa_kev import CisaKevParser
 from ai_security_hot.parsers.github_releases import GitHubReleasesParser
+from ai_security_hot.parsers.hackernews import HackerNewsParser
 from ai_security_hot.parsers.nvd import NvdParser
 from ai_security_hot.parsers.rss_default import RssDefaultParser
 from ai_security_hot.parsers.sitemap_article import SitemapArticleParser
@@ -33,6 +35,7 @@ _CONNECTORS = {
     ConnectorKind.WEB: WebListConnector,
     ConnectorKind.ARXIV: ArxivConnector,
     ConnectorKind.SITEMAP: SitemapConnector,
+    ConnectorKind.HACKERNEWS: HackerNewsConnector,
     ConnectorKind.PLAYWRIGHT: BlackHatConnector,
 }
 
@@ -46,6 +49,7 @@ _PARSERS: dict[str, type[Parser]] = {
     "web-article-v1": WebArticleParser,
     "arxiv-v1": ArxivParser,
     "sitemap-article-v1": SitemapArticleParser,
+    "hackernews-v1": HackerNewsParser,
     "blackhat-v1": BlackHatParser,
 }
 

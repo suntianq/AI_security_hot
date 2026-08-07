@@ -436,13 +436,30 @@ endpoints:
     connector: rss
     parser: rss-default-v1
     url: https://hnrss.org/frontpage
-    enabled: true
+    enabled: false
+    replaced_by: hackernews-api  # RSS only ships link metadata; official API gives structured items
     trust_tier: C
     priority: P2
     language: en
     egress: { route: proxy_pool_global }
     schedule: { interval_minutes: 60, jitter_seconds: 180 }
     fetch: { timeout_seconds: 20, max_response_bytes: 5242880, max_redirects: 3, requests_per_minute: 2 }
+    topics: [ai, security_for_ai, ai_for_security]
+  # Official HN Firebase API: structured item metadata + submitter text.
+  - id: hackernews-api
+    source_id: hackernews
+    connector: hackernews
+    parser: hackernews-v1
+    url: https://hacker-news.firebaseio.com/v0/
+    enabled: true
+    trust_tier: C
+    priority: P2
+    language: en
+    egress: { route: proxy_pool_global }
+    schedule: { interval_minutes: 60, jitter_seconds: 180 }
+    fetch: { timeout_seconds: 20, max_response_bytes: 2097152, max_redirects: 3, requests_per_minute: 20 }
+    fulltext: true  # link posts without submitter text → second-fetch the article body
+    options: { hackernews: { pool_size: 300, fetch_limit: 100 } }
     topics: [ai, security_for_ai, ai_for_security]
 
   # IT之家（中文科技资讯，C 级发现层）

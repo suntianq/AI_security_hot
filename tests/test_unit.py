@@ -168,12 +168,17 @@ def test_source_registry_key_endpoints() -> None:
         "nvidia-blog-rss": ("https://blogs.nvidia.com/feed/", "rss", "rss-default-v1"),
         "wiz-blog-rss": ("https://www.wiz.io/feed/rss.xml", "rss", "rss-default-v1"),
         "hackernews-rss": ("https://hnrss.org/frontpage", "rss", "rss-default-v1"),
+        "hackernews-api": (
+            "https://hacker-news.firebaseio.com/v0/",
+            "hackernews",
+            "hackernews-v1",
+        ),
         "huggingface-blog-rss": ("https://huggingface.co/blog/feed.xml", "rss", "rss-default-v1"),
         "google-security-rss": ("https://blog.google/security/rss/", "rss", "rss-default-v1"),
     }
 
     assert len(registry.sources) == 18
-    assert len(registry.endpoints) == 20
+    assert len(registry.endpoints) == 21
     assert len({source.id for source in registry.sources}) == len(registry.sources)
     assert len({endpoint.id for endpoint in registry.endpoints}) == len(registry.endpoints)
     for endpoint_id, (url, connector, parser) in expected.items():
@@ -193,6 +198,14 @@ def test_source_registry_key_endpoints() -> None:
     legacy_aihot = registry.endpoint("aihot-selected-rss")
     assert legacy_aihot.enabled is False
     assert legacy_aihot.replaced_by == "aihot-selected-api"
+
+    # HN moved from RSS (metadata-only) to the official API (structured items).
+    hn_rss = registry.endpoint("hackernews-rss")
+    assert hn_rss.enabled is False
+    assert hn_rss.replaced_by == "hackernews-api"
+    hn_api = registry.endpoint("hackernews-api")
+    assert hn_api.fulltext is True
+    assert hn_api.options["hackernews"]["pool_size"] == 300
 
     nvd = registry.endpoint("nvd-recent")
     assert nvd.connector.value == "nvd"

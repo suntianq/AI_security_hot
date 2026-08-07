@@ -342,6 +342,7 @@ def _default_parser(connector: ConnectorKind) -> str:
         ConnectorKind.WEB: "web-article-v1",
         ConnectorKind.ARXIV: "arxiv-v1",
         ConnectorKind.SITEMAP: "sitemap-article-v1",
+        ConnectorKind.HACKERNEWS: "hackernews-v1",
     }[connector]
 
 
