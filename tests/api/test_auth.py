@@ -59,10 +59,12 @@ def test_ops_routes_require_separate_admin_token(monkeypatch: pytest.MonkeyPatch
     admin_header = {"Authorization": "Bearer admin-token"}
     assert client.post("/ops/classify", headers=read_header).status_code == 401
     # Middleware accepts the admin credential. Avoid executing the expensive
-    # handler by using a method that has no route (GET vs POST). With the root
-    # StaticFiles mount this falls through to a 404 rather than 405, which still
-    # proves the admin token passed the middleware without running the handler.
-    assert client.get("/ops/classify", headers=admin_header).status_code == 404
+    # handler by using a method that has no route (GET vs POST). Whether the
+    # request lands as a 405 (route exists, wrong method) or — when the root
+    # static mount is absent, e.g. a checkout with no built web/dist — falls
+    # through to a 404, both prove the admin token passed the middleware
+    # without running the handler.
+    assert client.get("/ops/classify", headers=admin_header).status_code in (404, 405)
 
 
 @pytest.mark.db
