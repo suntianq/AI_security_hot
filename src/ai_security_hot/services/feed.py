@@ -10,9 +10,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import Float, desc, func, or_, select
 from sqlalchemy.orm import Session
 
+from ai_security_hot.config.cve_follow import get_cve_follow_config, is_followed_cve
 from ai_security_hot.models.tables import Document, RawItem, Source, SourceEndpoint
 from ai_security_hot.services.overview import (
     _MODULE_BY_ENDPOINT,
@@ -77,6 +78,18 @@ def _base_conditions(
         conds.append(Document.endpoint_id == source)
     if tech_direction:
         conds.append(Document.tech_directions.contains([tech_direction]))
+    # CVE follow policy active → drop low-CVSS CVEs at the query level so
+    # cursor pagination never returns empty pages (the keyword match still
+    # happens in Python per row).
+    config = get_cve_follow_config()
+    if config.follow:
+        cve_endpoints = {ep for m in MODULES if m["id"] == "cve" for ep in m["endpoints"]}
+        conds.append(
+            or_(
+                Document.endpoint_id.notin_(cve_endpoints),
+                func.cast(Document.entities["cvss"][0].astext, Float) >= config.cvss_min,
+            )
+        )
     return conds
 
 
@@ -142,6 +155,7 @@ def build_feed(
             Document.endpoint_id,
             Document.tech_directions,
             Document.classified_event_type,
+            Document.entities,
             Document.published_at_utc,
             RawItem.fetched_at,
         )
@@ -162,12 +176,18 @@ def build_feed(
         ep,
         tech,
         etype,
+        entities,
         published_at,
         fetched_at,
     ) in rows:
         topic = (tech or [None])[0] if tech else None
         if _is_noise(title, topic):
             continue
+        if (
+            _MODULE_BY_ENDPOINT.get(ep) == "cve"
+            and not is_followed_cve(entities or {}, title, body or "")
+        ):
+            continue  # CVE follow policy: high CVSS AND followed software only
         items.append(
             _serialize(
                 doc_id, title, body, url, ep, tech, etype, published_at, fetched_at, source_name
@@ -221,6 +241,7 @@ def search_documents(
             Document.endpoint_id,
             Document.tech_directions,
             Document.classified_event_type,
+            Document.entities,
             Document.published_at_utc,
             RawItem.fetched_at,
         )
@@ -241,12 +262,18 @@ def search_documents(
         ep,
         tech,
         etype,
+        entities,
         published_at,
         fetched_at,
     ) in rows:
         topic = (tech or [None])[0] if tech else None
         if _is_noise(title, topic):
             continue
+        if (
+            _MODULE_BY_ENDPOINT.get(ep) == "cve"
+            and not is_followed_cve(entities or {}, title, body or "")
+        ):
+            continue  # CVE follow policy: high CVSS AND followed software only
         items.append(
             _serialize(
                 doc_id, title, body, url, ep, tech, etype, published_at, fetched_at, source_name

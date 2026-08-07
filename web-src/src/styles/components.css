@@ -309,26 +309,16 @@
 .feed-item:hover .feed-item-actions {
   display: flex;
 }
-.fav-btn {
-  font-size: 15px;
+.ext-link {
+  font-size: 13px;
   line-height: 1;
   color: var(--dim);
-  padding: 2px 6px;
+  padding: 3px 7px;
   border-radius: 6px;
 }
-.fav-btn:hover {
-  color: var(--c2);
+.ext-link:hover {
+  color: var(--acc);
   background: var(--hover);
-}
-.fav-btn.on {
-  color: var(--c2);
-  display: inline-flex;
-}
-.fav-btn.on::after {
-  content: "★";
-}
-.fav-btn.off::after {
-  content: "☆";
 }
 
 /* ---- Filter bar ---- */

@@ -16,7 +16,6 @@ const NAV: NavItem[] = [
   { key: "home", label: "首页", icon: "⌂", href: "/" },
   { key: "all", label: "全部动态", icon: "≡", href: "/?view=all" },
   { key: "daily", label: "每日简报", icon: "◫", href: "/daily.html" },
-  { key: "fav", label: "收藏", icon: "☆", href: "/?view=fav" },
 ];
 
 export function renderSidebar(container: HTMLElement, activeNav: ActiveNav): void {

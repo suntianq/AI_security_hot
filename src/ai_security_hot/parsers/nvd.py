@@ -67,6 +67,7 @@ class NvdParser(Parser):
             "cnvd": [],
             "cwe": cwe_ids,
         }
+        entities = self._structured_fields(rec)
 
         title = f"{cve}: {desc[:80]}" if desc else cve
         return NormalizedDocument(
@@ -82,6 +83,7 @@ class NvdParser(Parser):
             ghsa_ids=ids["ghsa"],
             cnvd_ids=ids["cnvd"],
             cwe_ids=ids["cwe"],
+            entities=entities,
             record_status=record_status,
             record_status_raw=record_status_raw,
             raw_metadata={"vuln_status": record_status_raw or ""},
@@ -92,3 +94,41 @@ class NvdParser(Parser):
                 min_body_len=20,
             ),
         )
+
+    @staticmethod
+    def _structured_fields(rec: dict) -> dict[str, list[str]]:
+        """Extract CVSS base score + affected products/vendors for the follow filter.
+
+        Kept in ``entities`` (a JSONB dict) so overview/feed can apply the
+        CVSS + followed-software policy without extra SQL or a schema change.
+        """
+        # Highest CVSS version present wins (v4.0 > v3.1 > v3.0 > v2.0).
+        cvss: float = 0.0
+        for key in ("cvssMetricV40", "cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            entries = rec.get("metrics", {}).get(key) or []
+            if not entries:
+                continue
+            score = entries[0].get("cvssData", {}).get("baseScore")
+            if isinstance(score, (int, float)):
+                cvss = float(score)
+                break
+        products: list[str] = []
+        vendors: list[str] = []
+        for block in rec.get("affected", []) or []:
+            for data in block.get("affectedData", []) or []:
+                if data.get("product"):
+                    products.append(str(data["product"]).strip().lower())
+                if data.get("vendor"):
+                    vendors.append(str(data["vendor"]).strip().lower())
+        # Deduplicate while preserving order.
+        fields: dict[str, list[str]] = {}
+        if cvss > 0:
+            fields["cvss"] = [f"{cvss:.1f}"]
+        for key, values in (("products", products), ("vendors", vendors)):
+            uniq: list[str] = []
+            for value in values:
+                if value and value not in uniq:
+                    uniq.append(value)
+            if uniq:
+                fields[key] = uniq
+        return fields

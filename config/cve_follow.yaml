@@ -1,0 +1,19 @@
+# CVE 推送过滤：只把「命中关注软件/系统 且 CVSS 达标」的漏洞放进 CVE 模块。
+# - cvss_min：基础分阈值（0-10），>= 该值才推送。
+# - follow：关注的关键词，命中受影响的软件/厂商/标题/描述任一即视为关注。
+#   follow 为空时表示不启用过滤（保留全部 CVE，向后兼容）。
+cvss_min: 7.0
+follow:
+  - linux
+  - kernel
+  - openssl
+  - openssh
+  - nginx
+  - curl
+  - python
+  - node
+  - postgresql
+  - mysql
+  - kubernetes
+  - docker
+  - git

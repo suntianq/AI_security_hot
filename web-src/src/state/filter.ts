@@ -3,7 +3,7 @@
 import { createStore } from "./store";
 import { readQuery, updateQuery } from "../lib/url";
 
-export type View = "home" | "all" | "fav";
+export type View = "home" | "all";
 export type Sort = "latest" | "multi";
 export type Range = "today" | "24h" | "3d" | "7d";
 
@@ -18,7 +18,7 @@ export interface FilterState {
 }
 
 function parseView(value: string | null): View {
-  return value === "all" || value === "fav" || value === "home" ? value : "home";
+  return value === "all" || value === "home" ? value : "home";
 }
 
 function parseSort(value: string | null): Sort {

@@ -225,6 +225,22 @@ INTEL_EMBEDDING_ENABLED=false
 
 向量相似度只用于召回可能相关的候选，不会绕过强身份冲突规则，也不会自动合并事件。
 
+## CVE 推送过滤
+
+CVE 模块默认只展示**命中关注软件/系统 且 CVSS 达标**的漏洞（例如 Linux 相关的
+高 CVSS 漏洞），避免每天几百条 CVE 淹没信息流。配置在 `config/cve_follow.yaml`：
+
+```yaml
+cvss_min: 7.0   # 基础分阈值，>= 该值才推送
+follow:         # 关注关键词，命中受影响软件/厂商/标题/描述任一即视为关注
+  - linux
+  - openssl
+```
+
+`follow` 为空时表示不启用过滤（保留全部 CVE）。路径可用
+`INTEL_CVE_FOLLOW_CONFIG_FILE` 覆盖。NVD 解析器会把 CVSS 基础分与受影响产品/厂商
+写入文档，overview 与 feed 据此过滤。
+
 ## 前端网站与后台管理
 
 `intel serve` 同时提供 API 和内置 Web 前端（`web/dist` 目录静态挂载，由 `web-src/` 构建）：

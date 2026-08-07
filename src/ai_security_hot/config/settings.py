@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     classification_lease_seconds: int = Field(default=300, ge=30)
     llm_config_file: str = Field(default="config/models.yaml")
     llm_profile: str | None = Field(default=None)
+    # CVE follow policy (cvss_min + followed software keywords); empty follow
+    # list disables CVE filtering.
+    cve_follow_config_file: str = Field(default="config/cve_follow.yaml")
     llm_provider: str = Field(default="openai-compatible")
     llm_base_url: str = Field(default="https://api.openai.com/v1")
     llm_api_key: str | None = Field(default=None)

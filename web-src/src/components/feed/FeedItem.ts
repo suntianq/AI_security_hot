@@ -1,5 +1,5 @@
 // A single feed row. Title > summary > metadata > tags (weakest).
-// Read items dim; favorite star + 原文 reveal on hover.
+// Read items dim; 原文 link reveals on hover.
 
 import { esc } from "../../lib/dom";
 import { techTagsHtml } from "../common/Tag";
@@ -19,9 +19,7 @@ export function feedItemHtml(vm: NewsViewModel, techLabels: Record<string, strin
       ${vm.summary ? `<div class="feed-item-summary">${esc(vm.summary)}</div>` : ""}
       <div class="feed-item-meta">${techTagsHtml(vm.tags, techLabels)}</div>
       <div class="feed-item-actions">
-        <button class="fav-btn ${vm.favorite ? "on" : "off"}" data-action="fav" data-id="${vm.id}"
-          title="${vm.favorite ? "取消收藏" : "收藏"}" aria-label="${vm.favorite ? "取消收藏" : "收藏"}"></button>
-        <a class="fav-btn" href="${esc(vm.url)}" target="_blank" rel="noopener" title="查看原文">↗</a>
+        <a class="ext-link" href="${esc(vm.url)}" target="_blank" rel="noopener" title="查看原文">↗</a>
       </div>
     </div>`;
 }

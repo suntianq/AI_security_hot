@@ -1,10 +1,10 @@
-// Feed filter bar — category pills + sort + collapsible advanced panel.
-// Advanced filters (time range, source) only apply to the /api/feed view;
-// the overview (home) view is inherently today's data.
+// Self-contained filter bar. Mounted once; re-renders ITSELF on filter
+// changes so the page never recreates it (which used to close the source
+// dropdown). Source <select> listens to `change`, not `click`.
 
 import { esc } from "../../lib/dom";
 import { overviewStore } from "../../state/app";
-import { applyFilter, filterStore, type Range, type Sort } from "../../state/filter";
+import { filterStore, type FilterState, type Range, type Sort } from "../../state/filter";
 import type { Overview } from "../../api/types";
 
 const RANGES: { id: Range; label: string }[] = [
@@ -14,43 +14,94 @@ const RANGES: { id: Range; label: string }[] = [
   { id: "7d", label: "7 天" },
 ];
 
-// Single render — the page drives re-renders via its own store subscriptions.
-export function mountFilterBar(container: HTMLElement): void {
-  renderInto(container);
+export interface FilterBarCallbacks {
+  onChange: (partial: Partial<FilterState>) => void;
 }
 
-function barHtml(
-  filter: ReturnType<typeof filterStore.get>,
-  overview: Overview | null,
-): string {
-  const mods = overview?.modules ?? [];
-  const pills = [{ id: "", label: "全部" }, ...mods.map((m) => ({ id: m.id, label: m.label }))];
-  const isFeed = filter.view === "all";
-  const panelOpen = containerState.panelOpen;
+export function mountFilterBar(container: HTMLElement, cb: FilterBarCallbacks): void {
+  let panelOpen = false;
 
-  return `
-    <div class="filter-bar">
-      ${pills
-        .map(
-          (p) => `
-            <button class="pill ${filter.module === p.id ? "active" : ""}" data-action="module" data-id="${p.id}">
-              ${esc(p.label)}
-            </button>`,
-        )
-        .join("")}
-      <div class="filter-actions">
-        <button class="pill pill-sub ${filter.sort === "multi" ? "active" : ""}" data-action="sort" data-sort="multi" ${isFeed ? "hidden" : ""}>最多来源</button>
-        <button class="filter-toggle ${panelOpen ? "open" : ""}" data-action="toggle-filter">筛选${panelOpen ? " ▴" : " ▾"}</button>
+  const render = (): void => {
+    const filter = filterStore.get();
+    const overview = overviewStore.get();
+    const isAll = filter.view === "all";
+    const mods = overview?.modules ?? [];
+    container.innerHTML = `
+      <div class="filter-bar">
+        ${modulePills(mods, filter)}
+        <div class="filter-actions">
+          ${isAll ? "" : sortPill(filter)}
+          <button class="filter-toggle ${panelOpen ? "open" : ""}" data-action="filter-toggle">
+            筛选${panelOpen ? " ▴" : " ▾"}
+          </button>
+        </div>
       </div>
-    </div>
-    ${isFeed && panelOpen ? panelHtml(filter, overview) : ""}
-  `;
+      ${panelOpen ? (isAll ? allPanel(overview, filter) : homePanel(overview, filter)) : ""}
+    `;
+    bind(container, cb, () => {
+      panelOpen = !panelOpen;
+      render();
+    });
+  };
+
+  render();
+  filterStore.subscribe(render);
 }
 
-function panelHtml(
-  filter: ReturnType<typeof filterStore.get>,
-  overview: Overview | null,
-): string {
+function modulePills(mods: Overview["modules"], filter: FilterState): string {
+  const pills = [{ id: "", label: "全部" }, ...mods.map((m) => ({ id: m.id, label: m.label }))];
+  return pills
+    .map(
+      (p) => `
+        <button class="pill ${filter.module === p.id ? "active" : ""}" data-action="module" data-id="${esc(p.id)}">
+          ${esc(p.label)}
+        </button>`,
+    )
+    .join("");
+}
+
+function sortPill(filter: FilterState): string {
+  return `
+    <button class="pill pill-sub ${filter.sort === "multi" ? "active" : ""}" data-action="sort" data-sort="multi">
+      最多来源
+    </button>`;
+}
+
+function homePanel(overview: Overview | null, filter: FilterState): string {
+  const techs = Object.entries(overview?.labels.tech ?? {});
+  const sources = overview?.labels.source ?? {};
+  return `
+    <div class="filter-panel">
+      <div class="filter-field">
+        <label>技术方向</label>
+        <div style="display:flex;gap:4px;flex-wrap:wrap">
+          <button class="pill pill-sub ${filter.tech === "" ? "active" : ""}" data-action="tech" data-id="">全部</button>
+          ${techs
+            .map(
+              ([id, label]) => `
+                <button class="pill pill-sub ${filter.tech === id ? "active" : ""}" data-action="tech" data-id="${esc(id)}">
+                  ${esc(label)}
+                </button>`,
+            )
+            .join("")}
+        </div>
+      </div>
+      <div class="filter-field">
+        <label>来源</label>
+        <select data-action="source">
+          <option value="">全部来源</option>
+          ${Object.entries(sources)
+            .map(
+              ([id, name]) =>
+                `<option value="${esc(id)}" ${filter.source === id ? "selected" : ""}>${esc(name)}</option>`,
+            )
+            .join("")}
+        </select>
+      </div>
+    </div>`;
+}
+
+function allPanel(overview: Overview | null, filter: FilterState): string {
   const sources = overview?.labels.source ?? {};
   return `
     <div class="filter-panel">
@@ -80,25 +131,27 @@ function panelHtml(
     </div>`;
 }
 
-const containerState = { panelOpen: false };
-
-function handle(el: HTMLElement, container: HTMLElement): void {
-  const action = el.dataset.action;
-  if (action === "module") applyFilter({ module: el.dataset.id ?? "" });
-  else if (action === "sort") applyFilter({ sort: (el.dataset.sort ?? "latest") as Sort });
-  else if (action === "range") applyFilter({ range: (el.dataset.range ?? "today") as Range });
-  else if (action === "source") applyFilter({ source: (el as HTMLSelectElement).value });
-  else if (action === "toggle-filter") {
-    containerState.panelOpen = !containerState.panelOpen;
-    renderInto(container);
-  }
-}
-
-function renderInto(container: HTMLElement): void {
-  const filter = filterStore.get();
-  const overview = overviewStore.get();
-  container.innerHTML = barHtml(filter, overview);
-  container.querySelectorAll<HTMLElement>("[data-action]").forEach((node) => {
-    node.addEventListener("click", () => handle(node, container));
+function bind(
+  container: HTMLElement,
+  cb: FilterBarCallbacks,
+  onToggle: () => void,
+): void {
+  container.querySelectorAll<HTMLElement>('[data-action="module"]').forEach((el) => {
+    el.addEventListener("click", () => cb.onChange({ module: el.dataset.id ?? "" }));
   });
+  container.querySelectorAll<HTMLElement>('[data-action="sort"]').forEach((el) => {
+    el.addEventListener("click", () => cb.onChange({ sort: (el.dataset.sort ?? "latest") as Sort }));
+  });
+  container.querySelectorAll<HTMLElement>('[data-action="range"]').forEach((el) => {
+    el.addEventListener("click", () => cb.onChange({ range: (el.dataset.range ?? "today") as Range }));
+  });
+  container.querySelectorAll<HTMLElement>('[data-action="tech"]').forEach((el) => {
+    el.addEventListener("click", () => cb.onChange({ tech: el.dataset.id ?? "" }));
+  });
+  const source = container.querySelector<HTMLSelectElement>('select[data-action="source"]');
+  if (source) {
+    source.addEventListener("change", () => cb.onChange({ source: source.value }));
+  }
+  const toggle = container.querySelector<HTMLElement>('[data-action="filter-toggle"]');
+  if (toggle) toggle.addEventListener("click", onToggle);
 }

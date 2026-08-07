@@ -14,14 +14,12 @@ export interface NewsViewModel {
   fetchedAt: string;
   url: string;
   read: boolean;
-  favorite: boolean;
   relatedCount: number; // 0 or (n-1) additional sources reporting the same URL
 }
 
 export function toViewModel(
   item: ModuleItem,
   read: Set<number>,
-  fav: Set<number>,
   urlSources: Record<string, string[]>,
 ): NewsViewModel {
   const related = (urlSources[item.url] ?? []).length;
@@ -37,7 +35,6 @@ export function toViewModel(
     fetchedAt: item.fetched,
     url: item.url,
     read: read.has(item.document_id),
-    favorite: fav.has(item.document_id),
     relatedCount: related > 1 ? related - 1 : 0,
   };
 }

@@ -54,6 +54,7 @@ def _add_doc(
     fetched_minutes: int,
     body: str | None = None,
     tech: list[str] | None = None,
+    entities: dict | None = None,
     source_status: str = "active",
     record_status: str = "published",
 ) -> Document:
@@ -89,7 +90,7 @@ def _add_doc(
         published_at_utc=BASE + timedelta(minutes=fetched_minutes),
         language="en",
         identifiers={},
-        entities={},
+        entities=entities or {},
         parse_quality=1.0,
         source_status=source_status,
         record_status=record_status,
@@ -161,7 +162,13 @@ def test_feed_filters_module_tech_source(db_session: Session) -> None:
         fetched_minutes=1,
         tech=["llm"],
     )
-    d_cve = _add_doc(db_session, endpoint="nvd-recent", title="CVE doc", fetched_minutes=2)
+    d_cve = _add_doc(
+        db_session,
+        endpoint="nvd-recent",
+        title="CVE doc",
+        fetched_minutes=2,
+        entities={"cvss": ["9.8"], "products": ["linux"]},
+    )
     d_paper = _add_doc(
         db_session,
         endpoint="arxiv-ai-llm",

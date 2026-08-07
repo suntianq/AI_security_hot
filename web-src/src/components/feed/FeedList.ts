@@ -4,7 +4,6 @@ import { esc } from "../../lib/dom";
 import { feedItemHtml } from "./FeedItem";
 import { relativeDayLabel, shanghaiDateKey, weekdayCn } from "../../lib/time";
 import { markRead } from "../../state/readState";
-import { toggleFavorite } from "../../state/favorites";
 import type { NewsViewModel } from "../../api/adapters";
 
 export interface FeedGroup {
@@ -56,17 +55,6 @@ export function mountFeedList(
 
   container.addEventListener("click", (event) => {
     const target = event.target as HTMLElement | null;
-    const favBtn = target?.closest<HTMLElement>('[data-action="fav"]');
-    if (favBtn) {
-      const id = Number(favBtn.dataset.id);
-      toggleFavorite(id);
-      favBtn.classList.toggle("on");
-      favBtn.classList.toggle("off");
-      const nowOn = favBtn.classList.contains("on");
-      favBtn.title = nowOn ? "取消收藏" : "收藏";
-      favBtn.setAttribute("aria-label", favBtn.title);
-      return;
-    }
     const item = target?.closest<HTMLElement>(".feed-item");
     const link = target?.closest<HTMLElement>("a");
     if (item && !link) {

@@ -17,6 +17,7 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
+from ai_security_hot.config.cve_follow import is_followed_cve
 from ai_security_hot.domain.enums import STRUCTURED_VULN_ENDPOINTS
 from ai_security_hot.models.tables import (
     DailyHotspotItem,
@@ -273,6 +274,7 @@ def build_overview(
             Document.endpoint_id,
             Document.tech_directions,
             Document.classified_event_type,
+            Document.entities,
             RawItem.fetched_at,
         )
         .join(RawItem, RawItem.id == Document.raw_item_id)
@@ -287,11 +289,13 @@ def build_overview(
     ).all()
 
     timeline_by_module: dict[str, list[dict]] = {}
-    for doc_id, title_original, body_text, url, ep, tech, etype, fetched_at in rows:
+    for doc_id, title_original, body_text, url, ep, tech, etype, entities, fetched_at in rows:
         topic = (tech or [None])[0] if tech else None
         if _is_noise(title_original, topic):
             continue
         module = _MODULE_BY_ENDPOINT.get(ep, "news")
+        if module == "cve" and not is_followed_cve(entities or {}, title_original, body_text or ""):
+            continue  # CVE follow policy: high CVSS AND followed software only
         bucket = timeline_by_module.setdefault(module, [])
         if len(bucket) >= per_module_max:
             continue

@@ -8,7 +8,6 @@ import { mountFeedList } from "../components/feed/FeedList";
 import { toViewModel } from "../api/adapters";
 import { errorStateHtml, emptyStateHtml, skeletonFeedHtml } from "../components/common/States";
 import { readStore } from "../state/readState";
-import { favStore } from "../state/favorites";
 import { esc } from "../lib/dom";
 import { weekdayCn } from "../lib/time";
 import type { Overview } from "../api/types";
@@ -38,7 +37,6 @@ async function load(): Promise<void> {
 
 function render(payload: Overview, date: string, dates: string[]): void {
   const read = readStore.get();
-  const fav = favStore.get();
   const totalDocs = payload.modules.reduce((n, m) => n + m.items.length, 0);
   const multiSources = payload.hotspots.filter((h) => h.source_count >= 2).length;
   const sourceCount = new Set(payload.modules.flatMap((m) => m.items.map((i) => i.source))).size;
@@ -75,7 +73,7 @@ function render(payload: Overview, date: string, dates: string[]): void {
     const el = content.querySelector<HTMLElement>(`#mod-${i}`);
     if (!el) return;
     const vms = mod.items.map((item) =>
-      toViewModel({ ...item, module: mod.id }, read, fav, payload.url_sources),
+      toViewModel({ ...item, module: mod.id }, read, payload.url_sources),
     );
     mountFeedList(el, vms, payload.labels.tech, undefined, true);
   });
