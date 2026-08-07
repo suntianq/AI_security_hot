@@ -34,7 +34,7 @@ def _client(token: str | None, admin_token: str | None = None) -> TestClient:
 def test_fails_closed_when_token_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(None)
     assert client.get("/stats").status_code == 503
-    assert client.post("/ops/tick").status_code == 503
+    assert client.post("/ops/classify").status_code == 503
 
 
 def test_health_is_exempt_from_auth(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -57,12 +57,12 @@ def test_ops_routes_require_separate_admin_token(monkeypatch: pytest.MonkeyPatch
 
     read_header = {"Authorization": "Bearer read-token"}
     admin_header = {"Authorization": "Bearer admin-token"}
-    assert client.post("/ops/tick", headers=read_header).status_code == 401
+    assert client.post("/ops/classify", headers=read_header).status_code == 401
     # Middleware accepts the admin credential. Avoid executing the expensive
     # handler by using a method that has no route (GET vs POST). With the root
     # StaticFiles mount this falls through to a 404 rather than 405, which still
     # proves the admin token passed the middleware without running the handler.
-    assert client.get("/ops/tick", headers=admin_header).status_code == 404
+    assert client.get("/ops/classify", headers=admin_header).status_code == 404
 
 
 @pytest.mark.db

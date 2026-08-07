@@ -133,8 +133,6 @@ curl http://127.0.0.1:8000/health/ready
 curl -H "Authorization: Bearer $INTEL_API_TOKEN" "http://127.0.0.1:8000/documents?limit=20"
 
 curl -H "Authorization: Bearer $INTEL_API_TOKEN" "http://127.0.0.1:8000/events?min_score=70&limit=20"
-
-curl -H "Authorization: Bearer $INTEL_API_TOKEN" "http://127.0.0.1:8000/v1/daily-hotspots?date=2026-08-03&tz=Asia/Shanghai"
 ```
 
 主要读取接口：
@@ -142,7 +140,6 @@ curl -H "Authorization: Bearer $INTEL_API_TOKEN" "http://127.0.0.1:8000/v1/daily
 - `GET /sources`
 - `GET /documents`、`GET /documents/{id}`
 - `GET /events`、`GET /events/{id}`
-- `GET /v1/daily-hotspots`
 - `GET /stats`
 - `GET /api/overview` — 公开前端聚合（热点 + 模块时间线），无需 token
 - `GET /ops/self-check`
@@ -226,7 +223,7 @@ INTEL_EMBEDDING_ENABLED=false
   数据来自 `GET /api/overview`（无需 token）。
 - **后台管理** `/admin.html`：登录后（输入 `INTEL_ADMIN_API_TOKEN`）可实时管理——
   文档/事件增删改查（打标签、软删/恢复、物理删除、重新聚类）、标签分类管理
-  （taxonomy 关键词增删）、一键分类/聚类/完整流水线触发。
+  （taxonomy 关键词增删）、一键分类/聚类触发。
 
 后台写操作全部挂 `/ops/` 前缀，由 `INTEL_ADMIN_API_TOKEN` 保护。
 

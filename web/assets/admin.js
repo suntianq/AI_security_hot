@@ -270,16 +270,13 @@ async function renderOps() {
       <h3 style="margin-bottom:12px">流水线运维</h3>
       <button class="ops-btn" onclick="runOps('classify')">一键分类</button>
       <button class="ops-btn" onclick="runOps('cluster')">一键聚类+去重</button>
-      <button class="ops-btn" onclick="runOps('tick')">完整流水线 tick</button>
     </div>
     <div class="ops-result" id="opsResult">点击按钮执行流水线操作</div>`;
 }
 async function runOps(kind) {
   $('opsResult').textContent = '执行中...';
   try {
-    const r = kind === 'tick'
-      ? await api('/ops/tick', {method:'POST'})
-      : await api('/ops/' + kind, {method:'POST'});
+    const r = await api('/ops/' + kind, {method:'POST'});
     $('opsResult').textContent = JSON.stringify(r, null, 2);
   } catch(e) { $('opsResult').textContent = '错误：' + e.message; }
 }

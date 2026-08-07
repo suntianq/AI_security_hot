@@ -31,14 +31,6 @@ from ai_security_hot.models.tables import (
     Source,
     SourceEndpoint,
 )
-from ai_security_hot.pipelines.stages import (
-    run_classify_stage,
-    run_cluster_stage,
-    run_dedupe_stage,
-    run_fetch_stage,
-    run_fulltext_stage,
-    run_normalize_stage,
-)
 from ai_security_hot.storage import repositories as repo
 
 app = FastAPI(title="AI Security Hot — Intel Backend", version="0.2.0")
@@ -311,45 +303,6 @@ def list_events(
         ]
 
 
-@app.get("/v1/daily-hotspots")
-def daily_hotspots(
-    date: str = Query(..., description="natural day YYYY-MM-DD"),
-    tz: str = Query("Asia/Shanghai"),
-    category: str | None = Query(None, description="general | vuln_db"),
-    as_of: datetime | None = Query(  # noqa: B008
-        None, description="latest frozen snapshot at or before this instant"
-    ),
-    limit: int = Query(20, ge=1, le=100),
-    min_score: int = Query(0, ge=0, le=100),
-) -> list[dict]:
-    """Read immutable snapshot data; as_of never recomputes historical state."""
-    from zoneinfo import ZoneInfo
-
-    from ai_security_hot.snapshots import read_daily_snapshot
-
-    try:
-        ZoneInfo(tz)
-        natural_date = datetime.strptime(date, "%Y-%m-%d").date()
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"invalid date/timezone: {exc}") from exc
-    if as_of is not None and as_of.tzinfo is None:
-        raise HTTPException(status_code=422, detail="as_of must include a timezone offset")
-    with session_scope() as session:
-        snapshot, items = read_daily_snapshot(
-            session,
-            natural_date=natural_date,
-            timezone=tz,
-            category=category,
-            as_of=as_of,
-            limit=limit,
-            min_score=min_score,
-        )
-        if snapshot is None:
-            raise HTTPException(
-                status_code=404, detail="no frozen snapshot exists for the requested date/as_of"
-            )
-        return items
-
 
 @app.get("/events/{event_id}")
 def get_event(event_id: int) -> dict:
@@ -432,25 +385,6 @@ def stats() -> dict:
         "events": int(event_count),
         "event_documents": int(evidence_count),
         "stages": [s.value for s in PipelineStage],
-    }
-
-
-@app.post("/ops/tick")
-def ops_tick() -> dict:
-    """Manually run one complete incremental pipeline pass."""
-    fetch = run_fetch_stage()
-    normalize = run_normalize_stage()
-    fulltext = run_fulltext_stage()
-    classify = run_classify_stage()
-    dedupe = run_dedupe_stage()
-    cluster = run_cluster_stage()
-    return {
-        "fetch": fetch,
-        "normalize": normalize,
-        "fulltext": fulltext,
-        "classify": classify,
-        "dedupe": dedupe,
-        "cluster": cluster,
     }
 
 

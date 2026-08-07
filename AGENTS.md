@@ -135,7 +135,6 @@ INTEL_RUN_LIVE=1 uv run pytest -m live -v
 - Black Hat Briefings 通过独立 playwright 容器抓取（compose `--profile playwright`
   门控）；主 worker 镜像不含浏览器，普通信源不受影响。
 - worker heartbeat 只证明调度器在运行，主动告警和跨实例任务健康仍需增强。
-- `/ops/tick` 仍同步执行，不适合暴露给不可信调用方。
 - 后台管理提供文档/事件增删改查、打标签、一键分类/聚类；完整用户体系、多管理员
   和操作审计尚未实现（单一 admin token）。
 - LLM 关系三分类、重要性/新颖性/紧急性判断和自动正式提升尚未开放。
