@@ -41,7 +41,10 @@ class BrowserBodyFetcher:
 
         A single bad page never aborts the batch; failures are simply omitted.
         """
-        from playwright.sync_api import sync_playwright
+        # Playwright is only present in the dedicated browser container; the
+        # main worker (and CI) does not install it, so the deferred import is
+        # deliberately unresolvable outside that container.
+        from playwright.sync_api import sync_playwright  # pyright: ignore[reportMissingImports]
 
         results: dict[str, str] = {}
         with sync_playwright() as p:
