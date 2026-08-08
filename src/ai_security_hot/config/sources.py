@@ -79,6 +79,17 @@ class SourceDef(BaseModel):
     trust_tier: TrustTier = TrustTier.B
     language: str | None = None
     org: str | None = None
+    # Independent reporting group for diversity/heat accounting. Several
+    # endpoints of the same editorial origin share one family so转载 doesn't
+    # count as many independent sources. Defaults to the source id itself.
+    source_family: str | None = None
+    origin_source: str | None = None
+
+    @model_validator(mode="after")
+    def _default_source_family(self) -> SourceDef:
+        if not self.source_family:
+            self.source_family = self.id
+        return self
 
 
 class SourceRegistry(BaseModel):

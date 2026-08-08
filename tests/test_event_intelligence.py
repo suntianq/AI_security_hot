@@ -30,6 +30,7 @@ def _doc(
     tech_directions: list[str] | None = None,
     event_type: str | None = "news",
     parse_quality: float = 0.8,
+    source_family: str | None = None,
 ) -> IntelDocument:
     return IntelDocument(
         id=document_id,
@@ -45,6 +46,7 @@ def _doc(
         tech_directions=tech_directions or [],
         event_type=event_type,
         parse_quality=parse_quality,
+        source_family=source_family,
     )
 
 
@@ -264,3 +266,48 @@ def test_nvd_event_has_cve_topic_and_full_identity_score() -> None:
     assert general_draft.category == "general"
     # Equal inputs must produce equal scores regardless of namespace.
     assert nvd_draft.score == general_draft.score == 79
+
+
+def test_event_score_diversity_counts_source_families() -> None:
+    # Five documents, all from one editorial family (many endpoints of the same
+    # outlet) must NOT score as diverse as five documents from five families.
+    from ai_security_hot.events.intelligence import _event_score
+
+    same_family = [
+        _doc(i, f"Title {i}", source_id=f"source-{i}", source_family="vendor-a")
+        for i in range(1, 6)
+    ]
+    multi_family = [
+        _doc(i, f"Title {i}", source_id=f"source-{i}", source_family=f"fam-{i}")
+        for i in range(1, 6)
+    ]
+    same_score = _event_score(same_family, kind="news")
+    multi_score = _event_score(multi_family, kind="news")
+    assert same_score < multi_score
+    # trust(B)=28 + identity(news)=5; family_count=1 → diversity 0;
+    # family_count=5 → min(20, 4*7)=20.
+    assert same_score == 28 + 5 + 0 + round(0.8 * 15)
+    assert multi_score == 28 + 5 + 20 + round(0.8 * 15)
+
+
+def test_event_score_falls_back_to_source_id_when_family_unknown() -> None:
+    from ai_security_hot.events.intelligence import _event_score
+
+    docs = [_doc(i, f"Title {i}", source_id=f"source-{i}") for i in range(1, 4)]
+    # source_family is None → falls back to distinct source_id (3 families).
+    assert _event_score(docs, kind="news") == 28 + 5 + min(20, 2 * 7) + round(0.8 * 15)
+
+
+def test_registry_parses_source_family() -> None:
+    from ai_security_hot.config.sources import load_registry
+
+    registry = load_registry()
+    by_id = {source.id: source for source in registry.sources}
+    assert by_id["aihot"].source_family == "ai-hot"
+    assert by_id["google-security"].source_family == "google"
+    assert by_id["google-blog"].source_family == "google"
+    assert by_id["arxiv"].source_family == "arxiv"
+    assert by_id["hackernews"].source_family == "hackernews"
+    # A source with no declared family defaults to being its own family.
+    assert by_id["nvd"].source_family == "nvd"
+    assert by_id["openai"].source_family == "openai"

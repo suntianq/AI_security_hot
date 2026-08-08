@@ -43,6 +43,11 @@ class Source(Base):
     trust_tier: Mapped[str] = mapped_column(String(1))
     language: Mapped[str | None] = mapped_column(String(16), nullable=True)
     org: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Independent reporting group: several endpoints of the same editorial
+    # origin share one family so转载 doesn't inflate diversity/heat. Defaults to
+    # the source id (each source is its own family).
+    source_family: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    origin_source: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     endpoints: Mapped[list[SourceEndpoint]] = relationship(back_populates="source")
 
@@ -555,6 +560,7 @@ class DailyHotspotSnapshot(Base):
     generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     content_hash: Mapped[str] = mapped_column(String(64))
     item_count: Mapped[int] = mapped_column(Integer, default=0)
+    algorithm_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

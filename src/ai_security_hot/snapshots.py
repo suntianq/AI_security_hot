@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
 
+from ai_security_hot.events.intelligence import SCORE_VERSION
 from ai_security_hot.models.tables import (
     DailyHotspotItem,
     DailyHotspotSnapshot,
@@ -117,6 +118,7 @@ def generate_daily_snapshot(
         generated_at=datetime.now(UTC),
         content_hash=digest,
         item_count=len(payloads),
+        algorithm_version=SCORE_VERSION,
     )
     session.add(snapshot)
     session.flush()

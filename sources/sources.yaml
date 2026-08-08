@@ -17,6 +17,7 @@ sources:
     trust_tier: B
     language: zh
     org: Virxact
+    source_family: ai-hot
   - id: cisa
     name: CISA Known Exploited Vulnerabilities
     trust_tier: A
@@ -42,6 +43,7 @@ sources:
     trust_tier: A
     language: en
     org: Google
+    source_family: google
   - id: trailofbits
     name: Trail of Bits Blog
     trust_tier: B
@@ -72,11 +74,13 @@ sources:
     trust_tier: A
     language: en
     org: arXiv
+    source_family: arxiv
   - id: hackernews
     name: Hacker News
     trust_tier: C
     language: en
     org: Y Combinator
+    source_family: hackernews
   - id: ithome
     name: IT之家
     trust_tier: C
@@ -87,6 +91,7 @@ sources:
     trust_tier: A
     language: en
     org: Google
+    source_family: google
   - id: github-trending
     name: GitHub Trending
     trust_tier: C

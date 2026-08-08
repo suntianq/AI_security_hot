@@ -12,8 +12,8 @@
 - 信源真相：`sources/sources.yaml`；分类真相：`sources/taxonomy.yaml`。
 - 非敏感模型 profile：`config/models.yaml` 和 `config/embeddings.yaml`。
 - 密钥只允许来自环境变量或本地 `.env`，不得出现在代码、YAML、日志、提交或回复中。
-- 当前 Alembic head 为 `1e8573435eb2`（daily content archives）；新增迁移后同步
-  更新本节。
+- 当前 Alembic head 为 `f29833d51084`（source_family + snapshot algorithm_version，
+  前一个为 `1e8573435eb2` daily content archives）；新增迁移后同步更新本节。
 - 当前注册表包含 18 个 source、21 个 endpoint（含 Black Hat Briefings，使用
   playwright connector 通过独立容器抓取；Hacker News 使用官方 API 端点
   `hackernews-api`，旧 `hackernews-rss` 已 `enabled: false` + `replaced_by` 退役）。

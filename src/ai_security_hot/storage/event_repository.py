@@ -44,6 +44,7 @@ from ai_security_hot.models.tables import (
     M2Run,
     M2WorkItem,
     RawItem,
+    Source,
     SourceEndpoint,
 )
 
@@ -115,6 +116,7 @@ def load_documents(
             Document.endpoint_id,
             SourceEndpoint.source_id,
             SourceEndpoint.trust_tier,
+            Source.source_family,
             Document.title_original,
             Document.body_text,
             Document.canonical_url,
@@ -129,6 +131,7 @@ def load_documents(
         )
         .join(RawItem, RawItem.id == Document.raw_item_id)
         .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
+        .join(Source, Source.id == SourceEndpoint.source_id)
         .where(Document.id.in_(document_ids))
         .order_by(Document.id)
     )
@@ -149,6 +152,7 @@ def load_documents(
             tech_directions=list(row.tech_directions or []),
             event_type=row.classified_event_type,
             parse_quality=row.parse_quality,
+            source_family=row.source_family or row.source_id,
             content_length=len(row.body_text or ""),
             entities=row.entities or {},
             company_models=list(row.company_models or []),

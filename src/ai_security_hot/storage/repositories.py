@@ -196,6 +196,8 @@ def sync_registry(session: Session, registry: SourceRegistry) -> None:
                 trust_tier=s.trust_tier.value,
                 language=s.language,
                 org=s.org,
+                source_family=s.source_family,
+                origin_source=s.origin_source,
             )
         )
     for ep in registry.endpoints:
@@ -1290,6 +1292,7 @@ def load_intel_documents(session: Session, *, retain_body: bool = True) -> list[
             Document.endpoint_id,
             SourceEndpoint.source_id,
             SourceEndpoint.trust_tier,
+            Source.source_family,
             Document.title_original,
             Document.body_text,
             Document.canonical_url,
@@ -1304,6 +1307,7 @@ def load_intel_documents(session: Session, *, retain_body: bool = True) -> list[
         )
         .join(RawItem, RawItem.id == Document.raw_item_id)
         .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
+        .join(Source, Source.id == SourceEndpoint.source_id)
         .where(*current_document_conditions())
         .order_by(Document.id)
         .execution_options(yield_per=1000)
@@ -1314,6 +1318,7 @@ def load_intel_documents(session: Session, *, retain_body: bool = True) -> list[
         endpoint_id,
         source_id,
         trust_tier,
+        source_family,
         title,
         body,
         canonical_url,
@@ -1340,6 +1345,7 @@ def load_intel_documents(session: Session, *, retain_body: bool = True) -> list[
                 identifiers=identifiers or {},
                 tech_directions=list(tech_directions or []),
                 event_type=event_type,
+                source_family=source_family or source_id,
                 parse_quality=parse_quality,
                 content_digest=None if retain_body else content_fingerprint(body),
                 content_length=len(body or ""),
@@ -1449,6 +1455,7 @@ def _iter_dedup_components(
             Document.endpoint_id,
             SourceEndpoint.source_id,
             SourceEndpoint.trust_tier,
+            Source.source_family,
             Document.title_original,
             Document.body_text,
             Document.canonical_url,
@@ -1463,6 +1470,7 @@ def _iter_dedup_components(
         )
         .join(RawItem, RawItem.id == Document.raw_item_id)
         .join(SourceEndpoint, SourceEndpoint.id == Document.endpoint_id)
+        .join(Source, Source.id == SourceEndpoint.source_id)
         .where(
             Document.dedupe_version == DEDUPE_VERSION,
             *current_document_conditions(),
@@ -1484,6 +1492,7 @@ def _iter_dedup_components(
             endpoint_id,
             source_id,
             trust_tier,
+            source_family,
             title,
             body,
             canonical_url,
@@ -1516,6 +1525,7 @@ def _iter_dedup_components(
                     tech_directions=list(tech_directions or []),
                     event_type=event_type,
                     parse_quality=parse_quality,
+                    source_family=source_family or source_id,
                     content_length=len(body or ""),
                     entities=entities or {},
                     company_models=list(company_models or []),
@@ -1590,6 +1600,7 @@ def _iter_staged_event_drafts(session: Session) -> Iterator[EventDraft]:
             document.endpoint_id,
             endpoint.source_id,
             endpoint.trust_tier,
+            source.source_family,
             document.title_original AS title,
             document.body_text AS body,
             document.canonical_url,
@@ -1605,6 +1616,7 @@ def _iter_staged_event_drafts(session: Session) -> Iterator[EventDraft]:
         JOIN documents AS document ON document.id = membership.document_id
         JOIN raw_items AS raw_item ON raw_item.id = document.raw_item_id
         JOIN source_endpoints AS endpoint ON endpoint.id = document.endpoint_id
+        JOIN sources AS source ON source.id = endpoint.source_id
         ORDER BY membership.fingerprint, document.id
         """
     ).execution_options(yield_per=1000)
@@ -1638,6 +1650,7 @@ def _iter_staged_event_drafts(session: Session) -> Iterator[EventDraft]:
                     tech_directions=list(row["tech_directions"] or []),
                     event_type=row["event_type"],
                     parse_quality=row["parse_quality"],
+                    source_family=row["source_family"] or row["source_id"],
                     content_length=len(body or ""),
                     entities=row["entities"] or {},
                     company_models=list(row["company_models"] or []),

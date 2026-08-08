@@ -28,6 +28,11 @@ _GITHUB_RELEASE_RE = re.compile(r"github\.com/([^/]+)/([^/]+?)/releases/tag/([^/
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9+.#_-]{2,}")
 _SPACE_RE = re.compile(r"\s+")
+
+# Bump whenever the _event_score formula changes so daily revisions can be
+# audited/reproduced against the algorithm that produced them.
+SCORE_VERSION = "heat-v1"
+
 _IDENTIFIER_PATTERNS = {
     "cve": re.compile(r"CVE-[0-9]{4}-[0-9]{4,19}"),
     "ghsa": re.compile(r"GHSA-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}"),
@@ -50,6 +55,9 @@ class IntelDocument:
     tech_directions: list[str]
     event_type: str | None
     parse_quality: float
+    # Independent reporting group; several endpoints of the same editorial
+    # origin share one family so转载 doesn't inflate diversity/heat.
+    source_family: str | None = None
     # Dedupe only needs a normalized content fingerprint and body length.  The
     # repository can therefore stream large bodies, compute these two values,
     # and discard the text instead of retaining the entire corpus in memory.
@@ -554,7 +562,7 @@ def _summary(doc: IntelDocument) -> str | None:
     return value[:600].rstrip()
 
 
-def _event_score(documents: list[IntelDocument], *, kind: str, source_count: int) -> int:
+def _event_score(documents: list[IntelDocument], *, kind: str) -> int:
     best_tier = min(
         (doc.trust_tier for doc in documents),
         key=lambda tier: {"A": 0, "B": 1, "C": 2}.get(tier, 3),
@@ -569,7 +577,12 @@ def _event_score(documents: list[IntelDocument], *, kind: str, source_count: int
         if kind == "arxiv"
         else 5
     )
-    diversity_score = min(20, max(0, source_count - 1) * 7)
+    # Diversity counts independent source families (several endpoints of the
+    # same editorial origin share one family), falling back to the source id
+    # when a family is unknown — so转载 by one outlet isn't scored as many
+    # independent sources.
+    family_count = len({doc.source_family or doc.source_id for doc in documents})
+    diversity_score = min(20, max(0, family_count - 1) * 7)
     quality_score = round(max((doc.parse_quality for doc in documents), default=0.0) * 15)
     return min(100, trust_score + identity_score + diversity_score + quality_score)
 
@@ -587,7 +600,6 @@ def build_event_draft(
     )
     observed = [doc.published_at or doc.fetched_at for doc in members]
     observed = [value for value in observed if value is not None]
-    source_count = len({doc.source_id for doc in members})
     memberships = tuple(
         EventMembership(doc.id, doc.trust_tier, reasons[doc.id])
         for doc in sorted(members, key=lambda item: item.id)
@@ -600,7 +612,7 @@ def build_event_draft(
         title=primary.title.strip()[:240],
         summary=_summary(primary),
         status="detected",
-        score=_event_score(members, kind=key.kind, source_count=source_count),
+        score=_event_score(members, kind=key.kind),
         evidence_level=evidence_level,
         first_seen_at=min(observed) if observed else None,
         last_seen_at=max(observed) if observed else None,
