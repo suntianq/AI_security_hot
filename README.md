@@ -219,6 +219,12 @@ INTEL_CLASSIFICATION_MODE=rule
 INTEL_SEMANTIC_ENRICHMENT_ENABLED=false
 ```
 
+`INTEL_CLASSIFICATION_MODE=hybrid` 时,分类采用"规则先行 + LLM 处理新闻/研究歧义":
+LLM 会自动分配 `tech_directions`(llm/agent/ai_for_security/security_for_ai/
+system_security)、`company_models` 与 `event_type`,输出经 taxonomy 校验、不会产生
+taxonomy 之外的新标签。结构化漏洞(CVE)走规则硬边界,不调用 LLM。新标签需先加入
+`sources/taxonomy.yaml`(或后台 `/ops/taxonomy`)。
+
 Embedding 使用独立的 `config/embeddings.yaml` 与 `INTEL_EMBEDDING_*` 配置。它需要真正
 支持 `/embeddings` 的模型，不能直接使用聊天模型，默认同样关闭：
 
