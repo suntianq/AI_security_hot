@@ -348,10 +348,10 @@ def _default_parser(connector: ConnectorKind) -> str:
 
 def run_fulltext_stage(limit: int = 20, lease_seconds: int = 300) -> dict:
     """Second-fetch full article text for fulltext-enabled endpoints whose feed
-    only gave a summary (stage NORMALIZED → DONE). SPA sources stay off — they
-    keep title + link only (Playwright not worth the cost)."""
+    only gave a summary (stage NORMALIZED → DONE). ``browser_fetch`` endpoints
+    are left for the dedicated browser container (``intel browser-fetch``)."""
     registry = load_registry()
-    ft_policies = {e.id: e for e in registry.endpoints if e.fulltext}
+    ft_policies = {e.id: e for e in registry.endpoints if e.fulltext and not e.browser_fetch}
     stats = {"enriched": 0, "skipped": 0, "failed": 0}
     if not ft_policies:
         return stats
@@ -398,6 +398,54 @@ def run_fulltext_stage(limit: int = 20, lease_seconds: int = 300) -> dict:
                 repo.apply_fulltext(session, raw.id, doc.id, body_text=None, parse_quality=None)
             stats["failed"] += 1
     ctx.close()
+    return stats
+
+
+def run_browser_fetch_stage(limit: int = 20, lease_seconds: int = 300) -> dict:
+    """Enrich NORMALIZED docs from ``browser_fetch`` endpoints using a real
+    browser (stage NORMALIZED → DONE). Runs in the dedicated Playwright
+    container — the main worker image has no browser."""
+    from ai_security_hot.connectors.browser import BrowserBodyFetcher
+
+    registry = load_registry()
+    bf_policies = {e.id: e for e in registry.endpoints if e.browser_fetch}
+    stats = {"enriched": 0, "skipped": 0, "failed": 0}
+    if not bf_policies:
+        return stats
+
+    with session_scope() as session:
+        pairs = repo.claim_fulltext_candidates(
+            session, list(bf_policies), limit=limit, lease_seconds=lease_seconds
+        )
+
+    urls = {doc.canonical_url for _raw, doc in pairs if doc.canonical_url}
+    fetcher = BrowserBodyFetcher()
+    bodies = fetcher.fetch(urls)
+
+    for raw, doc in pairs:
+        body = bodies.get(doc.canonical_url or "")
+        try:
+            if body and len(body) > len(doc.body_text or ""):
+                quality = score_parse_quality(
+                    title=doc.title_original,
+                    published_at_present=doc.published_at_utc is not None,
+                    body_text=body,
+                    min_body_len=FULLTEXT_MIN_BODY,
+                )
+                with session_scope() as session:
+                    repo.apply_fulltext(
+                        session, raw.id, doc.id, body_text=body, parse_quality=quality
+                    )
+                stats["enriched"] += 1
+            else:
+                with session_scope() as session:
+                    repo.apply_fulltext(session, raw.id, doc.id, body_text=None, parse_quality=None)
+                stats["skipped"] += 1
+        except Exception as e:
+            log.warning("browser fetch failed for doc %s (%s): %s", doc.id, doc.canonical_url, e)
+            with session_scope() as session:
+                repo.apply_fulltext(session, raw.id, doc.id, body_text=None, parse_quality=None)
+            stats["failed"] += 1
     return stats
 
 

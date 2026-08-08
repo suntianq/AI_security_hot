@@ -185,23 +185,19 @@ uv run intel stats                # 查看数据量与流水线状态
 uv run intel export --format jsonl --out documents.jsonl
 ```
 
-### Black Hat Briefings（Cloudflare 防护源）
+### 浏览器全文抓取（对 403/JS 信源）
 
-Black Hat 议题由独立 Playwright 容器抓取（通过 Cloudflare 质询），写入共享卷，
-主 worker 的 fetch 阶段再读取入库。手动触发一次：
+部分信源（如 openai.com）对非浏览器客户端返回 403,静态 fulltext 拿不到正文。
+这些端点在 `sources/sources.yaml` 声明 `fulltext: true` + `browser_fetch: true`。
+主 worker 会跳过它们,由独立 Playwright 容器按需抓取:
 
 ```bash
-docker compose --profile playwright run --rm playwright
+docker build -f Dockerfile.browser -t ai-security-hot:browser .   # 首次
+docker compose --profile browser-fetch run --rm browser-fetch     # 抓取待补全文的文档
 ```
 
-可用宿主 cron 每周自动触发（例如每周日 03:00）：
-
-```cron
-0 3 * * 0  cd /path/to/ai_security_hot && docker compose --profile playwright run --rm playwright >> /var/log/blackhat_fetch.log 2>&1
-```
-
-Black Hat 是周期性会议（US 每年 8 月、Asia 每年 5 月左右），会议结束后可
-`docker compose --profile playwright stop` 或移除 endpoint。
+也可用宿主 cron 每日触发。`BrowserBodyFetcher`（`connectors/browser.py`）是可复用的
+无头 Chromium 抓取类;新增类似信源只需在 sources.yaml 标记 `browser_fetch: true`。
 
 ## 可选模型配置
 
@@ -291,8 +287,8 @@ INTEL_RUN_LIVE=1 uv run pytest -m live -v
 - 语义抽取默认处于影子模式，不会自动改写正式事件。
 - Embedding 候选召回默认关闭，正式关系裁决仍以确定性规则和人工门禁为主。
 - 正式语义事件提升必须显式执行 `event-promote --apply`。
-- 动态网页抓取仅用于 Cloudflare 防护的信源（Black Hat Briefings）：通过
-  `--profile playwright` 的独立容器抓取，主 worker 不内置浏览器。
+- 主 worker 不内置浏览器；需要真实浏览器渲染的信源（如 openai.com 对非浏览器
+  客户端返回 403）由独立的 Playwright 容器按需抓取全文。
 - 主动告警、邮件/飞书投递尚未提供。
 - RSS 等窗口型来源只能抓取上游当前仍返回的内容，空库冷启动不能恢复窗口之外的历史。
 - Hacker News 通过官方 API 抓取（旧 RSS 已退役）；链接帖正文依赖 fulltext 抓取，
@@ -306,7 +302,7 @@ src/ai_security_hot/  应用、API、流水线、模型和存储代码
 sources/              信源注册表与分类体系
 config/               非敏感 LLM 与 Embedding profile
 migrations/           Alembic 数据库迁移
-scripts/              Black Hat 抓取等运维脚本
+scripts/              浏览器抓取等运维脚本
 evaluation/           JSON/JSONL 评测资产
 tests/                单元、数据库集成和可选真实信源测试
 ```

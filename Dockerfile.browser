@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+
+# Browser-fetch image: the app + a real Chromium (Playwright), used to enrich
+# sources that 403 non-browser clients (e.g. openai.com). Build separately:
+#   docker build -f Dockerfile.browser -t ai-security-hot:browser .
+# then run via:  docker compose --profile browser-fetch run --rm browser-fetch
+FROM mcr.microsoft.com/playwright:v1.49.0-noble
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.6 /uv /uvx /bin/
+
+ENV PYTHONUNBUFFERED=1 \
+    UV_LINK_MODE=copy \
+    UV_COMPILE_BYTECODE=1
+
+WORKDIR /app
+
+# Install deps first for layer caching
+COPY pyproject.toml uv.lock ./
+RUN uv sync -v --frozen --no-install-project --no-dev
+
+COPY README.md ./README.md
+COPY src ./src
+COPY migrations ./migrations
+COPY alembic.ini ./alembic.ini
+COPY sources ./sources
+COPY config ./config
+RUN uv sync --frozen --no-dev
+
+CMD ["uv", "run", "intel", "browser-fetch"]

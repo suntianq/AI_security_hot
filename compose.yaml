@@ -78,7 +78,6 @@ services:
         required: false
     volumes:
       - blobdata:/app/data/blobs
-      - blackhat-data:/shared/blackhat:ro
       - ./config:/app/config:ro
     depends_on:
       migrate:
@@ -95,26 +94,25 @@ services:
       start_period: 60s
     restart: unless-stopped
 
-  # Cloudflare-protected fetch (Black Hat) — profile-gated, not a default
-  # dependency (MVP 4.1). Uses the official Playwright image (bundles Chromium)
-  # and writes sessions.json to the shared blackhat-data volume for the worker.
-  playwright:
-    image: "mcr.microsoft.com/playwright:v1.49.0-noble"
-    profiles: ["playwright"]
-    working_dir: /app
+  # Real-browser full-text fetch for sources that 403 non-browser clients
+  # (e.g. openai.com). Profile-gated: build/run only when needed with
+  #   docker build -f Dockerfile.browser -t ai-security-hot:browser .
+  #   docker compose --profile browser-fetch run --rm browser-fetch
+  browser-fetch:
+    image: ai-security-hot:browser
+    profiles: ["browser-fetch"]
+    environment: *app-environment
+    env_file:
+      - path: .env
+        required: false
     volumes:
-      - ./scripts:/app/scripts:ro
-      - blackhat-data:/shared/blackhat
-    command:
-      - python
-      - /app/scripts/blackhat_fetch.py
-      - --url
-      - "https://blackhat.com/us-26/briefings/schedule/"
-      - --out
-      - "/shared/blackhat/sessions.json"
+      - blobdata:/app/data/blobs
+      - ./config:/app/config:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: "no"
 
 volumes:
   pgdata:
   blobdata:
-  blackhat-data:

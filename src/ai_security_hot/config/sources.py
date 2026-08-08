@@ -55,6 +55,12 @@ class EndpointPolicy(BaseModel):
     # second-fetch full text from the article URL when the feed only gives a
     # summary AND the page is static HTML (SPA pages need Playwright — leave off)
     fulltext: bool = False
+    # Fetch full text with a real browser (Playwright) instead of the static
+    # fetcher, for sites that 403 non-browser clients (e.g. openai.com). The
+    # main worker's fulltext stage skips these; the dedicated browser container
+    # runs `intel browser-fetch` to enrich them. Requires fulltext: true so the
+    # documents land in the NORMALIZED stage.
+    browser_fetch: bool = False
     # optional per-connector options, e.g. rest: {list_key, id_field, nested_key}
     options: dict = Field(default_factory=dict)
 

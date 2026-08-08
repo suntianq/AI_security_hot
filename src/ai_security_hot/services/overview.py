@@ -2,7 +2,7 @@
 
 Produces the data the public frontend needs in one query pass — the daily
 hotspots (multi-source first, general news only) plus module-grouped timelines
-(news / papers / cve / trending / blackhat). This is the same read logic the
+(news / papers / cve / trending). This is the same read logic the
 old ``scripts/gen_daily.py`` used, now served over the API so the frontend is a
 live page instead of a regenerated HTML file.
 """
@@ -100,7 +100,7 @@ NOISE_KEYWORDS = (
 
 HOT_TOP_N = 10
 # Per-module cap for the timeline so a bulk module (cve) never starves the
-# smaller modules (papers / trending / blackhat) behind a single global limit.
+# smaller modules (papers / trending) behind a single global limit.
 PER_MODULE_MAX = 200
 TIMEZONE_OFFSET_HOURS = 8  # Asia/Shanghai (no DST)
 
@@ -137,7 +137,6 @@ MODULES: list[dict] = [
     },
     {"id": "cve", "label": "CVE 漏洞", "endpoints": ["nvd-recent", "cisa-kev"]},
     {"id": "trending", "label": "开源 Trending", "endpoints": ["github-trending-rss"]},
-    {"id": "blackhat", "label": "Black Hat", "endpoints": ["blackhat-us26-briefings"]},
 ]
 
 _MODULE_BY_ENDPOINT = {ep: m["id"] for m in MODULES for ep in m["endpoints"]}

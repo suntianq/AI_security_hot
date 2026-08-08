@@ -177,8 +177,8 @@ def test_source_registry_key_endpoints() -> None:
         "google-security-rss": ("https://blog.google/security/rss/", "rss", "rss-default-v1"),
     }
 
-    assert len(registry.sources) == 18
-    assert len(registry.endpoints) == 21
+    assert len(registry.sources) == 17
+    assert len(registry.endpoints) == 20
     assert len({source.id for source in registry.sources}) == len(registry.sources)
     assert len({endpoint.id for endpoint in registry.endpoints}) == len(registry.endpoints)
     for endpoint_id, (url, connector, parser) in expected.items():
@@ -186,14 +186,6 @@ def test_source_registry_key_endpoints() -> None:
         assert endpoint.url == url
         assert endpoint.connector.value == connector
         assert endpoint.parser == parser
-
-    # Black Hat briefings: playwright connector, weekly cadence, shared-volume data.
-    bh = registry.endpoint("blackhat-us26-briefings")
-    assert bh.connector.value == "playwright"
-    assert bh.parser == "blackhat-v1"
-    assert bh.enabled is True
-    assert bh.schedule.interval_minutes == 10080
-    assert bh.options["blackhat"]["data_file"] == "/shared/blackhat/sessions.json"
 
     legacy_aihot = registry.endpoint("aihot-selected-rss")
     assert legacy_aihot.enabled is False

@@ -14,8 +14,7 @@
 - 密钥只允许来自环境变量或本地 `.env`，不得出现在代码、YAML、日志、提交或回复中。
 - 当前 Alembic head 为 `f29833d51084`（source_family + snapshot algorithm_version，
   前一个为 `1e8573435eb2` daily content archives）；新增迁移后同步更新本节。
-- 当前注册表包含 18 个 source、21 个 endpoint（含 Black Hat Briefings，使用
-  playwright connector 通过独立容器抓取；Hacker News 使用官方 API 端点
+- 当前注册表包含 17 个 source、20 个 endpoint（Hacker News 使用官方 API 端点
   `hackernews-api`，旧 `hackernews-rss` 已 `enabled: false` + `replaced_by` 退役）。
 
 ## 开始任何任务前
@@ -70,6 +69,11 @@
 - Hacker News 通过官方 Firebase API（`connectors/hackernews.py`，`ConnectorKind.
   HACKERNEWS`）抓取结构化条目 + 提交者正文；链接帖正文由 `fulltext` 二次抓取。
   旧 hnrss RSS 只提供元数据，已退役。
+- 对非浏览器客户端 403 的信源（如 openai.com）用 `browser_fetch`：端点声明
+  `fulltext: true` + `browser_fetch: true`，主 worker 的 fulltext 阶段跳过它，
+  由独立 Playwright 容器 `uv run intel browser-fetch` 认领 NORMALIZED 文档、
+  用 `connectors/browser.py::BrowserBodyFetcher` 渲染页面并提取正文写回。
+  新增此类信源只需在 sources.yaml 声明该标志 + 跑一次浏览器容器。
 
 ## 修改代码的习惯
 
@@ -146,8 +150,8 @@ INTEL_RUN_LIVE=1 uv run pytest -m live -v
 
 ## 当前已知边界
 
-- Black Hat Briefings 通过独立 playwright 容器抓取（compose `--profile playwright`
-  门控）；主 worker 镜像不含浏览器，普通信源不受影响。
+- 主 worker 镜像不含浏览器；对非浏览器客户端 403 的信源（如 openai.com）由独立的
+  Playwright 容器按需抓取全文（见 `connectors/browser.py` 与 `intel browser-fetch`）。
 - worker heartbeat 只证明调度器在运行，主动告警和跨实例任务健康仍需增强。
 - 后台管理提供文档/事件增删改查、打标签、一键分类/聚类；完整用户体系、多管理员
   和操作审计尚未实现（单一 admin token）。

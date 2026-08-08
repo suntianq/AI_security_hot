@@ -116,6 +116,19 @@ def fulltext(limit: int = 20) -> None:
     typer.echo(json.dumps(run_fulltext_stage(limit=limit)))
 
 
+@app.command("browser-fetch")
+def browser_fetch(limit: int = 20) -> None:
+    """Fetch full article bodies with a real browser (Playwright) for
+    browser_fetch endpoints (e.g. openai.com which 403s non-browser clients).
+
+    Run inside the dedicated Playwright container; the main worker has none.
+    """
+    from ai_security_hot.pipelines.stages import run_browser_fetch_stage
+
+    _setup_logging()
+    typer.echo(json.dumps(run_browser_fetch_stage(limit=limit)))
+
+
 @app.command()
 def classify(limit: int = 500) -> None:
     """Classify documents in configured rule or cached hybrid mode (M1.3)."""
